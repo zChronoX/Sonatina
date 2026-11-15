@@ -20,6 +20,7 @@
 static NTSTATUS SontAddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo);
 static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources);
 static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp);
+static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp);
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry_path)
 {
@@ -29,8 +30,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry_path)
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    /* Private control interface; everything else falls through to PortCls. */
+    /* Private control interface + PnP teardown; everything else falls through to PortCls. */
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = SontDeviceControl;
+    driver->MajorFunction[IRP_MJ_PNP] = SontPnpDispatch;
     return STATUS_SUCCESS;
 }
 
@@ -178,4 +180,32 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
     irp->IoStatus.Status = status;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return status;
+}
+
+static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+    PSONT_DEVICE_EXTENSION ext = SONT_GET_EXTENSION(device);
+
+    if (stack->MinorFunction == IRP_MN_SURPRISE_REMOVAL ||
+        stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {
+        if (ext->ControlInterfaceRegistered) {
+            (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, FALSE);
+        }
+    }
+
+    if (stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {
+        SontTransportTeardown(&ext->Transport);
+        ext->TransportReady = FALSE;
+        if (ext->ControlInterfaceRegistered) {
+            RtlFreeUnicodeString(&ext->ControlInterfaceName);
+            ext->ControlInterfaceRegistered = FALSE;
+        }
+        if (ext->LowerDeviceObject != NULL) {
+            ObDereferenceObject(ext->LowerDeviceObject);
+            ext->LowerDeviceObject = NULL;
+        }
+    }
+
+    return PcDispatchIrp(device, irp);
 }

@@ -111,8 +111,11 @@ reconnects the headset with the new parameters.
   physical connection via `SontRegisterAudioSubdevices` in `SontStartDevice`.
 - **Done**: "Sonatina Bluetooth audio Wave" appears in Sound settings; KS Studio shows one
   render pin; 30 min of silence under Driver Verifier with no underrun errors.
-- **Status**: subdevice/miniport implementation written and wired into
-  `SonatinaAudio.vcxproj`; WDK compilation in CI and VM runtime test pending.
+- **Status**: compiles and links cleanly (`0 warnings`, `0 errors`) in Debug &
+  Release x64 WDK CI (run #8 `c3b6513`); added `KSCATEGORY_REALTIME` /
+  `PKEY_AudioEndpoint_Supports_EventDriven_Mode` to `SonatinaAudio.inf` and
+  `IRP_MN_REMOVE_DEVICE` teardown in `driver.c`. VM runtime verification (A3)
+  pending.
 
 ### D3. BRB transport + AVDTP handshake `[ ]`
 - **Why**: this is the real connection to the headset; everything else is local.

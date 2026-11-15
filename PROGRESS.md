@@ -36,15 +36,18 @@
   / `<bthddi.h>` / `<bthguid.h>` / `<initguid.h>`, `PcGetPhysicalDeviceObject`
   (2 argomenti), `L2CAP_CHANNEL_HANDLE *`, `FileDigestAlgorithm=sha256`,
   `EP\0` in `SonatinaAudio.inf`.
-- D2 avviata (implementata in codice, compilazione CI WDK e test su VM da
-  eseguire): vendoring minimale MS-PL di SysVAD in `driver/third_party/sysvad/`
-  (`LICENSE`, `NOTICE.txt`, `NewDelete.h/.cpp`, `simple.h`), implementazione di
+- D2 parziale (compila e linka con 0 warning e 0 errori in WDK CI Debug/Release
+  x64, run #8 `c3b6513`; verifica runtime su VM in attesa di A3): vendoring
+  minimale MS-PL di SysVAD in `driver/third_party/sysvad/` (`LICENSE`,
+  `NOTICE.txt`, `NewDelete.h/.cpp`, `simple.h`), implementazione di
   `CMiniportTopologySonatina` (`src/miniport_topology.*`, ponte bridge +
   `KSPROPSETID_Jack` cuffie stereo) e `CMiniportWaveRTSonatina` /
   `CMiniportWaveRTStreamSonatina` (`src/miniport_wavert.*`, sink PCM 16-bit
   stereo 44.1-96 kHz, `EX_TIMER` ad alta risoluzione e progressione QPC intera),
-  collegamento in `SontStartDevice` (`driver.c`) via `SontRegisterAudioSubdevices`
-  e in `SonatinaAudio.vcxproj` (`portcls.lib`, `stdunk.lib`, `libcntpr.lib`).
+  collegamento in `SontStartDevice` (`driver.c`) via `SontRegisterAudioSubdevices`,
+  cleanup `IRP_MN_REMOVE_DEVICE` in `SontPnpDispatch`, `KSCATEGORY_REALTIME` +
+  `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e `SonatinaAudio.vcxproj`
+  (`portcls.lib`, `stdunk.lib`, `libcntpr.lib`).
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`
@@ -68,4 +71,4 @@
 - 2026-11-15 Preparati A1 (`driver/tests/*`, `tests/test_driver_vectors.py`), A2 (`SonatinaAudio.vcxproj`, `build.ps1`), A6 (`driver/CONTRIBUTING.md`) e corretti bug PortCls/BTHDDI in `driver.c`/`brb_transport.c`/`codec_sbc.c`.
 - 2026-11-15 Verificato A1/T1 con WinLibs `gcc 16.2.0`: `28 vectors + 5 math cases checked, 0 failures`; fix in `avdtp.c` (`uint8_t out[4]`) e auto-discovery WinGet in `run_host_tests.ps1`.
 - 2026-11-15 Completati A2 + A5 in GitHub Actions CI (run #5, commit `650c4ce`): `SonatinaAudio.sys` compilato (Debug/Release x64) + `InfVerif /w` verdi + 77 test Python + test host A1 su clang verdi.
-- 2026-11-15 Implementato D2 (`third_party/sysvad/*`, `src/miniport_topology.*`, `src/miniport_wavert.*`, `src/miniport_subdevices.h`, integrazione in `driver.c` e `SonatinaAudio.vcxproj`): in attesa di push su CI per verifica WDK C++.
+- 2026-11-15 Verificato D2 in WDK CI (run #8, commit `c3b6513`): `SonatinaAudio.sys` (WaveRT + Topology + BRB) compila e linka con 0 warning/errori; aggiunti `KSCATEGORY_REALTIME` + `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e cleanup `IRP_MN_REMOVE_DEVICE` in `driver.c` durante l'audit pre-VM.
