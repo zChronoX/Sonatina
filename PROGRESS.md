@@ -58,15 +58,17 @@
   `SontTransportReceive` in `src/brb_transport.*` e worker kernel
   `SontSignalingWorker` (`src/driver.c`, `src/device.h`) con stop pulito su
   `IRP_MN_SURPRISE_REMOVAL`/`IRP_MN_REMOVE_DEVICE`.
-- D4 implementato lato host + kernel (compilazione WDK CI e verifica runtime su
-  VM A3 da eseguire): vendored `google/libsbc` (Apache-2.0, zero float/malloc)
-  in `driver/third_party/sbc/`, integrazione in `src/codec_sbc.c`
-  (`SONATINA_WITH_LIBSBC` + `SontSbcEncodedFrameBytes`), nuovo modulo
-  `src/media_stream.h/.c` (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tap PCM
-  ciclico in `CMiniportWaveRTStreamSonatina` (`SONT_PCM_SOURCE` in
-  `miniport_wavert.cpp`), loop media `SontRunSbcMediaLoop` (`src/driver.c`) su
-  `MediaChannel` (`0x0017`), aggiornamento `SonatinaAudio.vcxproj` e test host
-  con encoding/decoding SBC reale a 1 kHz + packetizer RTP.
+- D4 parziale (compila e linka con 0 warning e 0 errori in WDK CI Debug/Release
+  x64, run #14 `e679e4c`; verifica runtime su VM in attesa di A3): vendored
+  `google/libsbc` (Apache-2.0, zero float/malloc) in `driver/third_party/sbc/`,
+  integrazione in `src/codec_sbc.c` (`SONATINA_WITH_LIBSBC` +
+  `SontSbcEncodedFrameBytes`), nuovo modulo `src/media_stream.h/.c`
+  (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tap PCM ciclico in
+  `CMiniportWaveRTStreamSonatina` (`SONT_PCM_SOURCE` in `miniport_wavert.cpp`),
+  loop media `SontRunSbcMediaLoop` (`src/driver.c`) su `MediaChannel`
+  (`0x0017`), aggiornamento `SonatinaAudio.vcxproj` + fix compatibilita'
+  MSVC/WDK (`C4201`, `C4242`, `SBC_CLZ`, inizializzatori C89/C11) e test host
+  con encoding/decoding SBC reale a 1 kHz + packetizer RTP (`36 vectors + 5 math cases, 0 failures`).
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`
@@ -91,3 +93,4 @@
 - 2026-11-15 Verificato A1/T1 con WinLibs `gcc 16.2.0`: `28 vectors + 5 math cases checked, 0 failures`; fix in `avdtp.c` (`uint8_t out[4]`) e auto-discovery WinGet in `run_host_tests.ps1`.
 - 2026-11-15 Completati A2 + A5 in GitHub Actions CI (run #5, commit `650c4ce`): `SonatinaAudio.sys` compilato (Debug/Release x64) + `InfVerif /w` verdi + 77 test Python + test host A1 su clang verdi.
 - 2026-11-15 Verificato D2 in WDK CI (run #8, commit `c3b6513`): `SonatinaAudio.sys` (WaveRT + Topology + BRB) compila e linka con 0 warning/errori; aggiunti `KSCATEGORY_REALTIME` + `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e cleanup `IRP_MN_REMOVE_DEVICE` in `driver.c` durante l'audit pre-VM.
+- 2026-11-15 Verificati D3 e D4 in WDK CI (run #10 `ea2d3e3` e run #14 `e679e4c`): session engine AVDTP (`avdtp_session.c`), `SontSignalingWorker` + `SontRunSbcMediaLoop` (`driver.c`), tap WaveRT (`miniport_wavert.cpp`), `media_stream.c` e `google/libsbc` (`third_party/sbc/`) compilano e linkano con 0 warning/errori su x64 Debug/Release + `InfVerif /w` + test Python + `36 vectors + 5 math cases` host verdi.

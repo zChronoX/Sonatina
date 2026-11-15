@@ -99,14 +99,14 @@ selected codec in kernel. Design: `sonatina/driver/DESIGN.md`.
   teardown on `IRP_MN_REMOVE_DEVICE`. Acceptance: wire bytes identical to the
   Python reference (verified in host tests) and handshake completes cleanly
   against a real headset in VM.
-- **D4 - SBC media**: implemented locally (host tests passing; WDK CI compile +
-  VM runtime verification pending). Vendored Apache-2.0 `google/libsbc` in
-  `third_party/sbc/`, switched `src/codec_sbc.c` (`SONATINA_WITH_LIBSBC`), added
-  `src/media_stream.h/.c` (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tapped
-  WaveRT cyclic DMA bytes into `SONT_PCM_SOURCE` (`miniport_wavert.cpp`), and
-  wired `SontRunSbcMediaLoop` (`driver.c`) -> `BRB_L2CA_ACL_TRANSFER` on
-  `MediaChannel` (PSM `0x0017`). Acceptance: audible audio, bitrate within 5%
-  of `sonatina.sbc.bitrate`.
+- **D4 - SBC media**: partial (compiles and links cleanly in Debug & Release x64
+  WDK CI run #14 `e679e4c`; host tests passing; VM runtime verification A3
+  pending). Vendored Apache-2.0 `google/libsbc` in `third_party/sbc/`, switched
+  `src/codec_sbc.c` (`SONATINA_WITH_LIBSBC`), added `src/media_stream.h/.c`
+  (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tapped WaveRT cyclic DMA bytes
+  into `SONT_PCM_SOURCE` (`miniport_wavert.cpp`), and wired `SontRunSbcMediaLoop`
+  (`driver.c`) -> `BRB_L2CA_ACL_TRANSFER` on `MediaChannel` (PSM `0x0017`).
+  Acceptance: audible audio, bitrate within 5% of `sonatina.sbc.bitrate`.
 - **D5 - service + profiles**: native service, registry
   `Services\SonatinaAudio\Parameters`, reconnect on change.
 - **D6 - ABR/flush/latency**: tx-time measurement, thresholds, flush timeout.

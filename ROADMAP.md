@@ -16,12 +16,12 @@ deliverable, **Done** = verifiable acceptance.
 
 | Area | State |
 |---|---|
-| Bluetooth audio reference stack (Python) | `[x]` 76 tests green, loopback demo exits 0 |
-| SBC/RTP/AVDTP logic | `[x]` in Python, `[x]` ported to portable C |
+| Bluetooth audio reference stack (Python) | `[x]` 77 tests green (8 test files non-registry + 9 `test_reg`), loopback demo exits 0 |
+| SBC/RTP/AVDTP logic | `[x]` in Python, `[x]` ported to portable C (`google/libsbc` Apache-2.0 vendored) |
 | Kernel driver design | `[x]` `sonatina/driver/DESIGN.md` |
-| Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles x64 + `InfVerif /w` green in CI; VM load pending |
-| Audio endpoints (WaveRT/topology) | `[ ]` to vendor from SysVAD |
-| Real L2CAP / headset | `[ ]` |
+| Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles Debug/Release x64 + `InfVerif /w` green in CI (`e679e4c`); VM load pending |
+| Audio endpoints (WaveRT/topology) | `[~]` implemented from MS-PL SysVAD, compiles x64 in CI; VM runtime pending |
+| Real L2CAP / SBC media path | `[~]` AVDTP + `google/libsbc` + RTP media loop compiled in CI (`e679e4c`); headset/VM runtime pending |
 | Service (native) | `[~]` Python service works; native exe missing |
 | Signing / installer | `[ ]` |
 
@@ -117,19 +117,19 @@ reconnects the headset with the new parameters.
   `IRP_MN_REMOVE_DEVICE` teardown in `driver.c`. VM runtime verification (A3)
   pending.
 
-### D3. BRB transport + AVDTP handshake `[ ]`
+### D3. BRB transport + AVDTP handshake `[~]`
 - **Why**: this is the real connection to the headset; everything else is local.
 - **Do**: `src/brb_transport.c` (added cancellable `SontTransportReceive` via `BRB_L2CA_ACL_TRANSFER` IN + `StopEvent`/timeout) + portable AVDTP initiator session engine (`src/avdtp.c` SEP list / `SontAvdtpSelectSbcConfig` + `src/avdtp_session.h/.c`: `Discover` → `GetCapabilities` → `SetConfiguration` → `Open` → `Start`, plus `Suspend`/`Resume`/`Close`/`Abort`) + PASSIVE_LEVEL `SontSignalingWorker` in `driver.c` opening PSM `0x0019` and PSM `0x0017` and updating `ext->State` cleanly on completion / tearing down safely on `IRP_MN_REMOVE_DEVICE`.
 - **Done**: against a real headset the driver logs the SEP list and the chosen
   SBC configuration; the bytes are identical to the Python reference.
-- **Status**: portable C session state machine, 36 parity vectors + host tests verified vs `sonatina/avdtp.py`, and kernel D3 worker verified compiling cleanly in WDK CI (run #10 `ea2d3e3`); VM runtime verification (A3) pending.
+- **Status**: portable C session state machine, 36 parity vectors + host tests verified vs `sonatina/avdtp.py`, and kernel D3 worker verified compiling cleanly in WDK CI (run #10 `ea2d3e3` e run #14 `e679e4c`); VM runtime verification (A3) pending.
 
-### D4. SBC media path `[ ]`
+### D4. SBC media path `[~]`
 - **Why**: first audible, measurable parity point.
 - **Do**: Apache-2.0 `google/libsbc` vendored in `third_party/sbc/` (`SONATINA_WITH_LIBSBC`), `src/codec_sbc.*` + `src/media_stream.*` (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), WaveRT cyclic DMA tap (`SONT_PCM_SOURCE` in `miniport_wavert.cpp`), and PASSIVE_LEVEL `SontRunSbcMediaLoop` (`driver.c`) encoding PCM frames into RTP packets sent via `BRB_L2CA_ACL_TRANSFER` (`MediaChannel`, PSM `0x0017`).
 - **Done**: 1 kHz tone audible; measured bitrate within 5% of
   `SontSbcBitrateKbps`; `Current\Bitrate` and `Current\Packets` advance at 1 Hz.
-- **Status**: real `google/libsbc` 1 kHz encode/decode round-trip + RTP packetizer host tests (`36 vectors + 5 math cases`, 0 failures) verified locally and wired into `SonatinaAudio.vcxproj`; WDK CI compile + VM runtime verification (A3) pending.
+- **Status**: compiles and links cleanly (`0 warnings`, `0 errors`) in Debug & Release x64 WDK CI (run #14 `e679e4c`), real `google/libsbc` 1 kHz encode/decode round-trip + RTP packetizer host tests (`36 vectors + 5 math cases`, 0 failures) verified locally and in CI; VM runtime verification (A3) pending.
 
 ### D5. Service, profiles and reconnect `[ ]`
 - **Why**: users change codec/bitpool per headset; the change must apply.
