@@ -529,6 +529,8 @@ CMiniportWaveRTStreamSonatina::CMiniportWaveRTStreamSonatina(
       m_ElapsedNotifyHns(0),
       m_AvgBytesPerSec(0),
       m_BlockAlign(0),
+      m_SampleRate(0),
+      m_Channels(0),
       m_LastDmaHns(0),
       m_ByteRemainderHns(0),
       m_PlayOffset(0),
@@ -601,6 +603,18 @@ CMiniportWaveRTStreamSonatina::Init(
     m_PortStream = PortStream;
     m_AvgBytesPerSec = WaveFormat->nAvgBytesPerSec;
     m_BlockAlign = WaveFormat->nBlockAlign;
+    m_SampleRate = WaveFormat->nSamplesPerSec;
+    m_Channels = WaveFormat->nChannels;
+
+    if (m_Miniport->PcmSource() != NULL)
+    {
+        PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&src->Lock, &oldIrql);
+        src->StreamSampleRate = m_SampleRate;
+        src->StreamChannels = m_Channels;
+        KeReleaseSpinLock(&src->Lock, oldIrql);
+    }
 
     (VOID)KeQueryPerformanceCounter(&m_QpcFrequency);
     if (m_QpcFrequency.QuadPart <= 0)
@@ -980,7 +994,10 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
         bytes -= bytes % m_BlockAlign;
     }
 
-    /* D2 silence sink: consume cyclic PCM timing without forwarding over BT yet. */
+    PVOID dma = m_DmaBuffer;
+    ULONG dmaSize = m_DmaBufferSize;
+    ULONG oldPlayOffset = (ULONG)m_PlayOffset;
+
     m_LinearPosition += bytes;
     m_PlayOffset = (m_PlayOffset + bytes) % m_DmaBufferSize;
     m_WriteOffset = m_PlayOffset;
@@ -988,6 +1005,30 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
     if (m_NotificationIntervalHns > 0)
     {
         m_ElapsedNotifyHns += deltaHns;
+    }
+
+    PSONT_PCM_SOURCE src = (m_Miniport != NULL) ? m_Miniport->PcmSource() : NULL;
+    if (src != NULL && dma != NULL && dmaSize > 0 && bytes > 0)
+    {
+        ULONG copyLen = (bytes > (ULONGLONG)dmaSize) ? dmaSize : (ULONG)bytes;
+        ULONG startOffset = (bytes > (ULONGLONG)dmaSize)
+            ? (ULONG)((m_PlayOffset + dmaSize - copyLen) % dmaSize)
+            : oldPlayOffset;
+        ULONG tail = dmaSize - startOffset;
+        ULONG first = (copyLen < tail) ? copyLen : tail;
+        const UCHAR *dmaBytes = (const UCHAR *)dma;
+
+        KeAcquireSpinLockAtDpcLevel(&src->Lock);
+        (void)SontPcmRingWrite(&src->Ring, dmaBytes + startOffset, first);
+        if (copyLen > first)
+        {
+            (void)SontPcmRingWrite(&src->Ring, dmaBytes, copyLen - first);
+        }
+        if (SontPcmRingAvailable(&src->Ring) >= 512)
+        {
+            KeSetEvent(&src->DataEvent, IO_NO_INCREMENT, FALSE);
+        }
+        KeReleaseSpinLockFromDpcLevel(&src->Lock);
     }
 }
 
@@ -1059,6 +1100,15 @@ CMiniportWaveRTStreamSonatina::SetState(
             m_ElapsedNotifyHns = 0;
             m_ByteRemainderHns = 0;
             m_LastDmaHns = 0;
+            if (m_Miniport && m_Miniport->PcmSource())
+            {
+                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                KeAcquireSpinLockAtDpcLevel(&src->Lock);
+                src->StreamRunning = FALSE;
+                SontPcmRingReset(&src->Ring);
+                KeClearEvent(&src->DataEvent);
+                KeReleaseSpinLockFromDpcLevel(&src->Lock);
+            }
             break;
 
         case KSSTATE_ACQUIRE:
@@ -1072,6 +1122,13 @@ CMiniportWaveRTStreamSonatina::SetState(
                 stopTimer = TRUE;
             }
             m_State = KSSTATE_PAUSE;
+            if (m_Miniport && m_Miniport->PcmSource())
+            {
+                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                KeAcquireSpinLockAtDpcLevel(&src->Lock);
+                src->StreamRunning = FALSE;
+                KeReleaseSpinLockFromDpcLevel(&src->Lock);
+            }
             break;
 
         case KSSTATE_RUN:
@@ -1080,7 +1137,17 @@ CMiniportWaveRTStreamSonatina::SetState(
                 m_LastDmaHns = KSCONVERT_PERFORMANCE_TIME(m_QpcFrequency.QuadPart, qpc);
             }
             m_State = KSSTATE_RUN;
-            if (prevState != KSSTATE_RUN && m_NotificationsPerBuffer > 0)
+            if (m_Miniport && m_Miniport->PcmSource())
+            {
+                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                KeAcquireSpinLockAtDpcLevel(&src->Lock);
+                src->StreamSampleRate = m_SampleRate;
+                src->StreamChannels = m_Channels;
+                src->StreamRunning = TRUE;
+                KeReleaseSpinLockFromDpcLevel(&src->Lock);
+            }
+            if (prevState != KSSTATE_RUN &&
+                (m_NotificationsPerBuffer > 0 || (m_Miniport && m_Miniport->PcmSource())))
             {
                 startTimer = TRUE;
             }
@@ -1165,6 +1232,7 @@ SontTimerNotifyCallback(
 #pragma code_seg("PAGE")
 NTSTATUS
 SontCreateWaveRTMiniport(
+    _In_opt_ PSONT_PCM_SOURCE PcmSource,
     _Outptr_ PUNKNOWN *Unknown
 )
 {
@@ -1177,7 +1245,7 @@ SontCreateWaveRTMiniport(
 
     *Unknown = NULL;
     CMiniportWaveRTSonatina *obj =
-        new (POOL_FLAG_NON_PAGED, SONT_WAVERT_POOLTAG) CMiniportWaveRTSonatina(NULL);
+        new (POOL_FLAG_NON_PAGED, SONT_WAVERT_POOLTAG) CMiniportWaveRTSonatina(NULL, PcmSource);
     if (!obj)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1197,7 +1265,8 @@ NTSTATUS
 SontRegisterAudioSubdevices(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
-    _In_opt_ PRESOURCELIST ResourceList
+    _In_opt_ PRESOURCELIST ResourceList,
+    _In_opt_ PSONT_PCM_SOURCE PcmSource
 )
 {
     PAGED_CODE();
@@ -1246,7 +1315,7 @@ SontRegisterAudioSubdevices(
         goto Cleanup;
     }
 
-    status = SontCreateWaveRTMiniport(&waveMiniport);
+    status = SontCreateWaveRTMiniport(PcmSource, &waveMiniport);
     if (!NT_SUCCESS(status))
     {
         goto Cleanup;

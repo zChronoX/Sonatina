@@ -10,6 +10,7 @@
 #pragma warning(pop)
 
 #include "NewDelete.h"
+#include "miniport_subdevices.h"
 
 class CMiniportWaveRTStreamSonatina;
 EXT_CALLBACK SontTimerNotifyCallback;
@@ -20,12 +21,15 @@ class CMiniportWaveRTSonatina :
 {
 private:
     volatile LONG m_ActiveStreams;
+    PSONT_PCM_SOURCE m_PcmSource;
 
 public:
     DECLARE_STD_UNKNOWN();
-    CMiniportWaveRTSonatina(_In_opt_ PUNKNOWN UnknownOuter)
+    CMiniportWaveRTSonatina(_In_opt_ PUNKNOWN UnknownOuter,
+                            _In_opt_ PSONT_PCM_SOURCE PcmSource = NULL)
         : CUnknown(UnknownOuter),
-          m_ActiveStreams(0)
+          m_ActiveStreams(0),
+          m_PcmSource(PcmSource)
     {
     }
     ~CMiniportWaveRTSonatina();
@@ -33,6 +37,7 @@ public:
     IMP_IMiniportWaveRT;
 
     VOID NotifyStreamClosed();
+    PSONT_PCM_SOURCE PcmSource() const { return m_PcmSource; }
 };
 
 typedef CMiniportWaveRTSonatina *PCMiniportWaveRTSonatina;
@@ -60,6 +65,8 @@ private:
 
     ULONG m_AvgBytesPerSec;
     USHORT m_BlockAlign;
+    ULONG m_SampleRate;
+    ULONG m_Channels;
 
     LARGE_INTEGER m_QpcFrequency;
     LONGLONG m_LastDmaHns;
@@ -96,6 +103,7 @@ public:
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
 SontCreateWaveRTMiniport(
+    _In_opt_ PSONT_PCM_SOURCE PcmSource,
     _Outptr_ PUNKNOWN *Unknown
 );
 

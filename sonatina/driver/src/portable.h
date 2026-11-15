@@ -13,6 +13,31 @@ typedef INT8 int8_t;
 typedef INT16 int16_t;
 typedef INT32 int32_t;
 typedef INT64 int64_t;
+#ifndef INT16_MIN
+#define INT16_MIN (-32767 - 1)
+#endif
+#ifndef INT16_MAX
+#define INT16_MAX 32767
+#endif
+#ifndef INT32_MIN
+#define INT32_MIN (-2147483647 - 1)
+#endif
+#ifndef INT32_MAX
+#define INT32_MAX 2147483647
+#endif
+#ifndef UINT8_MAX
+#define UINT8_MAX 0xFFU
+#endif
+#ifndef UINT16_MAX
+#define UINT16_MAX 0xFFFFU
+#endif
+#ifndef UINT32_MAX
+#define UINT32_MAX 0xFFFFFFFFU
+#endif
+#ifndef _UINTPTR_T_DEFINED
+typedef ULONG_PTR uintptr_t;
+#define _UINTPTR_T_DEFINED
+#endif
 #if !defined(__cplusplus) && !defined(__bool_true_false_are_defined)
 typedef BOOLEAN bool;
 #define true TRUE

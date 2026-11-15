@@ -3,32 +3,34 @@
 #include "portable.h"
 
 #ifdef SONATINA_WITH_LIBSBC
-#include <sbc/sbc.h>
+#include <sbc.h>
 
 struct SONT_SBC_ENCODER {
     sbc_t sbc;
-    uint8_t bitpool;
+    struct sbc_frame frame;
     unsigned channels;
+    unsigned samples_per_frame;
+    unsigned frame_bytes;
 };
 
-static int SontSbcFrequencyIndex(uint32_t hz)
+static int SontSbcFrequencyEnum(uint32_t hz, enum sbc_freq *out)
 {
     switch (hz) {
-    case 16000: return SBC_FREQ_16000;
-    case 32000: return SBC_FREQ_32000;
-    case 44100: return SBC_FREQ_44100;
-    case 48000: return SBC_FREQ_48000;
+    case 16000: *out = SBC_FREQ_16K;  return 0;
+    case 32000: *out = SBC_FREQ_32K;  return 0;
+    case 44100: *out = SBC_FREQ_44K1; return 0;
+    case 48000: *out = SBC_FREQ_48K;  return 0;
     default:    return -1;
     }
 }
 
-static int SontSbcBlockIndex(uint8_t blocks)
+static int SontSbcModeEnum(uint8_t channel_mode, enum sbc_mode *out)
 {
-    switch (blocks) {
-    case 4:  return SBC_BLK_4;
-    case 8:  return SBC_BLK_8;
-    case 12: return SBC_BLK_12;
-    case 16: return SBC_BLK_16;
+    switch (channel_mode) {
+    case 0:  *out = SBC_MODE_MONO;         return 0;
+    case 1:  *out = SBC_MODE_DUAL_CHANNEL; return 0;
+    case 2:  *out = SBC_MODE_STEREO;       return 0;
+    case 3:  *out = SBC_MODE_JOINT_STEREO; return 0;
     default: return -1;
     }
 }
@@ -36,15 +38,22 @@ static int SontSbcBlockIndex(uint8_t blocks)
 SONT_SBC_ENCODER *SontSbcEncoderCreate(const SONT_SBC_PARAMS *params, uint8_t bitpool)
 {
     SONT_SBC_ENCODER *encoder;
-    int freq, blocks, subbands;
+    enum sbc_freq freq;
+    enum sbc_mode mode;
+    unsigned frame_bytes;
 
     if (params == NULL) {
         return NULL;
     }
-    freq = SontSbcFrequencyIndex(params->sampling);
-    blocks = SontSbcBlockIndex(params->blocks);
-    subbands = (params->subbands == 8) ? SBC_SB_8 : SBC_SB_4;
-    if (freq < 0 || blocks < 0 || params->channel_mode > 3) {
+    if (SontSbcFrequencyEnum(params->sampling, &freq) != 0 ||
+        SontSbcModeEnum(params->channel_mode, &mode) != 0) {
+        return NULL;
+    }
+    if (params->blocks != 4 && params->blocks != 8 &&
+        params->blocks != 12 && params->blocks != 16) {
+        return NULL;
+    }
+    if (params->subbands != 4 && params->subbands != 8) {
         return NULL;
     }
     if (bitpool < params->min_bitpool || bitpool > params->max_bitpool) {
@@ -55,25 +64,31 @@ SONT_SBC_ENCODER *SontSbcEncoderCreate(const SONT_SBC_PARAMS *params, uint8_t bi
     if (encoder == NULL) {
         return NULL;
     }
-    if (sbc_init(&encoder->sbc, 0) != 0) {
+    SONT_MEMSET(encoder, 0, sizeof(*encoder));
+    sbc_reset(&encoder->sbc);
+
+    encoder->frame.msbc = false;
+    encoder->frame.freq = freq;
+    encoder->frame.mode = mode;
+    encoder->frame.bam = (params->allocation == 1) ? SBC_BAM_LOUDNESS : SBC_BAM_SNR;
+    encoder->frame.nblocks = params->blocks;
+    encoder->frame.nsubbands = params->subbands;
+    encoder->frame.bitpool = bitpool;
+
+    frame_bytes = sbc_get_frame_size(&encoder->frame);
+    if (frame_bytes == 0) {
         SONT_FREE(encoder);
         return NULL;
     }
-    encoder->sbc.frequency = (unsigned)freq;
-    encoder->sbc.blocks = (unsigned)blocks;
-    encoder->sbc.subbands = (unsigned)subbands;
-    encoder->sbc.mode = params->channel_mode;
-    encoder->sbc.allocation = (params->allocation == 1) ? SBC_AM_LOUDNESS : SBC_AM_SNR;
-    encoder->sbc.bitpool = bitpool;
-    encoder->bitpool = bitpool;
     encoder->channels = SontSbcChannels(params);
+    encoder->samples_per_frame = SontSbcSamplesPerFrame(params);
+    encoder->frame_bytes = frame_bytes;
     return encoder;
 }
 
 void SontSbcEncoderDestroy(SONT_SBC_ENCODER *encoder)
 {
     if (encoder != NULL) {
-        sbc_finish(&encoder->sbc);
         SONT_FREE(encoder);
     }
 }
@@ -81,18 +96,33 @@ void SontSbcEncoderDestroy(SONT_SBC_ENCODER *encoder)
 int SontSbcEncode(SONT_SBC_ENCODER *encoder, const int16_t *pcm, size_t samples,
                   uint8_t *out, size_t capacity, size_t *written)
 {
-    long produced;
+    const int16_t *pcmr;
+    int pitchl;
+    int pitchr;
 
     if (encoder == NULL || pcm == NULL || out == NULL || written == NULL) {
         return -1;
     }
-    produced = (long)sbc_encode(&encoder->sbc, pcm,
-                                samples * encoder->channels * sizeof(int16_t),
-                                out, capacity);
-    if (produced < 0) {
+    *written = 0;
+    if (samples < encoder->samples_per_frame || capacity < encoder->frame_bytes) {
         return -1;
     }
-    *written = (size_t)produced;
+
+    if (encoder->channels == 1) {
+        pitchl = 1;
+        pcmr = NULL;
+        pitchr = 0;
+    } else {
+        pitchl = 2;
+        pcmr = pcm + 1;
+        pitchr = 2;
+    }
+
+    if (sbc_encode(&encoder->sbc, pcm, pitchl, pcmr, pitchr,
+                   &encoder->frame, out, encoder->frame_bytes) != 0) {
+        return -1;
+    }
+    *written = encoder->frame_bytes;
     return 0;
 }
 
@@ -159,6 +189,32 @@ unsigned SontSbcFrameBytes(const SONT_SBC_PARAMS *params, uint8_t bitpool)
         size += ((unsigned)params->blocks * bitpool) / 8u;
     }
     return size;
+}
+
+unsigned SontSbcEncodedFrameBytes(const SONT_SBC_PARAMS *params, uint8_t bitpool)
+{
+#ifdef SONATINA_WITH_LIBSBC
+    struct sbc_frame frame;
+    enum sbc_freq freq;
+    enum sbc_mode mode;
+
+    if (params == NULL ||
+        SontSbcFrequencyEnum(params->sampling, &freq) != 0 ||
+        SontSbcModeEnum(params->channel_mode, &mode) != 0) {
+        return 0;
+    }
+    SONT_MEMSET(&frame, 0, sizeof(frame));
+    frame.msbc = false;
+    frame.freq = freq;
+    frame.mode = mode;
+    frame.bam = (params->allocation == 1) ? SBC_BAM_LOUDNESS : SBC_BAM_SNR;
+    frame.nblocks = params->blocks;
+    frame.nsubbands = params->subbands;
+    frame.bitpool = bitpool;
+    return sbc_get_frame_size(&frame);
+#else
+    return SontSbcFrameBytes(params, bitpool);
+#endif
 }
 
 unsigned SontSbcBitrateKbpsInt(const SONT_SBC_PARAMS *params, uint8_t bitpool)

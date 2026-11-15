@@ -1,0 +1,12 @@
+Sonatina vendors Google's standalone Subband Codec library (google/libsbc)
+under the Apache License, Version 2.0 (see LICENSE in this directory).
+
+Upstream repository:
+  https://github.com/google/libsbc
+
+Retained / minimally adapted files:
+- include/sbc.h   (added SONATINA_KERNEL include path to portable.h and
+                   SBC_ALIGNAS_INT alignment macro for MSVC/WDK)
+- src/bits.h      (use portable.h + UINT_MAX fallback under SONATINA_KERNEL)
+- src/bits.c      (verbatim)
+- src/sbc.c       (use portable.h memset/memcpy under SONATINA_KERNEL)

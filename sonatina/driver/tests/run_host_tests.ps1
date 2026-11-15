@@ -14,7 +14,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $testsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$srcDir = Join-Path (Split-Path -Parent $testsDir) 'src'
+$driverDir = Split-Path -Parent $testsDir
+$srcDir = Join-Path $driverDir 'src'
+$sbcIncDir = Join-Path $driverDir 'third_party\sbc\include'
+$sbcSrcDir = Join-Path $driverDir 'third_party\sbc\src'
 if (-not $OutDir) {
     $OutDir = Join-Path $testsDir 'build'
 }
@@ -28,7 +31,10 @@ $sources = @(
     (Join-Path $srcDir 'avdtp.c'),
     (Join-Path $srcDir 'avdtp_session.c'),
     (Join-Path $srcDir 'rtp.c'),
-    (Join-Path $srcDir 'codec_sbc.c')
+    (Join-Path $srcDir 'codec_sbc.c'),
+    (Join-Path $srcDir 'media_stream.c'),
+    (Join-Path $sbcSrcDir 'bits.c'),
+    (Join-Path $sbcSrcDir 'sbc.c')
 )
 
 $cl = Get-Command cl -ErrorAction SilentlyContinue
@@ -53,14 +59,14 @@ if (-not $cl -and -not $clang -and -not $gcc) {
 }
 
 if ($cl) {
-    Write-Host 'compiling host_test with cl.exe (-DSONATINA_HOST)...'
-    & $cl.Source /nologo /W4 /WX /DSONATINA_HOST /Fe:$exe /Fo:"$OutDir\" @sources
+    Write-Host 'compiling host_test with cl.exe (-DSONATINA_HOST -DSONATINA_WITH_LIBSBC)...'
+    & $cl.Source /nologo /W4 /WX /DSONATINA_HOST /DSONATINA_WITH_LIBSBC /I"$sbcIncDir" /Fe:$exe /Fo:"$OutDir\" @sources
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 elseif ($clang) {
-    Write-Host 'compiling host_test with clang (-DSONATINA_HOST)...'
+    Write-Host 'compiling host_test with clang (-DSONATINA_HOST -DSONATINA_WITH_LIBSBC)...'
     $clangTarget = & $clang.Source -dumpmachine 2>$null
-    $clangArgs = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-DSONATINA_HOST', '-o', $exe) + $sources
+    $clangArgs = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-DSONATINA_HOST', '-DSONATINA_WITH_LIBSBC', "-I$sbcIncDir", '-o', $exe) + $sources
     if ($clangTarget -notmatch 'msvc') {
         $clangArgs += '-lm'
     }
@@ -68,8 +74,8 @@ elseif ($clang) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 elseif ($gcc) {
-    Write-Host 'compiling host_test with gcc (-DSONATINA_HOST)...'
-    & $gcc.Source -std=c11 -Wall -Wextra -Werror -DSONATINA_HOST -o $exe @sources -lm
+    Write-Host 'compiling host_test with gcc (-DSONATINA_HOST -DSONATINA_WITH_LIBSBC)...'
+    & $gcc.Source -std=c11 -Wall -Wextra -Werror -DSONATINA_HOST -DSONATINA_WITH_LIBSBC "-I$sbcIncDir" -o $exe @sources -lm
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 else {

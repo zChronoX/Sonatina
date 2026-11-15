@@ -20,11 +20,19 @@
 #define SONT_AVDTP_RX_TIMEOUT_MS 5000u
 #define SONT_AVDTP_MAX_STEPS     32u
 #define SONT_AVDTP_MAX_IGNORED   8u
+#define SONT_MEDIA_WAIT_MS       50u
+#define SONT_MEDIA_L2CAP_MTU     672u
+#define SONT_MEDIA_MAX_PCM_CH    2u
+#define SONT_MEDIA_MAX_SAMPLES   128u
 
 typedef struct _SONT_SIGNALING_SCRATCH {
     SONT_AVDTP_SESSION session;
+    SONT_MEDIA_PACKETIZER media;
     uint8_t tx[SONT_AVDTP_MAX_PDU];
     uint8_t rx[SONT_AVDTP_MAX_PDU];
+    uint8_t rtp[1024];
+    int16_t pcm_frame[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH];
+    int16_t pcm_2x[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH * 2];
 } SONT_SIGNALING_SCRATCH, *PSONT_SIGNALING_SCRATCH;
 
 static NTSTATUS SontAddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo);
@@ -66,6 +74,15 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
     KeInitializeEvent(&ext->StopEvent, NotificationEvent, FALSE);
+    KeInitializeSpinLock(&ext->PcmSource.Lock);
+    KeInitializeEvent(&ext->PcmSource.DataEvent, NotificationEvent, FALSE);
+    ext->PcmSource.BackingBuffer = (UCHAR *)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, SONT_PCM_STAGE_BYTES, SONT_POOL_TAG);
+    if (ext->PcmSource.BackingBuffer != NULL) {
+        SontPcmRingInit(&ext->PcmSource.Ring,
+                        ext->PcmSource.BackingBuffer,
+                        SONT_PCM_STAGE_BYTES);
+    }
     status = PcGetPhysicalDeviceObject(device, &ext->PhysicalDeviceObject);
     if (!NT_SUCCESS(status)) {
         DbgPrint("Sonatina: PcGetPhysicalDeviceObject failed 0x%08X\n", status);
@@ -100,9 +117,14 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
                  status);
     }
 
-    status = SontRegisterAudioSubdevices(device, irp, resources);
+    status = SontRegisterAudioSubdevices(device, irp, resources, &ext->PcmSource);
     if (!NT_SUCCESS(status)) {
         DbgPrint("Sonatina: SontRegisterAudioSubdevices failed 0x%08X\n", status);
+        if (ext->PcmSource.BackingBuffer != NULL) {
+            ExFreePoolWithTag(ext->PcmSource.BackingBuffer, SONT_POOL_TAG);
+            ext->PcmSource.BackingBuffer = NULL;
+            SontPcmRingInit(&ext->PcmSource.Ring, NULL, 0);
+        }
         if (ext->ControlInterfaceRegistered) {
             (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, FALSE);
             RtlFreeUnicodeString(&ext->ControlInterfaceName);
@@ -219,6 +241,156 @@ static VOID SontBuildSbcPreference(const SONATINA_PROFILE *prof, SONT_SBC_PARAMS
     sbc->allocation = (uint8_t)prof->SbcAllocation;
     sbc->min_bitpool = (uint8_t)prof->SbcMinBitpool;
     sbc->max_bitpool = (uint8_t)prof->SbcMaxBitpool;
+}
+
+static BOOLEAN SontDequeuePcmFrame(PSONT_PCM_SOURCE src,
+                                   ULONG target_rate,
+                                   ULONG target_ch,
+                                   size_t samples_per_frame,
+                                   int16_t *pcm_out,
+                                   int16_t *scratch_2x,
+                                   BOOLEAN *stream_running)
+{
+    KIRQL old_irql;
+    size_t frame_bytes;
+    size_t avail;
+    BOOLEAN got = FALSE;
+
+    if (target_ch == 0 || target_ch > SONT_MEDIA_MAX_PCM_CH ||
+        samples_per_frame == 0 || samples_per_frame > SONT_MEDIA_MAX_SAMPLES) {
+        *stream_running = FALSE;
+        return FALSE;
+    }
+    frame_bytes = samples_per_frame * target_ch * sizeof(int16_t);
+
+    KeAcquireSpinLock(&src->Lock, &old_irql);
+    *stream_running = src->StreamRunning;
+    avail = SontPcmRingAvailable(&src->Ring);
+    if (src->StreamChannels == target_ch && src->StreamSampleRate == target_rate &&
+        avail >= frame_bytes) {
+        got = (SontPcmRingRead(&src->Ring, (uint8_t *)pcm_out, frame_bytes) == frame_bytes);
+    } else if (src->StreamChannels == target_ch &&
+               src->StreamSampleRate == target_rate * 2u &&
+               avail >= frame_bytes * 2u) {
+        if (SontPcmRingRead(&src->Ring, (uint8_t *)scratch_2x, frame_bytes * 2u) ==
+            frame_bytes * 2u) {
+            size_t i;
+            for (i = 0; i < samples_per_frame; i++) {
+                size_t c;
+                for (c = 0; c < target_ch; c++) {
+                    pcm_out[i * target_ch + c] = scratch_2x[(i * 2u) * target_ch + c];
+                }
+            }
+            got = TRUE;
+        }
+    }
+    if (SontPcmRingAvailable(&src->Ring) < frame_bytes) {
+        KeClearEvent(&src->DataEvent);
+    }
+    KeReleaseSpinLock(&src->Lock, old_irql);
+    return got;
+}
+
+static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
+                                    L2CAP_CHANNEL_HANDLE media_ch,
+                                    const uint8_t *rtp,
+                                    size_t rtp_len)
+{
+    LARGE_INTEGER freq;
+    LARGE_INTEGER t0;
+    LARGE_INTEGER t1;
+    NTSTATUS status;
+    KIRQL old_irql;
+
+    t0 = KeQueryPerformanceCounter(&freq);
+    status = SontTransportSend(&ext->Transport, media_ch, rtp, (ULONG)rtp_len);
+    t1 = KeQueryPerformanceCounter(NULL);
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    if (NT_SUCCESS(status)) {
+        ext->State.Packets++;
+        if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
+            ext->State.TxTimeUs = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) /
+                                          freq.QuadPart);
+        }
+    } else {
+        ext->State.Errors++;
+    }
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+    return status;
+}
+
+static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
+                                    L2CAP_CHANNEL_HANDLE media_ch,
+                                    const SONT_SBC_PARAMS *sbc,
+                                    PSONT_SIGNALING_SCRATCH scratch)
+{
+    unsigned samples_per_frame = SontSbcSamplesPerFrame(sbc);
+    unsigned channels = SontSbcChannels(sbc);
+    PVOID wait_objs[2];
+    LARGE_INTEGER wait_due;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!SontMediaInit(&scratch->media, sbc, sbc->max_bitpool,
+                       SONT_MEDIA_L2CAP_MTU, 0x534F4E54u)) {
+        SontRecordSignalingError(ext);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    wait_objs[0] = &ext->PcmSource.DataEvent;
+    wait_objs[1] = &ext->StopEvent;
+    wait_due.QuadPart = -(LONGLONG)SONT_MEDIA_WAIT_MS * 10000LL;
+
+    while (KeReadStateEvent(&ext->StopEvent) == 0 &&
+           ext->Transport.MediaChannel != NULL) {
+        BOOLEAN stream_running = FALSE;
+
+        if (SontDequeuePcmFrame(&ext->PcmSource,
+                                (ULONG)sbc->sampling,
+                                (ULONG)channels,
+                                (size_t)samples_per_frame,
+                                scratch->pcm_frame,
+                                scratch->pcm_2x,
+                                &stream_running)) {
+            size_t rtp_len = 0;
+            int step = SontMediaPushPcmFrame(&scratch->media,
+                                             scratch->pcm_frame,
+                                             (size_t)samples_per_frame,
+                                             scratch->rtp,
+                                             sizeof(scratch->rtp),
+                                             &rtp_len);
+            if (step == 1) {
+                status = SontSendMediaPacket(ext, media_ch, scratch->rtp, rtp_len);
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+            } else if (step < 0) {
+                SontRecordSignalingError(ext);
+                status = STATUS_UNSUCCESSFUL;
+                break;
+            }
+            continue;
+        }
+
+        if (!stream_running && scratch->media.frames_pending > 0) {
+            size_t rtp_len = 0;
+            if (SontMediaFlush(&scratch->media, scratch->rtp, sizeof(scratch->rtp), &rtp_len) == 1) {
+                status = SontSendMediaPacket(ext, media_ch, scratch->rtp, rtp_len);
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+            }
+        }
+
+        if (KeWaitForMultipleObjects(2, wait_objs, WaitAny, Executive,
+                                     KernelMode, FALSE, &wait_due, NULL) == STATUS_WAIT_1) {
+            status = STATUS_CANCELLED;
+            break;
+        }
+    }
+
+    SontMediaDestroy(&scratch->media);
+    return status;
 }
 
 static VOID SontSignalingWorker(PVOID context)
@@ -351,6 +523,12 @@ static VOID SontSignalingWorker(PVOID context)
                  (unsigned)scratch->session.selected_acp_seid,
                  ext->State.NegotiatedSampling,
                  ext->State.BitrateKbps);
+
+        if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_SBC) {
+            status = SontRunSbcMediaLoop(ext, media_ch,
+                                         &scratch->session.negotiated.sbc,
+                                         scratch);
+        }
     }
 
 cleanup:
@@ -410,6 +588,11 @@ static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
     if (stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {
         SontTransportTeardown(&ext->Transport);
         ext->TransportReady = FALSE;
+        if (ext->PcmSource.BackingBuffer != NULL) {
+            ExFreePoolWithTag(ext->PcmSource.BackingBuffer, SONT_POOL_TAG);
+            ext->PcmSource.BackingBuffer = NULL;
+            SontPcmRingInit(&ext->PcmSource.Ring, NULL, 0);
+        }
         if (ext->ControlInterfaceRegistered) {
             RtlFreeUnicodeString(&ext->ControlInterfaceName);
             ext->ControlInterfaceRegistered = FALSE;

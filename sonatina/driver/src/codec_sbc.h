@@ -22,6 +22,7 @@ typedef struct _SONT_SBC_PARAMS {
 unsigned SontSbcChannels(const SONT_SBC_PARAMS *params);
 unsigned SontSbcSamplesPerFrame(const SONT_SBC_PARAMS *params);
 unsigned SontSbcFrameBytes(const SONT_SBC_PARAMS *params, uint8_t bitpool);
+unsigned SontSbcEncodedFrameBytes(const SONT_SBC_PARAMS *params, uint8_t bitpool);
 unsigned SontSbcBitrateKbpsInt(const SONT_SBC_PARAMS *params, uint8_t bitpool);
 #ifndef SONATINA_KERNEL
 double   SontSbcBitrateKbps(const SONT_SBC_PARAMS *params, uint8_t bitpool);

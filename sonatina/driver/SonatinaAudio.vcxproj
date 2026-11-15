@@ -79,12 +79,12 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <SonatinaLibsbcDefine Condition="Exists('$(ProjectDir)third_party\sbc\sbc.h')">SONATINA_WITH_LIBSBC;</SonatinaLibsbcDefine>
+    <SonatinaLibsbcDefine Condition="Exists('$(ProjectDir)third_party\sbc\include\sbc.h')">SONATINA_WITH_LIBSBC;</SonatinaLibsbcDefine>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sysvad;$(ProjectDir)third_party\sbc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sysvad;$(ProjectDir)third_party\sbc\include;$(ProjectDir)third_party\sbc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>SONATINA_KERNEL;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;$(SonatinaLibsbcDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
@@ -113,6 +113,13 @@
     <ClCompile Include="src\avdtp_session.c" />
     <ClCompile Include="src\rtp.c" />
     <ClCompile Include="src\codec_sbc.c" />
+    <ClCompile Include="src\media_stream.c" />
+    <ClCompile Include="third_party\sbc\src\bits.c">
+      <DisableSpecificWarnings>4100;4127;4244;4245;4267;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="third_party\sbc\src\sbc.c">
+      <DisableSpecificWarnings>4100;4127;4244;4245;4267;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
     <ClCompile Include="src\miniport_topology.cpp" />
     <ClCompile Include="src\miniport_wavert.cpp" />
     <ClCompile Include="third_party\sysvad\NewDelete.cpp" />
@@ -126,10 +133,13 @@
     <ClInclude Include="src\avdtp_session.h" />
     <ClInclude Include="src\rtp.h" />
     <ClInclude Include="src\codec_sbc.h" />
+    <ClInclude Include="src\media_stream.h" />
     <ClInclude Include="src\portable.h" />
     <ClInclude Include="src\miniport_subdevices.h" />
     <ClInclude Include="src\miniport_topology.h" />
     <ClInclude Include="src\miniport_wavert.h" />
+    <ClInclude Include="third_party\sbc\include\sbc.h" />
+    <ClInclude Include="third_party\sbc\src\bits.h" />
     <ClInclude Include="third_party\sysvad\NewDelete.h" />
     <ClInclude Include="third_party\sysvad\simple.h" />
   </ItemGroup>

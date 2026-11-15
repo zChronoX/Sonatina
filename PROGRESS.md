@@ -48,7 +48,25 @@
   cleanup `IRP_MN_REMOVE_DEVICE` in `SontPnpDispatch`, `KSCATEGORY_REALTIME` +
   `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e `SonatinaAudio.vcxproj`
   (`portcls.lib`, `stdunk.lib`, `libcntpr.lib`).
-- D3 implementato lato host + kernel (compilazione WDK CI e verifica runtime su VM A3 da eseguire): aggiunti helper SEP/single-SEID e `SontAvdtpSelectSbcConfig` in `src/avdtp.*`, macchina a stati portabile `src/avdtp_session.h/.c` (Discover → GetCapabilities con probing SEID SNK e fallback → SetConfiguration → Open → Start + Suspend/Resume/Close/Abort), 36 vettori di parita' Python/C in `driver/tests/` + `test_driver_vectors.py`, ricezione L2CAP cancellabile `SontTransportReceive` in `src/brb_transport.*` e worker kernel `SontSignalingWorker` (`src/driver.c`, `src/device.h`) con stop pulito su `IRP_MN_SURPRISE_REMOVAL`/`IRP_MN_REMOVE_DEVICE`.
+- D3 parziale (compila e linka con 0 warning e 0 errori in WDK CI Debug/Release
+  x64, run #10 `ea2d3e3`; verifica runtime su VM in attesa di A3): aggiunti
+  helper SEP/single-SEID e `SontAvdtpSelectSbcConfig` in `src/avdtp.*`,
+  macchina a stati portabile `src/avdtp_session.h/.c` (Discover →
+  GetCapabilities con probing SEID SNK e fallback → SetConfiguration → Open →
+  Start + Suspend/Resume/Close/Abort), 36 vettori di parita' Python/C in
+  `driver/tests/` + `test_driver_vectors.py`, ricezione L2CAP cancellabile
+  `SontTransportReceive` in `src/brb_transport.*` e worker kernel
+  `SontSignalingWorker` (`src/driver.c`, `src/device.h`) con stop pulito su
+  `IRP_MN_SURPRISE_REMOVAL`/`IRP_MN_REMOVE_DEVICE`.
+- D4 implementato lato host + kernel (compilazione WDK CI e verifica runtime su
+  VM A3 da eseguire): vendored `google/libsbc` (Apache-2.0, zero float/malloc)
+  in `driver/third_party/sbc/`, integrazione in `src/codec_sbc.c`
+  (`SONATINA_WITH_LIBSBC` + `SontSbcEncodedFrameBytes`), nuovo modulo
+  `src/media_stream.h/.c` (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tap PCM
+  ciclico in `CMiniportWaveRTStreamSonatina` (`SONT_PCM_SOURCE` in
+  `miniport_wavert.cpp`), loop media `SontRunSbcMediaLoop` (`src/driver.c`) su
+  `MediaChannel` (`0x0017`), aggiornamento `SonatinaAudio.vcxproj` e test host
+  con encoding/decoding SBC reale a 1 kHz + packetizer RTP.
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`

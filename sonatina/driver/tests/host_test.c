@@ -15,7 +15,11 @@
 #include "../src/avdtp.h"
 #include "../src/avdtp_session.h"
 #include "../src/codec_sbc.h"
+#include "../src/media_stream.h"
 #include "../src/rtp.h"
+#ifdef SONATINA_WITH_LIBSBC
+#include <sbc.h>
+#endif
 
 /* Declared in avdtp.c */
 size_t SontAvdtpEncodeSbcOctets(const SONT_SBC_PARAMS *params, uint8_t out[4]);
@@ -152,8 +156,110 @@ static void RunUnitAssertions(void)
         enc = SontSbcEncoderCreate(&def, 53);
         assert(enc != NULL);
         assert(SontSbcEncode(enc, pcm, 128, buf, sizeof(buf), &written) == 0);
-        assert(written > 0);
+        assert(written == SontSbcEncodedFrameBytes(&def, 53));
+        assert(written == 119); /* A2DP spec SBC 48kHz joint stereo bitpool 53 */
+        assert(buf[0] == 0x9C);
         SontSbcEncoderDestroy(enc);
+
+#ifdef SONATINA_WITH_LIBSBC
+        /* Encode a 1 kHz sine tone with libsbc and verify probe + decode round-trip. */
+        {
+            sbc_t dec;
+            struct sbc_frame probed;
+            int16_t dec_l[128], dec_r[128];
+            int64_t energy = 0;
+            size_t i;
+
+            enc = SontSbcEncoderCreate(&def, 53);
+            assert(enc != NULL);
+            for (i = 0; i < 128; i++) {
+                double s = sin(2.0 * 3.14159265358979323846 * 1000.0 * (double)i / 48000.0);
+                int16_t v = (int16_t)(s * 12000.0);
+                pcm[i * 2] = v;
+                pcm[i * 2 + 1] = v;
+            }
+            /* Warm up filterbank with 3 frames so steady-state energy is strong. */
+            for (i = 0; i < 3; i++) {
+                assert(SontSbcEncode(enc, pcm, 128, buf, sizeof(buf), &written) == 0);
+                assert(written == 119 && buf[0] == 0x9C);
+            }
+            assert(sbc_probe(buf, &probed) == 0);
+            assert(probed.freq == SBC_FREQ_48K);
+            assert(probed.mode == SBC_MODE_JOINT_STEREO);
+            assert(probed.nblocks == 16 && probed.nsubbands == 8);
+            assert(probed.bitpool == 53);
+
+            sbc_reset(&dec);
+            for (i = 0; i < 3; i++) {
+                assert(SontSbcEncode(enc, pcm, 128, buf, sizeof(buf), &written) == 0);
+                assert(sbc_decode(&dec, buf, (unsigned)written, &probed,
+                                  dec_l, 1, dec_r, 1) == 0);
+            }
+            for (i = 0; i < 128; i++) {
+                energy += (int64_t)dec_l[i] * (int64_t)dec_l[i];
+            }
+            assert(energy > 1000000LL);
+            SontSbcEncoderDestroy(enc);
+        }
+#endif
+    }
+
+    /* 4b. PCM staging ring & D4 SBC-over-RTP packetizer */
+    {
+        uint8_t ring_backing[16];
+        SONT_PCM_RING ring;
+        uint8_t out_bytes[16];
+        const uint8_t d1[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        const uint8_t d2[10] = {10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+
+        SontPcmRingInit(&ring, ring_backing, sizeof(ring_backing));
+        assert(SontPcmRingAvailable(&ring) == 0);
+        assert(SontPcmRingWrite(&ring, d1, 10) == 10);
+        assert(SontPcmRingAvailable(&ring) == 10);
+        /* Writing 10 more drops 4 oldest bytes of d1 cleanly. */
+        assert(SontPcmRingWrite(&ring, d2, 10) == 10);
+        assert(SontPcmRingAvailable(&ring) == 16);
+        assert(ring.dropped_bytes == 4);
+        assert(SontPcmRingRead(&ring, out_bytes, 16) == 16);
+        assert(out_bytes[0] == 4 && out_bytes[5] == 9 && out_bytes[6] == 10 && out_bytes[15] == 19);
+        assert(SontPcmRingAvailable(&ring) == 0);
+
+        SONT_SBC_PARAMS def = {48000, 3, 16, 8, 1, 2, 53};
+        SONT_MEDIA_PACKETIZER pkt;
+        uint8_t rtp[1024];
+        size_t rtp_len = 0;
+        SONT_RTP_HEADER hdr;
+        int f;
+
+        assert(SontMediaInit(&pkt, &def, 53, 672, 0x12345678u));
+        /* (672 - 12 - 1) / 119 = 5 SBC frames per L2CAP packet */
+        assert(pkt.max_frames_per_packet == 5);
+        memset(pcm, 0, sizeof(pcm));
+
+        for (f = 0; f < 4; f++) {
+            assert(SontMediaPushPcmFrame(&pkt, pcm, 128, rtp, sizeof(rtp), &rtp_len) == 0);
+            assert(rtp_len == 0);
+        }
+        assert(SontMediaPushPcmFrame(&pkt, pcm, 128, rtp, sizeof(rtp), &rtp_len) == 1);
+        assert(rtp_len == SONT_RTP_HEADER_LEN + 1u + 5u * 119u);
+        assert(SontRtpDecodeHeader(rtp, rtp_len, &hdr));
+        assert(hdr.marker);
+        assert(hdr.sequence == 0);
+        assert(hdr.timestamp == 0);
+        assert(hdr.ssrc == 0x12345678u);
+        assert(rtp[SONT_RTP_HEADER_LEN] == 0x50); /* 5 frames in high nibble */
+
+        assert(SontMediaPushPcmFrame(&pkt, pcm, 128, rtp, sizeof(rtp), &rtp_len) == 0);
+        assert(SontMediaFlush(&pkt, rtp, sizeof(rtp), &rtp_len) == 1);
+        assert(rtp_len == SONT_RTP_HEADER_LEN + 1u + 119u);
+        assert(SontRtpDecodeHeader(rtp, rtp_len, &hdr));
+        assert(!hdr.marker);
+        assert(hdr.sequence == 1);
+        assert(hdr.timestamp == 640u);
+        assert(rtp[SONT_RTP_HEADER_LEN] == 0x10);
+        assert(SontMediaFlush(&pkt, rtp, sizeof(rtp), &rtp_len) == 0);
+
+        SontMediaDestroy(&pkt);
     }
 
     /* 5. SEP list + single SEID + SBC capability selection */

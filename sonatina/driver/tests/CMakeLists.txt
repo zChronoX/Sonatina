@@ -10,9 +10,13 @@ add_executable(host_test
     ../src/avdtp_session.c
     ../src/rtp.c
     ../src/codec_sbc.c
+    ../src/media_stream.c
+    ../third_party/sbc/src/bits.c
+    ../third_party/sbc/src/sbc.c
 )
 
-target_compile_definitions(host_test PRIVATE SONATINA_HOST)
+target_include_directories(host_test PRIVATE ../third_party/sbc/include)
+target_compile_definitions(host_test PRIVATE SONATINA_HOST SONATINA_WITH_LIBSBC)
 
 if(MSVC)
     target_compile_options(host_test PRIVATE /W4 /WX)

@@ -9,6 +9,7 @@
 #pragma warning(pop)
 
 #include "brb_transport.h"
+#include "miniport_subdevices.h"
 #include "public.h"
 
 typedef struct _SONT_DEVICE_EXTENSION {
@@ -19,6 +20,8 @@ typedef struct _SONT_DEVICE_EXTENSION {
 
     SONT_TRANSPORT Transport;
     BOOLEAN TransportReady;
+
+    SONT_PCM_SOURCE PcmSource;
 
     KEVENT StopEvent;
     PVOID WorkerThread;

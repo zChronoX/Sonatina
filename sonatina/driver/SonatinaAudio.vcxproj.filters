@@ -21,6 +21,9 @@
     <ClCompile Include="src\avdtp_session.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\rtp.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\codec_sbc.c"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\media_stream.c"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="third_party\sbc\src\bits.c"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="third_party\sbc\src\sbc.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\miniport_topology.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\miniport_wavert.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="third_party\sysvad\NewDelete.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -33,10 +36,13 @@
     <ClInclude Include="src\avdtp_session.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\rtp.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\codec_sbc.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\media_stream.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\portable.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\miniport_subdevices.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\miniport_topology.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\miniport_wavert.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="third_party\sbc\include\sbc.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="third_party\sbc\src\bits.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="third_party\sysvad\NewDelete.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="third_party\sysvad\simple.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
