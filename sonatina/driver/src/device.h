@@ -20,6 +20,9 @@ typedef struct _SONT_DEVICE_EXTENSION {
     SONT_TRANSPORT Transport;
     BOOLEAN TransportReady;
 
+    KEVENT StopEvent;
+    PVOID WorkerThread;
+
     SONATINA_PROFILE Profile;
     SONATINA_STATE State;
     KSPIN_LOCK Lock;

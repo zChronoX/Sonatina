@@ -119,11 +119,10 @@ reconnects the headset with the new parameters.
 
 ### D3. BRB transport + AVDTP handshake `[ ]`
 - **Why**: this is the real connection to the headset; everything else is local.
-- **Do**: `src/brb_transport.c` (exists) + a state machine that sends
-  Discover/GetCapabilities/SetConfiguration/Open/Start on PSM `0x0019` and opens
-  PSM `0x0017` for media.
+- **Do**: `src/brb_transport.c` (added cancellable `SontTransportReceive` via `BRB_L2CA_ACL_TRANSFER` IN + `StopEvent`/timeout) + portable AVDTP initiator session engine (`src/avdtp.c` SEP list / `SontAvdtpSelectSbcConfig` + `src/avdtp_session.h/.c`: `Discover` → `GetCapabilities` → `SetConfiguration` → `Open` → `Start`, plus `Suspend`/`Resume`/`Close`/`Abort`) + PASSIVE_LEVEL `SontSignalingWorker` in `driver.c` opening PSM `0x0019` and PSM `0x0017` and updating `ext->State` cleanly on completion / tearing down safely on `IRP_MN_REMOVE_DEVICE`.
 - **Done**: against a real headset the driver logs the SEP list and the chosen
   SBC configuration; the bytes are identical to the Python reference.
+- **Status**: portable C session state machine and 36 parity vectors + host tests implemented and verified vs `sonatina/avdtp.py`; kernel D3 worker wired for WDK CI compile + future VM runtime verification (A3 deferred).
 
 ### D4. SBC media path `[ ]`
 - **Why**: first audible, measurable parity point.

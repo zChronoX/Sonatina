@@ -18,6 +18,7 @@
     <ClCompile Include="src\driver.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\brb_transport.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\avdtp.c"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\avdtp_session.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\rtp.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\codec_sbc.c"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\miniport_topology.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -29,6 +30,7 @@
     <ClInclude Include="src\device.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\brb_transport.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\avdtp.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\avdtp_session.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\rtp.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\codec_sbc.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\portable.h"><Filter>Header Files</Filter></ClInclude>

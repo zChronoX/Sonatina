@@ -53,6 +53,13 @@ def build_vectors() -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
             avdtp.SepInfo(seid=2, tsep=avdtp.TSEP_SRC),
         ]
     )
+    seps_multi_payload = avdtp.encode_sep_list(
+        [
+            avdtp.SepInfo(seid=1, in_use=True, tsep=avdtp.TSEP_SNK),
+            avdtp.SepInfo(seid=3, in_use=False, tsep=avdtp.TSEP_SRC),
+            avdtp.SepInfo(seid=5, in_use=False, tsep=avdtp.TSEP_SNK),
+        ]
+    )
 
     rtp_basic = RtpPacket(seq=1, timestamp=240, ssrc=0x12345678, marker=False).encode()
     rtp_max = RtpPacket(
@@ -133,6 +140,32 @@ def build_vectors() -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
         "rtp_sbc_payload_3frames": payload_3,
         "rtp_full_packet_sbc": full_rtp_sbc,
         "rtp_sbc_payload_15frames": pack_sbc(frames_15),
+        "d3_sep_list_encoded": seps_multi_payload,
+        "d3_hs_01_discover_cmd": avdtp.command(
+            avdtp.SIG_DISCOVER, transaction=0
+        ).encode(),
+        "d3_hs_02_get_caps_cmd": avdtp.command(
+            avdtp.SIG_GET_CAPABILITIES, avdtp.single_seid(2), transaction=1
+        ).encode(),
+        "d3_hs_03_set_config_cmd": avdtp.command(
+            avdtp.SIG_SET_CONFIGURATION,
+            avdtp.set_configuration(
+                1, 2, avdtp.CodecCapability("sbc", sbc=sbc_default)
+            ),
+            transaction=2,
+        ).encode(),
+        "d3_hs_04_open_cmd": avdtp.command(
+            avdtp.SIG_OPEN, avdtp.single_seid(2), transaction=3
+        ).encode(),
+        "d3_hs_05_start_cmd": avdtp.command(
+            avdtp.SIG_START, avdtp.single_seid(2), transaction=4
+        ).encode(),
+        "d3_hs_06_suspend_cmd": avdtp.command(
+            avdtp.SIG_SUSPEND, avdtp.single_seid(2), transaction=5
+        ).encode(),
+        "d3_hs_07_close_cmd": avdtp.command(
+            avdtp.SIG_CLOSE, avdtp.single_seid(2), transaction=6
+        ).encode(),
     }
 
     math_cases = {

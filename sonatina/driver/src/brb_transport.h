@@ -31,6 +31,9 @@ NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
                            L2CAP_CHANNEL_HANDLE *channel);
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
                            const void *data, ULONG length);
+NTSTATUS SontTransportReceive(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
+                              void *buffer, ULONG capacity, ULONG *received,
+                              PKEVENT stop_event, ULONG timeout_ms);
 VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel);
 VOID SontTransportTeardown(PSONT_TRANSPORT transport);
 

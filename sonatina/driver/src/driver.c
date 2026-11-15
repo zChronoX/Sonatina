@@ -13,14 +13,27 @@
 #include "brb_transport.h"
 #include "public.h"
 #include "device.h"
+#include "avdtp_session.h"
 #include "miniport_subdevices.h"
 
 #define SONT_POOL_TAG 'anOS'
+#define SONT_AVDTP_RX_TIMEOUT_MS 5000u
+#define SONT_AVDTP_MAX_STEPS     32u
+#define SONT_AVDTP_MAX_IGNORED   8u
+
+typedef struct _SONT_SIGNALING_SCRATCH {
+    SONT_AVDTP_SESSION session;
+    uint8_t tx[SONT_AVDTP_MAX_PDU];
+    uint8_t rx[SONT_AVDTP_MAX_PDU];
+} SONT_SIGNALING_SCRATCH, *PSONT_SIGNALING_SCRATCH;
 
 static NTSTATUS SontAddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo);
 static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources);
 static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp);
 static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp);
+static VOID SontSignalingWorker(PVOID context);
+static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext);
+static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext);
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry_path)
 {
@@ -52,6 +65,7 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
 
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
+    KeInitializeEvent(&ext->StopEvent, NotificationEvent, FALSE);
     status = PcGetPhysicalDeviceObject(device, &ext->PhysicalDeviceObject);
     if (!NT_SUCCESS(status)) {
         DbgPrint("Sonatina: PcGetPhysicalDeviceObject failed 0x%08X\n", status);
@@ -101,7 +115,12 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
         return status;
     }
 
-    /* TODO(D3): open SONT_L2CAP_PSM_AVDTP and run the signalling state machine. */
+    if (ext->TransportReady) {
+        status = SontStartSignalingWorker(ext);
+        if (!NT_SUCCESS(status)) {
+            DbgPrint("Sonatina: D3 signaling worker start failed 0x%08X\n", status);
+        }
+    }
 
     /* PortCls completes IRP_MN_START_DEVICE after StartDevice returns. */
     return STATUS_SUCCESS;
@@ -182,6 +201,199 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
     return status;
 }
 
+static VOID SontRecordSignalingError(PSONT_DEVICE_EXTENSION ext)
+{
+    KIRQL old_irql;
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    ext->State.Errors++;
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+}
+
+static VOID SontBuildSbcPreference(const SONATINA_PROFILE *prof, SONT_SBC_PARAMS *sbc)
+{
+    sbc->sampling = (uint32_t)prof->SbcSampling;
+    sbc->channel_mode = (uint8_t)prof->SbcChannelMode;
+    sbc->blocks = (uint8_t)prof->SbcBlocks;
+    sbc->subbands = (uint8_t)prof->SbcSubbands;
+    sbc->allocation = (uint8_t)prof->SbcAllocation;
+    sbc->min_bitpool = (uint8_t)prof->SbcMinBitpool;
+    sbc->max_bitpool = (uint8_t)prof->SbcMaxBitpool;
+}
+
+static VOID SontSignalingWorker(PVOID context)
+{
+    PSONT_DEVICE_EXTENSION ext = (PSONT_DEVICE_EXTENSION)context;
+    PSONT_SIGNALING_SCRATCH scratch = NULL;
+    SONATINA_PROFILE prof;
+    SONT_SBC_PARAMS pref_sbc;
+    L2CAP_CHANNEL_HANDLE sig_ch = NULL;
+    L2CAP_CHANNEL_HANDLE media_ch = NULL;
+    size_t tx_len = 0;
+    ULONG step_count;
+    SONT_AVDTP_STEP_RESULT step;
+    KIRQL old_irql;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    scratch = (PSONT_SIGNALING_SCRATCH)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, sizeof(*scratch), SONT_POOL_TAG);
+    if (scratch == NULL) {
+        SontRecordSignalingError(ext);
+        PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+
+    status = SontTransportOpen(&ext->Transport, SONT_L2CAP_PSM_AVDTP, &sig_ch);
+    if (!NT_SUCCESS(status)) {
+        SontRecordSignalingError(ext);
+        goto cleanup;
+    }
+    ext->Transport.SignalingChannel = sig_ch;
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    prof = ext->Profile;
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+    SontBuildSbcPreference(&prof, &pref_sbc);
+
+    SontAvdtpSessionInit(&scratch->session,
+                         1,
+                         (prof.Codec == SonatinaCodecPcm)
+                             ? SONT_AVDTP_CODEC_RAW
+                             : SONT_AVDTP_CODEC_SBC,
+                         &pref_sbc);
+
+    step = SontAvdtpSessionStartHandshake(&scratch->session,
+                                         scratch->tx,
+                                         sizeof(scratch->tx),
+                                         &tx_len);
+    for (step_count = 0;
+         step == SONT_AVDTP_STEP_SEND && step_count < SONT_AVDTP_MAX_STEPS;
+         step_count++) {
+        ULONG rx_tries;
+
+        if (KeReadStateEvent(&ext->StopEvent) != 0) {
+            status = STATUS_CANCELLED;
+            break;
+        }
+
+        status = SontTransportSend(&ext->Transport, sig_ch,
+                                   scratch->tx, (ULONG)tx_len);
+        if (!NT_SUCCESS(status)) {
+            SontRecordSignalingError(ext);
+            break;
+        }
+
+        step = SONT_AVDTP_STEP_IGNORE;
+        for (rx_tries = 0; rx_tries < SONT_AVDTP_MAX_IGNORED; rx_tries++) {
+            ULONG rx_len = 0;
+
+            status = SontTransportReceive(&ext->Transport, sig_ch,
+                                          scratch->rx, sizeof(scratch->rx),
+                                          &rx_len, &ext->StopEvent,
+                                          SONT_AVDTP_RX_TIMEOUT_MS);
+            if (!NT_SUCCESS(status)) {
+                SontRecordSignalingError(ext);
+                break;
+            }
+
+            step = SontAvdtpSessionOnRx(&scratch->session,
+                                        scratch->rx, (size_t)rx_len,
+                                        scratch->tx, sizeof(scratch->tx),
+                                        &tx_len);
+            if (step != SONT_AVDTP_STEP_IGNORE) {
+                break;
+            }
+        }
+        if (!NT_SUCCESS(status) || step == SONT_AVDTP_STEP_IGNORE) {
+            if (step == SONT_AVDTP_STEP_IGNORE) {
+                status = STATUS_IO_TIMEOUT;
+                SontRecordSignalingError(ext);
+            }
+            break;
+        }
+    }
+
+    if (step == SONT_AVDTP_STEP_ERROR) {
+        DbgPrint("Sonatina: D3 AVDTP handshake rejected (err=0x%02X)\n",
+                 scratch->session.last_error);
+        SontRecordSignalingError(ext);
+        status = STATUS_UNSUCCESSFUL;
+        goto cleanup;
+    }
+
+    if (scratch->session.state == SONT_AVDTP_STATE_STREAMING &&
+        KeReadStateEvent(&ext->StopEvent) == 0) {
+        status = SontTransportOpen(&ext->Transport, SONT_L2CAP_PSM_MEDIA, &media_ch);
+        if (!NT_SUCCESS(status)) {
+            SontRecordSignalingError(ext);
+            goto cleanup;
+        }
+        ext->Transport.MediaChannel = media_ch;
+
+        KeAcquireSpinLock(&ext->Lock, &old_irql);
+        ext->State.Opened = TRUE;
+        if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_RAW) {
+            ext->State.Codec = SonatinaCodecPcm;
+            ext->State.NegotiatedSampling = 48000;
+            ext->State.NegotiatedChannels = 2;
+            ext->State.BitrateKbps = 1536;
+        } else {
+            ext->State.Codec = SonatinaCodecSbc;
+            ext->State.NegotiatedSampling = scratch->session.negotiated.sbc.sampling;
+            ext->State.NegotiatedChannels = (ULONG)SontSbcChannels(&scratch->session.negotiated.sbc);
+            ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(
+                &scratch->session.negotiated.sbc,
+                scratch->session.negotiated.sbc.max_bitpool);
+        }
+        KeReleaseSpinLock(&ext->Lock, old_irql);
+
+        DbgPrint("Sonatina: D3 AVDTP streaming open (SEID=%u, %lu Hz, %lu kbps)\n",
+                 (unsigned)scratch->session.selected_acp_seid,
+                 ext->State.NegotiatedSampling,
+                 ext->State.BitrateKbps);
+    }
+
+cleanup:
+    if (scratch != NULL) {
+        ExFreePoolWithTag(scratch, SONT_POOL_TAG);
+    }
+    PsTerminateSystemThread(status);
+}
+
+static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+{
+    HANDLE thread_handle = NULL;
+    NTSTATUS status;
+
+    KeClearEvent(&ext->StopEvent);
+    status = PsCreateSystemThread(&thread_handle, THREAD_ALL_ACCESS,
+                                  NULL, NULL, NULL,
+                                  SontSignalingWorker, ext);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ObReferenceObjectByHandle(thread_handle, SYNCHRONIZE,
+                                       *PsThreadType, KernelMode,
+                                       &ext->WorkerThread, NULL);
+    (void)ZwClose(thread_handle);
+    if (!NT_SUCCESS(status)) {
+        ext->WorkerThread = NULL;
+        KeSetEvent(&ext->StopEvent, IO_NO_INCREMENT, FALSE);
+    }
+    return status;
+}
+
+static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+{
+    KeSetEvent(&ext->StopEvent, IO_NO_INCREMENT, FALSE);
+    if (ext->WorkerThread != NULL) {
+        KeWaitForSingleObject(ext->WorkerThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(ext->WorkerThread);
+        ext->WorkerThread = NULL;
+    }
+}
+
 static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
@@ -192,6 +404,7 @@ static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
         if (ext->ControlInterfaceRegistered) {
             (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, FALSE);
         }
+        SontStopSignalingWorker(ext);
     }
 
     if (stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {

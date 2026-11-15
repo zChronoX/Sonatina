@@ -217,10 +217,199 @@ bool SontAvdtpParseCapabilities(const uint8_t *data, size_t length,
                 if (body_len < 6 || !SontDecodeSbcOctets(body + 2, &caps->sbc)) {
                     return false;
                 }
+                SONT_MEMCPY(caps->raw_sbc, body + 2, 4);
+                caps->has_raw_sbc = true;
             }
         }
     }
     return seen_codec;
+}
+
+size_t SontAvdtpEncodeSingleSeid(uint8_t seid, uint8_t *out, size_t capacity)
+{
+    if (out == NULL || capacity < 1 || seid == 0 || seid > 62) {
+        return 0;
+    }
+    out[0] = (uint8_t)(seid & 0x3F);
+    return 1;
+}
+
+size_t SontAvdtpEncodeSepList(const SONT_SEP_INFO *seps, size_t count,
+                              uint8_t *out, size_t capacity)
+{
+    size_t i;
+
+    if (out == NULL || count == 0 || seps == NULL || capacity < count * 2) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (seps[i].seid == 0 || seps[i].seid > 62) {
+            return 0;
+        }
+        out[i * 2] = (uint8_t)((seps[i].in_use ? 0x80 : 0x00) |
+                               ((seps[i].seid & 0x3F) << 1));
+        out[i * 2 + 1] = (uint8_t)(((seps[i].media_type & 0x0F) << 4) |
+                                   ((seps[i].tsep & 0x03) << 2));
+    }
+    return count * 2;
+}
+
+bool SontAvdtpParseSepList(const uint8_t *data, size_t length,
+                           SONT_SEP_INFO *seps, size_t max_seps, size_t *out_count)
+{
+    size_t i;
+    size_t count = 0;
+
+    if (seps == NULL || out_count == NULL || (length != 0 && data == NULL) ||
+        (length % 2) != 0) {
+        return false;
+    }
+    for (i = 0; i < length; i += 2) {
+        uint8_t seid = (uint8_t)((data[i] >> 1) & 0x3F);
+        if (seid == 0) {
+            return false;
+        }
+        if (count < max_seps) {
+            seps[count].seid = seid;
+            seps[count].in_use = (data[i] & 0x80) != 0;
+            seps[count].media_type = (uint8_t)((data[i + 1] >> 4) & 0x0F);
+            seps[count].tsep = (uint8_t)((data[i + 1] >> 2) & 0x03);
+            count++;
+        }
+    }
+    *out_count = count;
+    return true;
+}
+
+bool SontAvdtpSelectSbcConfig(const uint8_t peer_sbc[4],
+                              const SONT_SBC_PARAMS *preferred,
+                              SONT_SBC_PARAMS *selected)
+{
+    static const uint32_t freqs[] = {48000, 44100, 32000, 16000};
+    static const uint8_t freq_bits[] = {0x10, 0x20, 0x40, 0x80};
+    static const uint8_t modes[] = {3, 2, 1, 0};
+    static const uint8_t mode_bits[] = {0x01, 0x02, 0x04, 0x08};
+    static const uint8_t blocks[] = {16, 12, 8, 4};
+    static const uint8_t block_bits[] = {0x10, 0x20, 0x40, 0x80};
+    SONT_SBC_PARAMS result;
+    uint8_t peer_min, peer_max, min_bp, max_bp;
+    size_t i;
+    bool ok;
+
+    if (peer_sbc == NULL || preferred == NULL || selected == NULL) {
+        return false;
+    }
+    SONT_MEMSET(&result, 0, sizeof(result));
+
+    /* Sampling frequency: prefer requested rate if sink advertises it, else highest supported. */
+    ok = false;
+    for (i = 0; i < 4; i++) {
+        if (preferred->sampling == freqs[i] && (peer_sbc[0] & freq_bits[i]) != 0) {
+            result.sampling = freqs[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        for (i = 0; i < 4; i++) {
+            if ((peer_sbc[0] & freq_bits[i]) != 0) {
+                result.sampling = freqs[i];
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    /* Channel mode: prefer requested mode, else joint -> stereo -> dual -> mono. */
+    ok = false;
+    for (i = 0; i < 4; i++) {
+        if (preferred->channel_mode == modes[i] && (peer_sbc[0] & mode_bits[i]) != 0) {
+            result.channel_mode = modes[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        for (i = 0; i < 4; i++) {
+            if ((peer_sbc[0] & mode_bits[i]) != 0) {
+                result.channel_mode = modes[i];
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    /* Block length: prefer requested, else 16 -> 12 -> 8 -> 4. */
+    ok = false;
+    for (i = 0; i < 4; i++) {
+        if (preferred->blocks == blocks[i] && (peer_sbc[1] & block_bits[i]) != 0) {
+            result.blocks = blocks[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        for (i = 0; i < 4; i++) {
+            if ((peer_sbc[1] & block_bits[i]) != 0) {
+                result.blocks = blocks[i];
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    /* Subbands: bit 2 = 8 subbands, bit 3 = 4 subbands. */
+    if ((peer_sbc[1] & 0x0C) == 0) {
+        return false;
+    }
+    if (preferred->subbands == 8 && (peer_sbc[1] & 0x04) != 0) {
+        result.subbands = 8;
+    } else if (preferred->subbands == 4 && (peer_sbc[1] & 0x08) != 0) {
+        result.subbands = 4;
+    } else {
+        result.subbands = (peer_sbc[1] & 0x04) ? 8 : 4;
+    }
+
+    /* Allocation: bit 0 = loudness (1), bit 1 = SNR (0). */
+    if ((peer_sbc[1] & 0x03) == 0) {
+        return false;
+    }
+    if (preferred->allocation == 1 && (peer_sbc[1] & 0x01) != 0) {
+        result.allocation = 1;
+    } else if (preferred->allocation == 0 && (peer_sbc[1] & 0x02) != 0) {
+        result.allocation = 0;
+    } else {
+        result.allocation = (peer_sbc[1] & 0x01) ? 1 : 0;
+    }
+
+    peer_min = peer_sbc[2];
+    peer_max = peer_sbc[3];
+    if (peer_min > peer_max) {
+        uint8_t tmp = peer_min;
+        peer_min = peer_max;
+        peer_max = tmp;
+    }
+    min_bp = (preferred->min_bitpool > peer_min) ? preferred->min_bitpool : peer_min;
+    max_bp = (preferred->max_bitpool < peer_max) ? preferred->max_bitpool : peer_max;
+    if (min_bp < 2) {
+        min_bp = 2;
+    }
+    if (min_bp > max_bp) {
+        return false;
+    }
+    result.min_bitpool = min_bp;
+    result.max_bitpool = max_bp;
+    *selected = result;
+    return true;
 }
 
 size_t SontAvdtpEncodeSetConfiguration(uint8_t acp_seid, uint8_t int_seid,

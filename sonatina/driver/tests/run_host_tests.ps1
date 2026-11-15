@@ -26,6 +26,7 @@ $exe = Join-Path $OutDir 'host_test.exe'
 $sources = @(
     (Join-Path $testsDir 'host_test.c'),
     (Join-Path $srcDir 'avdtp.c'),
+    (Join-Path $srcDir 'avdtp_session.c'),
     (Join-Path $srcDir 'rtp.c'),
     (Join-Path $srcDir 'codec_sbc.c')
 )

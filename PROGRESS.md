@@ -48,6 +48,7 @@
   cleanup `IRP_MN_REMOVE_DEVICE` in `SontPnpDispatch`, `KSCATEGORY_REALTIME` +
   `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e `SonatinaAudio.vcxproj`
   (`portcls.lib`, `stdunk.lib`, `libcntpr.lib`).
+- D3 implementato lato host + kernel (compilazione WDK CI e verifica runtime su VM A3 da eseguire): aggiunti helper SEP/single-SEID e `SontAvdtpSelectSbcConfig` in `src/avdtp.*`, macchina a stati portabile `src/avdtp_session.h/.c` (Discover → GetCapabilities con probing SEID SNK e fallback → SetConfiguration → Open → Start + Suspend/Resume/Close/Abort), 36 vettori di parita' Python/C in `driver/tests/` + `test_driver_vectors.py`, ricezione L2CAP cancellabile `SontTransportReceive` in `src/brb_transport.*` e worker kernel `SontSignalingWorker` (`src/driver.c`, `src/device.h`) con stop pulito su `IRP_MN_SURPRISE_REMOVAL`/`IRP_MN_REMOVE_DEVICE`.
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`

@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(host_test
     host_test.c
     ../src/avdtp.c
+    ../src/avdtp_session.c
     ../src/rtp.c
     ../src/codec_sbc.c
 )

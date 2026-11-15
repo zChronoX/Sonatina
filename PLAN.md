@@ -89,8 +89,7 @@ selected codec in kernel. Design: `sonatina/driver/DESIGN.md`.
   `SontStartDevice` / `SontPnpDispatch` (`driver.c`), `KSCATEGORY_REALTIME` /
   `Supports_EventDriven_Mode` (`SonatinaAudio.inf`) and `SonatinaAudio.vcxproj`.
   Acceptance: KS pins visible, 30 min idle clean under Driver Verifier.
-- **D3 - BRB signalling**: open PSM `0x0019`, Discover/GetCapabilities against a
-  real headset. Acceptance: wire bytes identical to the Python reference.
+- **D3 - BRB signalling**: implemented (portable C session + kernel worker, WDK CI + VM runtime verification pending; A3 deferred). Extended `src/avdtp.*` (SEP list, single-SEID, `SontAvdtpSelectSbcConfig`), added portable state machine `src/avdtp_session.h/.c` + 36 host/Python parity vectors (`generate_vectors.py`, `host_test.c`), added cancellable `SontTransportReceive` (`src/brb_transport.*`), and wired `SontSignalingWorker` (`driver.c`, `device.h`) opening PSM `0x0019` → handshake → PSM `0x0017` with `StopEvent` teardown on `IRP_MN_REMOVE_DEVICE`. Acceptance: wire bytes identical to the Python reference (verified in host tests) and handshake completes cleanly against a real headset in VM.
 - **D4 - SBC media**: `src/codec_sbc.c`, `src/rtp.c`, media PSM `0x0017`.
   Acceptance: audible audio, bitrate within 5% of `sonatina.sbc.bitrate`.
 - **D5 - service + profiles**: native service, registry

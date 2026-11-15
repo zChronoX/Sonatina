@@ -71,8 +71,10 @@ static NTSTATUS SontQueryRemoteAddress(PDEVICE_OBJECT parent, BTH_ADDR *address)
     return status;
 }
 
-/* Submit one BRB synchronously. The caller frees the BRB afterwards. */
-static NTSTATUS SontSubmitBrb(PDEVICE_OBJECT parent, PVOID brb)
+/* Submit one BRB synchronously, optionally bounded by `stop_event` and `timeout_ms`.
+ * The caller frees the BRB afterwards. */
+static NTSTATUS SontSubmitBrbTimed(PDEVICE_OBJECT parent, PVOID brb,
+                                   PKEVENT stop_event, ULONG timeout_ms)
 {
     PIRP irp;
     PIO_STACK_LOCATION stack;
@@ -92,11 +94,44 @@ static NTSTATUS SontSubmitBrb(PDEVICE_OBJECT parent, PVOID brb)
     IoSetCompletionRoutine(irp, SontSyncCompletion, &event, TRUE, TRUE, TRUE);
     status = IoCallDriver(parent, irp);
     if (status == STATUS_PENDING) {
-        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        PVOID objects[2];
+        ULONG count = 1;
+        LARGE_INTEGER due;
+        LARGE_INTEGER *p_due = NULL;
+        NTSTATUS wait_status;
+
+        objects[0] = &event;
+        if (stop_event != NULL) {
+            objects[1] = stop_event;
+            count = 2;
+        }
+        if (timeout_ms != 0) {
+            due.QuadPart = -(LONGLONG)timeout_ms * 10000LL;
+            p_due = &due;
+        }
+
+        wait_status = KeWaitForMultipleObjects(count, objects, WaitAny,
+                                               Executive, KernelMode, FALSE,
+                                               p_due, NULL);
+        if (wait_status == STATUS_TIMEOUT || wait_status == STATUS_WAIT_1) {
+            (void)IoCancelIrp(irp);
+            KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+            status = irp->IoStatus.Status;
+            if (status == STATUS_CANCELLED && wait_status == STATUS_TIMEOUT) {
+                status = STATUS_IO_TIMEOUT;
+            }
+            IoFreeIrp(irp);
+            return status;
+        }
     }
     status = irp->IoStatus.Status;
     IoFreeIrp(irp);
     return status;
+}
+
+static NTSTATUS SontSubmitBrb(PDEVICE_OBJECT parent, PVOID brb)
+{
+    return SontSubmitBrbTimed(parent, brb, NULL, 0);
 }
 
 static void SontL2capCallback(PVOID context, INDICATION_CODE indication,
@@ -220,6 +255,43 @@ NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE chann
     brb->Timeout = 0;
 
     status = SontSubmitBrb(transport->Parent, brb);
+    transport->Bth.BthFreeBrb((PBRB)brb);
+    return status;
+}
+
+NTSTATUS SontTransportReceive(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
+                              void *buffer, ULONG capacity, ULONG *received,
+                              PKEVENT stop_event, ULONG timeout_ms)
+{
+    struct _BRB_L2CA_ACL_TRANSFER *brb;
+    NTSTATUS status;
+
+    if (received == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *received = 0;
+
+    if (transport == NULL || channel == NULL || buffer == NULL ||
+        capacity == 0 || !transport->HasBth) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    brb = (struct _BRB_L2CA_ACL_TRANSFER *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_ACL_TRANSFER, SONT_POOL_TAG);
+    if (brb == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    brb->ChannelHandle = channel;
+    brb->TransferFlags = ACL_TRANSFER_DIRECTION_IN | ACL_SHORT_TRANSFER_OK;
+    brb->Buffer = buffer;
+    brb->BufferSize = capacity;
+    brb->BufferMDL = NULL;
+    brb->Timeout = 0;
+
+    status = SontSubmitBrbTimed(transport->Parent, brb, stop_event, timeout_ms);
+    if (NT_SUCCESS(status)) {
+        *received = (brb->BufferSize <= capacity) ? brb->BufferSize : capacity;
+    }
     transport->Bth.BthFreeBrb((PBRB)brb);
     return status;
 }

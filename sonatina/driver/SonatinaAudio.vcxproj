@@ -110,6 +110,7 @@
     <ClCompile Include="src\driver.c" />
     <ClCompile Include="src\brb_transport.c" />
     <ClCompile Include="src\avdtp.c" />
+    <ClCompile Include="src\avdtp_session.c" />
     <ClCompile Include="src\rtp.c" />
     <ClCompile Include="src\codec_sbc.c" />
     <ClCompile Include="src\miniport_topology.cpp" />
@@ -122,6 +123,7 @@
     <ClInclude Include="src\device.h" />
     <ClInclude Include="src\brb_transport.h" />
     <ClInclude Include="src\avdtp.h" />
+    <ClInclude Include="src\avdtp_session.h" />
     <ClInclude Include="src\rtp.h" />
     <ClInclude Include="src\codec_sbc.h" />
     <ClInclude Include="src\portable.h" />
