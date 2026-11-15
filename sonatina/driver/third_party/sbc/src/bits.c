@@ -113,11 +113,14 @@ static inline void flush_accu(struct sbc_bits *bits)
 void sbc_setup_bits(struct sbc_bits *bits,
     enum sbc_bits_mode mode, void *data, unsigned size)
 {
-    *bits = (struct sbc_bits){
-        .mode = mode,
-        .accu.nleft = mode == SBC_BITS_READ ? 0 : 8*sizeof(bits_accu_t),
-        .data.p = data, .data.nbytes = size, .data.nleft = size,
-    };
+    bits->mode = mode;
+    bits->data.p = (uint8_t *)data;
+    bits->data.nbytes = size;
+    bits->data.nleft = size;
+    bits->accu.v = 0;
+    bits->accu.nleft = mode == SBC_BITS_READ ? 0 : 8 * sizeof(bits_accu_t);
+    bits->accu.nover = 0;
+    bits->error = false;
 }
 
 /**

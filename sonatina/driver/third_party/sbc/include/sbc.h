@@ -148,10 +148,17 @@ typedef struct sbc
     int nchannels;
     int nblocks, nsubbands;
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201)
+#endif
     union {
         struct sbc_dstate dstates[2];
         struct sbc_estate estates[2];
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 } sbc_t;
 

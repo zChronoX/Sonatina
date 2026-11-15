@@ -75,7 +75,23 @@ void sbc_synthesize_8(struct sbc_dstate *state,
  * Count number of leading zero bits
  */
 
+#ifdef _MSC_VER
+static __inline int sbc_clz_portable(unsigned n)
+{
+    int z = 0;
+    if (n == 0)
+        return 32;
+    if ((n & 0xFFFF0000U) == 0) { z += 16; n <<= 16; }
+    if ((n & 0xFF000000U) == 0) { z += 8;  n <<= 8;  }
+    if ((n & 0xF0000000U) == 0) { z += 4;  n <<= 4;  }
+    if ((n & 0xC0000000U) == 0) { z += 2;  n <<= 2;  }
+    if ((n & 0x80000000U) == 0) { z += 1; }
+    return z;
+}
+#define SBC_CLZ(n) sbc_clz_portable((n))
+#else
 #define SBC_CLZ(n) __builtin_clz(n)
+#endif
 
 
 /**
@@ -383,7 +399,7 @@ int sbc_get_frame_bps(enum sbc_freq freq)
  */
 void sbc_reset(struct sbc *sbc)
 {
-    *sbc = (struct sbc){ };
+    memset(sbc, 0, sizeof(*sbc));
 }
 
 
@@ -946,7 +962,7 @@ static void compute_scale_factors_js(const struct sbc_frame *frame,
     *mjoint = 0;
 
     for (int isb = 0; isb < frame->nsubbands; isb++) {
-        unsigned m[2] = { }, mj[2] = { };
+        unsigned m[2] = { 0, 0 }, mj[2] = { 0, 0 };
 
         for (int iblk = 0; iblk < frame->nblocks; iblk++) {
             int s0 = sb_samples[0][iblk * frame->nsubbands + isb];
