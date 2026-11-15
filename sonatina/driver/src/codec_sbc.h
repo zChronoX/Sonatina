@@ -7,9 +7,7 @@
 #ifndef SONATINA_CODEC_SBC_H
 #define SONATINA_CODEC_SBC_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "portable.h"
 
 typedef struct _SONT_SBC_PARAMS {
     uint32_t sampling;      /* Hz: 16000/32000/44100/48000 */

@@ -1,8 +1,5 @@
 #include "brb_transport.h"
 
-#include <bthdef.h>
-#include <bthioctl.h>
-
 #define SONT_POOL_TAG 'anOS'   /* "SOna" */
 
 static NTSTATUS SontSyncCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)

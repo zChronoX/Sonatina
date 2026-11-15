@@ -6,9 +6,7 @@
 #ifndef SONATINA_AVDTP_H
 #define SONATINA_AVDTP_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "portable.h"
 
 #include "codec_sbc.h"
 

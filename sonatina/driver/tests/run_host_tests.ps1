@@ -58,7 +58,12 @@ if ($cl) {
 }
 elseif ($clang) {
     Write-Host 'compiling host_test with clang (-DSONATINA_HOST)...'
-    & $clang.Source -std=c11 -Wall -Wextra -Werror -DSONATINA_HOST -o $exe @sources -lm
+    $clangTarget = & $clang.Source -dumpmachine 2>$null
+    $clangArgs = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-DSONATINA_HOST', '-o', $exe) + $sources
+    if ($clangTarget -notmatch 'msvc') {
+        $clangArgs += '-lm'
+    }
+    & $clang.Source @clangArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 elseif ($gcc) {

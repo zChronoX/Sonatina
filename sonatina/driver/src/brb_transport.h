@@ -8,6 +8,9 @@
 #define SONATINA_BRB_TRANSPORT_H
 
 #include <ntddk.h>
+#include <bthdef.h>
+#include <bthsdpdef.h>
+#include <bthioctl.h>
 #include <bthddi.h>
 
 #define SONT_L2CAP_PSM_AVDTP 0x0019

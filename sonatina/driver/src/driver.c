@@ -4,11 +4,15 @@
  * thread are added in D2-D4 (see DESIGN.md).
  */
 #include <ntddk.h>
+#pragma warning(push)
+#pragma warning(disable: 4115)
 #include <portcls.h>
-#include <initguid.h>
+#pragma warning(pop)
 
-#include "device.h"
+#include "brb_transport.h"
+#include <initguid.h>
 #include "public.h"
+#include "device.h"
 
 #define SONT_POOL_TAG 'anOS'
 

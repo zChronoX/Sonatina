@@ -2,9 +2,7 @@
 #ifndef SONATINA_RTP_H
 #define SONATINA_RTP_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "portable.h"
 
 #define SONT_RTP_HEADER_LEN 12
 #define SONT_RTP_PAYLOAD_TYPE 96

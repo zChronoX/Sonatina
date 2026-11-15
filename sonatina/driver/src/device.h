@@ -3,7 +3,10 @@
 #define SONATINA_DEVICE_H
 
 #include <ntddk.h>
+#pragma warning(push)
+#pragma warning(disable: 4115)
 #include <portcls.h>
+#pragma warning(pop)
 
 #include "brb_transport.h"
 #include "public.h"
