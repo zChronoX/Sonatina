@@ -661,7 +661,7 @@ CMiniportWaveRTStreamSonatina::NonDelegatingQueryInterface(
     return STATUS_SUCCESS;
 }
 
-#pragma code_seg("PAGE")
+#pragma code_seg()
 STDMETHODIMP_(NTSTATUS)
 CMiniportWaveRTStreamSonatina::AllocateAudioBuffer(
     _In_ ULONG RequestedSize,
@@ -717,7 +717,7 @@ CMiniportWaveRTStreamSonatina::AllocateAudioBuffer(
     return STATUS_SUCCESS;
 }
 
-#pragma code_seg("PAGE")
+#pragma code_seg()
 STDMETHODIMP_(VOID)
 CMiniportWaveRTStreamSonatina::FreeAudioBuffer(
     _In_opt_ PMDL AudioBufferMdl,
@@ -747,7 +747,7 @@ CMiniportWaveRTStreamSonatina::FreeAudioBuffer(
     }
 }
 
-#pragma code_seg("PAGE")
+#pragma code_seg()
 STDMETHODIMP_(NTSTATUS)
 CMiniportWaveRTStreamSonatina::AllocateBufferWithNotification(
     _In_ ULONG NotificationCount,
@@ -818,7 +818,7 @@ CMiniportWaveRTStreamSonatina::AllocateBufferWithNotification(
     return STATUS_SUCCESS;
 }
 
-#pragma code_seg("PAGE")
+#pragma code_seg()
 STDMETHODIMP_(VOID)
 CMiniportWaveRTStreamSonatina::FreeBufferWithNotification(
     _In_ PMDL AudioBufferMdl,

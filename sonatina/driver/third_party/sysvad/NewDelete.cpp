@@ -86,16 +86,7 @@ void __cdecl operator delete
 }
 #endif // __cpp_aligned_new
 
-void __cdecl operator delete
-(
-    PVOID pVoid
-)
-{
-    if (pVoid)
-    {
-        ExFreePoolWithTag(pVoid, SONT_SYSVAD_POOLTAG);
-    }
-}
+/* Unsized scalar `operator delete(void *)` is provided by WDK stdunk.lib. */
 
 void __cdecl operator delete[]
 (
