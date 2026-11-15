@@ -100,14 +100,19 @@ reconnects the headset with the new parameters.
 - **Done**: `devcon install` on the VM → device starts, no bugcheck, a control
   interface `{6E1F2C7A-…}` is openable from user mode.
 
-### D2. WaveRT render + topology endpoints `[ ]`
+### D2. WaveRT render + topology endpoints `[~]`
 - **Why**: without KS endpoints the Windows audio engine cannot route audio to
   us and the headset never appears as a playback device.
-- **Do**: vendor `audio/sysvad/EndpointsCommon` (MIT) and subclass
-  `CMiniportWaveRTSonatina` / `CMiniportTopologySonatina`; register subdevices
-  with `PcRegisterSubdevice` in `SontStartDevice`.
+- **Do**: vendor minimal `audio/sysvad` core (MS-PL: `LICENSE`, `NOTICE.txt`,
+  `NewDelete.h/.cpp`, `simple.h`) into `third_party/sysvad/` and implement
+  `CMiniportWaveRTSonatina` / `CMiniportWaveRTStreamSonatina`
+  (`src/miniport_wavert.*`) + `CMiniportTopologySonatina`
+  (`src/miniport_topology.*`); register `Wave` and `Topology` subdevices and
+  physical connection via `SontRegisterAudioSubdevices` in `SontStartDevice`.
 - **Done**: "Sonatina Bluetooth audio Wave" appears in Sound settings; KS Studio shows one
   render pin; 30 min of silence under Driver Verifier with no underrun errors.
+- **Status**: subdevice/miniport implementation written and wired into
+  `SonatinaAudio.vcxproj`; WDK compilation in CI and VM runtime test pending.
 
 ### D3. BRB transport + AVDTP handshake `[ ]`
 - **Why**: this is the real connection to the headset; everything else is local.

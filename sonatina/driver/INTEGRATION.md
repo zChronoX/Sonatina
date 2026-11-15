@@ -5,17 +5,13 @@ from scratch. Everything external here is open source with a permissive licence.
 
 ## 1. Vendor the audio scaffolding
 
-Use the Microsoft audio samples as the PortCls base (MIT licence):
+Use the Microsoft audio samples as the PortCls base (MS-PL licence, see
+`third_party/sysvad/LICENSE`):
 
-- `audio/sysvad/EndpointsCommon` — WaveRT render miniport + topology miniport,
-  the adapter/stream classes and the KS property handlers.
-
-Copy it under `third_party/sysvad/`, keep its `LICENSE`, and subclass:
-
-- `CMiniportWaveRTSonatina : CMiniportWaveRT` — exposes one render pin and pulls
-  PCM from the cyclic buffer.
-- `CMiniportTopologySonatina : CMiniportTopology` — minimal topology with the
-  endpoint association property.
+- `third_party/sysvad/` — minimal SysVAD subset (`NewDelete`, `simple.h`)
+  adapted under MS-PL, paired with `CMiniportWaveRTSonatina` /
+  `CMiniportWaveRTStreamSonatina` (`src/miniport_wavert.*`) and
+  `CMiniportTopologySonatina` (`src/miniport_topology.*`).
 
 Do this instead of reimplementing `IMiniportWaveRT` by hand: the boilerplate is
 large and security-sensitive, and the sample is the reference Microsoft tests

@@ -80,8 +80,14 @@ selected codec in kernel. Design: `sonatina/driver/DESIGN.md`.
   `PcGetPhysicalDeviceObject`, `L2CAP_CHANNEL_HANDLE *`, `portable.h` kernel
   typedefs. Acceptance: device starts on the AudioSink devnode in a VM, no
   bugcheck, control interface opens.
-- **D2 - WaveRT + topology, silence**: `src/miniport_wavert.cpp`,
-  `src/miniport_topology.cpp`. Acceptance: KS pins visible, 30 min idle clean.
+- **D2 - WaveRT + topology, silence**: implemented in code (awaiting WDK CI
+  compile and VM runtime test). Added MS-PL `third_party/sysvad/` (`LICENSE`,
+  `NOTICE.txt`, `NewDelete.*`, `simple.h`), `src/miniport_topology.*`
+  (bridge + `KSPROPSETID_Jack` headphones), `src/miniport_wavert.*` (16-bit
+  stereo 44.1-96 kHz render sink, `EX_TIMER` + integer QPC position/events),
+  `src/miniport_subdevices.h`, wired into `SontStartDevice` (`driver.c`) and
+  `SonatinaAudio.vcxproj`. Acceptance: compiles cleanly in WDK CI; KS pins
+  visible, 30 min idle clean under Driver Verifier.
 - **D3 - BRB signalling**: open PSM `0x0019`, Discover/GetCapabilities against a
   real headset. Acceptance: wire bytes identical to the Python reference.
 - **D4 - SBC media**: `src/codec_sbc.c`, `src/rtp.c`, media PSM `0x0017`.

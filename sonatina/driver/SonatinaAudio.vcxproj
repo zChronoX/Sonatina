@@ -84,14 +84,15 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sbc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SONATINA_KERNEL;$(SonatinaLibsbcDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sysvad;$(ProjectDir)third_party\sbc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SONATINA_KERNEL;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;$(SonatinaLibsbcDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>4595;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <WppEnabled>false</WppEnabled>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>portcls.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(DDK_LIB_PATH)\portcls.lib;$(DDK_LIB_PATH)\stdunk.lib;$(DDK_LIB_PATH)\libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Inf>
       <TimeStamp>*</TimeStamp>
@@ -111,6 +112,9 @@
     <ClCompile Include="src\avdtp.c" />
     <ClCompile Include="src\rtp.c" />
     <ClCompile Include="src\codec_sbc.c" />
+    <ClCompile Include="src\miniport_topology.cpp" />
+    <ClCompile Include="src\miniport_wavert.cpp" />
+    <ClCompile Include="third_party\sysvad\NewDelete.cpp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -121,6 +125,11 @@
     <ClInclude Include="src\rtp.h" />
     <ClInclude Include="src\codec_sbc.h" />
     <ClInclude Include="src\portable.h" />
+    <ClInclude Include="src\miniport_subdevices.h" />
+    <ClInclude Include="src\miniport_topology.h" />
+    <ClInclude Include="src\miniport_wavert.h" />
+    <ClInclude Include="third_party\sysvad\NewDelete.h" />
+    <ClInclude Include="third_party\sysvad\simple.h" />
   </ItemGroup>
 
   <ItemGroup>

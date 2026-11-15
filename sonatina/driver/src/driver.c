@@ -13,6 +13,7 @@
 #include "brb_transport.h"
 #include "public.h"
 #include "device.h"
+#include "miniport_subdevices.h"
 
 #define SONT_POOL_TAG 'anOS'
 
@@ -46,9 +47,6 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
     PSONT_DEVICE_EXTENSION ext = SONT_GET_EXTENSION(device);
     PDEVICE_OBJECT target;
     NTSTATUS status;
-
-    UNREFERENCED_PARAMETER(irp);
-    UNREFERENCED_PARAMETER(resources);
 
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
@@ -86,7 +84,21 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
                  status);
     }
 
-    /* TODO(D2): PcRegisterSubdevice for the WaveRT and topology miniports. */
+    status = SontRegisterAudioSubdevices(device, irp, resources);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("Sonatina: SontRegisterAudioSubdevices failed 0x%08X\n", status);
+        if (ext->ControlInterfaceRegistered) {
+            (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, FALSE);
+            RtlFreeUnicodeString(&ext->ControlInterfaceName);
+            ext->ControlInterfaceRegistered = FALSE;
+        }
+        if (ext->LowerDeviceObject != NULL) {
+            ObDereferenceObject(ext->LowerDeviceObject);
+            ext->LowerDeviceObject = NULL;
+        }
+        return status;
+    }
+
     /* TODO(D3): open SONT_L2CAP_PSM_AVDTP and run the signalling state machine. */
 
     /* PortCls completes IRP_MN_START_DEVICE after StartDevice returns. */

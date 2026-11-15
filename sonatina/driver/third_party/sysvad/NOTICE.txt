@@ -1,0 +1,10 @@
+Sonatina embeds a minimal kernel PortCls helper subset derived from
+Microsoft's Windows-driver-samples (audio/sysvad), licensed under the
+Microsoft Public License (MS-PL); see LICENSE in this directory.
+
+Retained / minimally adapted SysVAD files:
+- NewDelete.h      (from audio/sysvad/EndpointsCommon/NewDelete.h)
+- NewDelete.cpp    (from audio/sysvad/EndpointsCommon/NewDelete.cpp;
+                    detached from sysvad.h and uses pool tag 'anOS')
+- simple.h         (from audio/sysvad/EndpointsCommon/simple.h;
+                    pin/node index definitions for 2-pin WaveRT + Topology)
