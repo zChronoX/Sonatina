@@ -1068,7 +1068,10 @@ static void encode_header(sbc_bits_t *bits, const struct sbc_frame *frame)
 static int put_crc(const struct sbc_frame *frame, void *data, unsigned size)
 {
     int crc = compute_crc(frame, data, size);
-    return crc < 0 ? -1 : (((uint8_t *)data)[3] = crc), 0;
+    if (crc < 0)
+        return -1;
+    ((uint8_t *)data)[3] = (uint8_t)crc;
+    return 0;
 }
 
 /**
