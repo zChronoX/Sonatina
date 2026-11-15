@@ -1,0 +1,65 @@
+name: Sonatina CI (Python + A1 Host + A2 Driver)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  python-and-host-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: python -m pip install numpy
+
+      - name: Run Python unit tests
+        working-directory: sonatina
+        run: python -m unittest discover -s tests -v
+
+      - name: Run A1 host protocol tests (C vs Python)
+        run: powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_host_tests.ps1
+
+  driver-compile-x64:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Setup 64-bit MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Restore WDK and Windows SDK NuGet packages
+        run: |
+          nuget install Microsoft.Windows.WDK.x64 -ExcludeVersion -OutputDirectory sonatina\driver\packages
+
+      - name: Build SonatinaAudio.sys (${{ matrix.configuration }}|x64)
+        run: |
+          msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+
+      - name: Run InfVerif /w
+        run: |
+          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse | Select-Object -First 1
+          if (-not $infVerif) { throw 'InfVerif.exe not found in restored WDK packages' }
+          & $infVerif.FullName /w sonatina\driver\inf\SonatinaAudio.inf
+
+      - name: Upload driver build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonatinaAudio-${{ matrix.configuration }}-x64
+          path: sonatina\driver\build\x64\${{ matrix.configuration }}\

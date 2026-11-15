@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <_SontPkgDir>$(MSBuildThisFileDirectory)packages\</_SontPkgDir>
+  </PropertyGroup>
+
+  <Import Project="$(_SontPkgDir)Microsoft.Windows.SDK.CPP\build\native\Microsoft.Windows.SDK.cpp.props"
+          Condition="Exists('$(_SontPkgDir)Microsoft.Windows.SDK.CPP\build\native\Microsoft.Windows.SDK.cpp.props')" />
+  <Import Project="$(_SontPkgDir)Microsoft.Windows.SDK.CPP.x64\build\native\Microsoft.Windows.SDK.cpp.x64.props"
+          Condition="'$(Platform)' == 'x64' and Exists('$(_SontPkgDir)Microsoft.Windows.SDK.CPP.x64\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="$(_SontPkgDir)Microsoft.Windows.WDK.x64\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="'$(Platform)' == 'x64' and Exists('$(_SontPkgDir)Microsoft.Windows.WDK.x64\build\native\Microsoft.Windows.WDK.x64.props')" />
+</Project>

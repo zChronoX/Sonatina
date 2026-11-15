@@ -1,0 +1,102 @@
+; Sonatina native Bluetooth audio driver - installation package.
+;
+; Binds to the Bluetooth AudioSink devnode and replaces the inbox Bluetooth audio function
+; driver for the selected headset. Class MEDIA, PortCls/KS audio endpoints.
+;
+; NOTE: scaffold. Not signed and not validated with InfVerif yet.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = MEDIA
+ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Provider%
+DriverVer   = 11/15/2026,0.1.0.0
+CatalogFile = SonatinaAudio.cat
+PnpLockDown = 1
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+SonatinaAudio.sys = 1,,
+
+[DestinationDirs]
+SonatinaAudio_CopyFiles = 13
+
+[Manufacturer]
+%Provider% = Sonatina,NTamd64.10.0...16299,NTamd64.10.0...22000
+
+[Sonatina.NTamd64.10.0...16299]
+%DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
+
+[Sonatina.NTamd64.10.0...22000]
+%DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
+
+[SonatinaAudio_Inst]
+Include    = ks.inf,wdmaudio.inf
+Needs      = KS.Registration,WDMAUDIO.Registration
+CopyFiles  = SonatinaAudio_CopyFiles
+AddReg     = SonatinaAudio_AddReg
+
+[SonatinaAudio_CopyFiles]
+SonatinaAudio.sys,,,0x100
+
+[SonatinaAudio_AddReg]
+HKR,,Driver,,SonatinaAudio.sys
+
+[SonatinaAudio_Inst.Services]
+AddService = SonatinaAudio,0x00000002,SonatinaAudio_Service
+
+[SonatinaAudio_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1                 ; SERVICE_KERNEL_DRIVER
+StartType     = 3                 ; SERVICE_DEMAND_START
+ErrorControl  = 1                 ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\SonatinaAudio.sys
+AddReg        = SonatinaAudio_Service_AddReg
+
+[SonatinaAudio_Service_AddReg]
+HKR,Parameters,LogPages,%REG_DWORD%,0x10
+HKR,Parameters,VerboseOn,%REG_DWORD%,1
+
+[SonatinaAudio_Inst.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Topology%,SonatinaAudio_Topology
+AddInterface = %KSCATEGORY_TOPOLOGY%,%KSNAME_Topology%,SonatinaAudio_Topology
+AddInterface = %KSCATEGORY_AUDIO%,%KSNAME_Wave%,SonatinaAudio_Wave
+AddInterface = %KSCATEGORY_RENDER%,%KSNAME_Wave%,SonatinaAudio_Wave
+
+[SonatinaAudio_Topology]
+AddReg = SonatinaAudio_Topology_AddReg
+
+[SonatinaAudio_Topology_AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%TopologyName%
+HKR,"EP\\0",%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+
+[SonatinaAudio_Wave]
+AddReg = SonatinaAudio_Wave_AddReg
+
+[SonatinaAudio_Wave_AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%WaveName%
+
+[Strings]
+Provider      = "Sonatina Project"
+DiskName      = "Sonatina Audio Installation Disk"
+DeviceDesc    = "Sonatina Bluetooth Stereo Device"
+ServiceDesc   = "Sonatina Bluetooth Stereo Service"
+TopologyName  = "Sonatina Bluetooth Topology"
+WaveName      = "Sonatina Bluetooth Wave"
+
+KSNAME_Wave     = "Wave"
+KSNAME_Topology = "Topology"
+
+KSNODETYPE_ANY      = "{00000000-0000-0000-0000-000000000000}"
+KSCATEGORY_AUDIO    = "{6994ad04-93ef-11d0-a3cc-00a0c9223196}"
+KSCATEGORY_RENDER   = "{65e8773e-8f56-11d0-a3b9-00a0c9223196}"
+KSCATEGORY_TOPOLOGY = "{dda54a40-1e4c-11d1-a050-405705c10000}"
+Proxy.CLSID         = "{17cca71b-ecd7-11d0-b908-00a0c9223196}"
+
+PKEY_AudioEndpoint_Association = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},2"
+
+REG_DWORD = 0x00010001
