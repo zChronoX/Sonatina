@@ -9,8 +9,8 @@
 #include <portcls.h>
 #pragma warning(pop)
 
-#include "brb_transport.h"
 #include <initguid.h>
+#include "brb_transport.h"
 #include "public.h"
 #include "device.h"
 

@@ -90,7 +90,7 @@
       <WppEnabled>false</WppEnabled>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>portcls.lib;bthguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>portcls.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Inf>
       <TimeStamp>*</TimeStamp>
