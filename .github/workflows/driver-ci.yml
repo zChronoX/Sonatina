@@ -50,7 +50,7 @@ jobs:
 
       - name: Build SonatinaAudio.sys (${{ matrix.configuration }}|x64)
         run: |
-          msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+          msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:SignMode=Off
 
       - name: Run InfVerif /w
         run: |

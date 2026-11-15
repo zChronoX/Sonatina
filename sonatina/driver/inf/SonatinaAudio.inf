@@ -71,7 +71,7 @@ AddReg = SonatinaAudio_Topology_AddReg
 [SonatinaAudio_Topology_AddReg]
 HKR,,CLSID,,%Proxy.CLSID%
 HKR,,FriendlyName,,%TopologyName%
-HKR,"EP\\0",%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,"EP\0",%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
 
 [SonatinaAudio_Wave]
 AddReg = SonatinaAudio_Wave_AddReg

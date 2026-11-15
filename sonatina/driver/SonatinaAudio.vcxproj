@@ -74,6 +74,7 @@
     <OutDir>$(ProjectDir)build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)build\obj\$(Platform)\$(Configuration)\</IntDir>
     <EnableInf2cat>true</EnableInf2cat>
+    <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
   </PropertyGroup>
 
@@ -95,6 +96,9 @@
     <Inf>
       <TimeStamp>*</TimeStamp>
     </Inf>
+    <Inf2Cat>
+      <UseLocalTime>true</UseLocalTime>
+    </Inf2Cat>
   </ItemDefinitionGroup>
 
   <ItemGroup>
