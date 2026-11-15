@@ -12,6 +12,7 @@
 #include <bthsdpdef.h>
 #include <bthioctl.h>
 #include <bthddi.h>
+#include <bthguid.h>
 
 #define SONT_L2CAP_PSM_AVDTP 0x0019
 #define SONT_L2CAP_PSM_MEDIA 0x0017
@@ -27,10 +28,10 @@ typedef struct _SONT_TRANSPORT {
 
 NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT parent);
 NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
-                           PL2CAP_CHANNEL_HANDLE channel);
+                           L2CAP_CHANNEL_HANDLE *channel);
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
                            const void *data, ULONG length);
-VOID SontTransportClose(PSONT_TRANSPORT transport, PL2CAP_CHANNEL_HANDLE channel);
+VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel);
 VOID SontTransportTeardown(PSONT_TRANSPORT transport);
 
 #endif /* SONATINA_BRB_TRANSPORT_H */

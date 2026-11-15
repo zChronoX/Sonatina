@@ -3,7 +3,7 @@
  * the private control interface. WaveRT/topology subdevices and the streaming
  * thread are added in D2-D4 (see DESIGN.md).
  */
-#include <ntddk.h>
+#include <ntifs.h>
 #pragma warning(push)
 #pragma warning(disable: 4115)
 #include <portcls.h>
@@ -52,7 +52,11 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
 
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
-    ext->PhysicalDeviceObject = PcGetPhysicalDeviceObject(device);
+    status = PcGetPhysicalDeviceObject(device, &ext->PhysicalDeviceObject);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("Sonatina: PcGetPhysicalDeviceObject failed 0x%08X\n", status);
+        return status;
+    }
     ext->LowerDeviceObject = IoGetLowerDeviceObject(device);
     ext->Profile.Size = sizeof(SONATINA_PROFILE);
     ext->Profile.Codec = SonatinaCodecSbc;

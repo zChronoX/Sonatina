@@ -154,15 +154,15 @@ NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT paren
 }
 
 NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
-                           PL2CAP_CHANNEL_HANDLE channel)
+                           L2CAP_CHANNEL_HANDLE *channel)
 {
-    PBRB_L2CA_OPEN_CHANNEL brb;
+    struct _BRB_L2CA_OPEN_CHANNEL *brb;
     NTSTATUS status;
 
     if (transport == NULL || channel == NULL || !transport->HasBth) {
         return STATUS_INVALID_PARAMETER;
     }
-    brb = (PBRB_L2CA_OPEN_CHANNEL)transport->Bth.BthAllocateBrb(
+    brb = (struct _BRB_L2CA_OPEN_CHANNEL *)transport->Bth.BthAllocateBrb(
         BRB_L2CA_OPEN_CHANNEL, SONT_POOL_TAG);
     if (brb == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -201,13 +201,13 @@ NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
                            const void *data, ULONG length)
 {
-    PBRB_L2CA_ACL_TRANSFER brb;
+    struct _BRB_L2CA_ACL_TRANSFER *brb;
     NTSTATUS status;
 
     if (transport == NULL || channel == NULL || data == NULL || !transport->HasBth) {
         return STATUS_INVALID_PARAMETER;
     }
-    brb = (PBRB_L2CA_ACL_TRANSFER)transport->Bth.BthAllocateBrb(
+    brb = (struct _BRB_L2CA_ACL_TRANSFER *)transport->Bth.BthAllocateBrb(
         BRB_L2CA_ACL_TRANSFER, SONT_POOL_TAG);
     if (brb == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -224,16 +224,17 @@ NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE chann
     return status;
 }
 
-VOID SontTransportClose(PSONT_TRANSPORT transport, PL2CAP_CHANNEL_HANDLE channel)
+VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel)
 {
-    PBRB_L2CA_CLOSE_CHANNEL brb;
+    struct _BRB_L2CA_CLOSE_CHANNEL *brb;
 
     if (transport == NULL || channel == NULL || *channel == NULL || !transport->HasBth) {
         return;
     }
-    brb = (PBRB_L2CA_CLOSE_CHANNEL)transport->Bth.BthAllocateBrb(
+    brb = (struct _BRB_L2CA_CLOSE_CHANNEL *)transport->Bth.BthAllocateBrb(
         BRB_L2CA_CLOSE_CHANNEL, SONT_POOL_TAG);
     if (brb != NULL) {
+        brb->BtAddress = transport->RemoteAddress;
         brb->ChannelHandle = *channel;
         (void)SontSubmitBrb(transport->Parent, brb);
         transport->Bth.BthFreeBrb((PBRB)brb);
