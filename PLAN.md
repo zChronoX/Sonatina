@@ -65,17 +65,21 @@ selected codec in kernel. Design: `sonatina/driver/DESIGN.md`.
   `driver/tests/generate_vectors.py`, `CMakeLists.txt`, `run_host_tests.ps1`,
   and `tests/test_driver_vectors.py`. Verified with WinLibs `gcc 16.2.0`
   (`-Wall -Wextra -Werror -DSONATINA_HOST`): 28 vectors + 5 math cases, 0 failures.
-- **A2 - MSBuild project + build script**: partial (not compiled). Added
-  `SonatinaAudio.vcxproj` (WDM template, `-DSONATINA_KERNEL`,
-  `third_party\sbc` include) and updated `driver/build.ps1` (`vswhere` +
-  `InfVerif` + `inf2cat`). Requires VS 2022 + WDK 10.
+- **A2 - MSBuild project + build script**: done (via GitHub Actions WDK CI).
+  `SonatinaAudio.vcxproj` (WDM template, `-DSONATINA_KERNEL`, `third_party\sbc`
+  include, `FileDigestAlgorithm=sha256`, `Inf2Cat` local time) compiles
+  `SonatinaAudio.sys` (Debug & Release x64, 0 warnings/errors) and
+  `InfVerif /w sonatina\driver\inf\SonatinaAudio.inf` passes in CI run #5.
+  `driver/build.ps1` ready for local WDK builds.
+- **A5 - compile-only CI**: done. `.github/workflows/driver-ci.yml` (`windows-latest`
+  + `Microsoft.Windows.WDK.x64` NuGet + Python/A1 host tests + `InfVerif /w`).
 - **A6 - kernel coding rules**: done (`driver/CONTRIBUTING.md`).
-- **D1 - driver loads**: scaffold present and statically audited against WDK
-  docs (`driver.c`, `brb_transport.c`, `device.h`, `portable.h` fixed for
-  `PORT_CLASS_DEVICE_EXTENSION_SIZE`, `StartDevice` IRP ownership, `initguid.h`,
-  `BTH_PROFILE_DRIVER_INTERFACE`, `CFG_MTU`/`CFG_FLUSHTO`). Not compiled.
-  Acceptance: device starts on the AudioSink devnode, no bugcheck, endpoint
-  enumerates.
+- **D1 - driver loads**: partial (compiles and links cleanly in x64 WDK CI,
+  runtime VM load pending). Fixed `PORT_CLASS_DEVICE_EXTENSION_SIZE`, `StartDevice`
+  IRP ownership, `<ntifs.h>`/`<portcls.h>`/`<bthguid.h>`/`<initguid.h>` order,
+  `PcGetPhysicalDeviceObject`, `L2CAP_CHANNEL_HANDLE *`, `portable.h` kernel
+  typedefs. Acceptance: device starts on the AudioSink devnode in a VM, no
+  bugcheck, control interface opens.
 - **D2 - WaveRT + topology, silence**: `src/miniport_wavert.cpp`,
   `src/miniport_topology.cpp`. Acceptance: KS pins visible, 30 min idle clean.
 - **D3 - BRB signalling**: open PSM `0x0019`, Discover/GetCapabilities against a

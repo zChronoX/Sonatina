@@ -22,26 +22,26 @@
   WinLibs `gcc 16.2.0` (`-Wall -Wextra -Werror -DSONATINA_HOST`) e verificato
   con `generate_vectors.py --verify`: `28 vectors + 5 math cases checked, 0 failures`.
   Corretto in `avdtp.c` un mismatch di prototipo (`uint8_t out[4]`) rilevato da GCC.
-- A2 parziale (**non compilato**): creati `driver/SonatinaAudio.vcxproj`
-  (template WDM, `-DSONATINA_KERNEL`, include `third_party\sbc`) e
-  `driver/SonatinaAudio.vcxproj.filters`; aggiornato `driver/build.ps1` con
-  ricerca `vswhere.exe`, `InfVerif /w`, e `inf2cat`.
-- A5 parziale (non eseguito): creati `.github/workflows/driver-ci.yml`
-  (Python + A1 + A2 con NuGet `Microsoft.Windows.WDK.x64` + `InfVerif /w`),
-  `driver/Directory.Build.props/.targets` e `.gitignore`. In attesa di repo GitHub.
-- D1 parziale (**non compilato**): corretti in `driver.c`, `device.h`,
-  `brb_transport.h/.c`, `codec_sbc.h/.c` i bug statici rispetto a PortCls/BTHDDI
-  (`PORT_CLASS_DEVICE_EXTENSION_SIZE`, nessuna doppia `IoCompleteRequest` in
-  `StartDevice`, `initguid.h`, `BTH_PROFILE_DRIVER_INTERFACE`, `<bthioctl.h>`,
-  `CFG_MTU | CFG_FLUSHTO`, `PINDICATION_PARAMETERS`, helper intero
-  `SontSbcBitrateKbpsInt` per evitare float nel kernel).
+- A2 completato via GitHub Actions CI (run #5, commit `650c4ce`):
+  `msbuild SonatinaAudio.vcxproj /p:Platform=x64 /p:SignMode=Off` (Debug e
+  Release) ha compilato e linkato `SonatinaAudio.sys` con 0 warning e 0 errori
+  (WDK NuGet `10.0.28000.0`), e `InfVerif.exe /w sonatina\driver\inf\SonatinaAudio.inf`
+  e' passato. `driver/build.ps1` aggiornato per build WDK locali.
+- A5 completato: `.github/workflows/driver-ci.yml` esegue `python-and-host-tests`
+  (77 test Python + A1 C vs Python) e `driver-compile-x64` (Debug/Release + `InfVerif /w`
+  + upload artefatti).
+- D1 parziale (compila e linka in WDK x64; caricamento su VM ancora da fare):
+  corretto `portable.h` (tipi kernel senza CRT user-mode), ordine header
+  `<ntifs.h>` / `<portcls.h>` / `<bthdef.h>` / `<bthsdpdef.h>` / `<bthioctl.h>`
+  / `<bthddi.h>` / `<bthguid.h>` / `<initguid.h>`, `PcGetPhysicalDeviceObject`
+  (2 argomenti), `L2CAP_CHANNEL_HANDLE *`, `FileDigestAlgorithm=sha256`,
+  `EP\0` in `SonatinaAudio.inf`.
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`
   (`BRB_L2CA_OPEN_CHANNEL`, PSM 0x0019/0x0017, `BRB_L2CA_ACL_TRANSFER`).
-- Blocco per A2+: su questa macchina mancano Visual Studio Build Tools, WDK, SDK,
-  `inf2cat`, `InfVerif` e `signtool`; nessun file `.sys` del driver e' stato
-  compilato o caricato.
+- Nota VM: nessun file `.sys` e' stato ancora caricato; prima di caricare driver
+  kernel servono VM Windows + snapshot + `testsigning` + Driver Verifier (A3).
 - Licenze: SBC e LDAC da AOSP (Apache-2.0) sono implementabili; AAC e aptX
   richiedono accordi commerciali.
 
@@ -57,4 +57,5 @@
 - 2026-11-15 Rinominato il progetto in Sonatina, aggiunti README e script, verificati demo e percorsi negativi.
 - 2026-11-15 Creato `ROADMAP.md`: backlog completo del driver (fasi A/D/S/G/T), motivazioni, fatti tecnici riutilizzabili, riferimenti pubblici e criteri di accettazione.
 - 2026-11-15 Preparati A1 (`driver/tests/*`, `tests/test_driver_vectors.py`), A2 (`SonatinaAudio.vcxproj`, `build.ps1`), A6 (`driver/CONTRIBUTING.md`) e corretti bug PortCls/BTHDDI in `driver.c`/`brb_transport.c`/`codec_sbc.c`.
-- 2026-11-15 Verificato A1/T1 con WinLibs `gcc 16.2.0`: `28 vectors + 5 math cases checked, 0 failures`; fix in `avdtp.c` (`uint8_t out[4]`) e auto-discovery WinGet in `run_host_tests.ps1`. A2 resta non compilato (manca WDK/VS Build Tools).
+- 2026-11-15 Verificato A1/T1 con WinLibs `gcc 16.2.0`: `28 vectors + 5 math cases checked, 0 failures`; fix in `avdtp.c` (`uint8_t out[4]`) e auto-discovery WinGet in `run_host_tests.ps1`.
+- 2026-11-15 Completati A2 + A5 in GitHub Actions CI (run #5, commit `650c4ce`): `SonatinaAudio.sys` compilato (Debug/Release x64) + `InfVerif /w` verdi + 77 test Python + test host A1 su clang verdi.

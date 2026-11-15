@@ -19,7 +19,7 @@ deliverable, **Done** = verifiable acceptance.
 | Bluetooth audio reference stack (Python) | `[x]` 76 tests green, loopback demo exits 0 |
 | SBC/RTP/AVDTP logic | `[x]` in Python, `[x]` ported to portable C |
 | Kernel driver design | `[x]` `sonatina/driver/DESIGN.md` |
-| Driver scaffold (INF, contracts, BRB layer) | `[~]` sources present, never compiled |
+| Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles x64 + `InfVerif /w` green in CI; VM load pending |
 | Audio endpoints (WaveRT/topology) | `[ ]` to vendor from SysVAD |
 | Real L2CAP / headset | `[ ]` |
 | Service (native) | `[~]` Python service works; native exe missing |
@@ -46,7 +46,7 @@ reconnects the headset with the new parameters.
   via `driver/tests/run_host_tests.ps1`; 28 byte vectors + 5 SBC math cases passed
   with 0 failures.
 
-### A2. MSBuild project + package validation `[~]`
+### A2. MSBuild project + package validation `[x]`
 - **Why**: without a project file nothing compiles; without `InfVerif` the
   package may fail to install.
 - **Do**: `SonatinaAudio.vcxproj` from the WDK "Kernel Mode Driver (WDM)"
@@ -54,8 +54,10 @@ reconnects the headset with the new parameters.
   `third_party/sbc` include path.
 - **Done**: `driver\build.ps1 -Configuration Debug` exits 0; `inf2cat` and
   `InfVerif /w` report no errors.
-- **Status**: `SonatinaAudio.vcxproj` and `build.ps1` updated; **not compiled**
-  (no Visual Studio / Windows SDK / WDK installed on this machine).
+- **Verified**: `msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=Debug|Release /p:Platform=x64 /p:SignMode=Off`
+  and `InfVerif.exe /w sonatina\driver\inf\SonatinaAudio.inf` pass with 0 warnings
+  and 0 errors in GitHub Actions CI (`driver-compile-x64`, WDK 10.0.28000.0).
+  `build.ps1` updated for local WDK builds (`vswhere` + `InfVerif` + `inf2cat`).
 
 ### A3. Safe test environment `[ ]`
 - **Why**: a bug in the stream thread bugchecks the machine; testing on the
@@ -73,13 +75,13 @@ reconnects the headset with the new parameters.
 - **Done**: a 10-minute session produces a trace with packet counts, tx times
   and state transitions.
 
-### A5. Compile-only CI `[~]`
+### A5. Compile-only CI `[x]`
 - **Why**: keep the driver buildable while the main work is elsewhere.
 - **Do**: a non-blocking GitHub Actions/Windows job that restores the WDK and
   compiles (no signing, no install).
-- **Status**: `.github/workflows/driver-ci.yml`, `driver/Directory.Build.props`,
-  `driver/Directory.Build.targets`, and `.gitignore` created; not executed yet
-  (pending GitHub repository push).
+- **Verified**: `.github/workflows/driver-ci.yml` runs `python-and-host-tests`
+  (77 Python tests + A1 C host tests) and `driver-compile-x64` (Debug + Release
+  `msbuild` + `InfVerif /w` + artifact upload); run #5 (`650c4ce`) green.
 
 ### A6. Coding and review rules `[x]`
 - **Why**: kernel code needs stricter rules than the Python package.
