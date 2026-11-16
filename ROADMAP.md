@@ -22,7 +22,7 @@ deliverable, **Done** = verifiable acceptance.
 | Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles Debug/Release x64 + `InfVerif /w` green in CI (`e679e4c`); VM load pending |
 | Audio endpoints (WaveRT/topology) | `[~]` implemented from MS-PL SysVAD, compiles x64 in CI; VM runtime pending |
 | Real L2CAP / SBC media path | `[~]` AVDTP + `google/libsbc` + RTP media loop compiled in CI (`e679e4c`); headset/VM runtime pending |
-| Service (native) | `[~]` Python service works; native exe missing |
+| Service (native) | `[~]` `sonatina/service/SonatinaSvc.exe` implemented & compiled; VM runtime pending |
 | Signing / installer | `[ ]` |
 
 Definition of done for the whole programme: on a clean Windows 10/11 machine, a
@@ -131,13 +131,17 @@ reconnects the headset with the new parameters.
   `SontSbcBitrateKbps`; `Current\Bitrate` and `Current\Packets` advance at 1 Hz.
 - **Status**: compiles and links cleanly (`0 warnings`, `0 errors`) in Debug & Release x64 WDK CI (run #14 `e679e4c`), real `google/libsbc` 1 kHz encode/decode round-trip + RTP packetizer host tests (`36 vectors + 5 math cases`, 0 failures) verified locally and in CI; VM runtime verification (A3) pending.
 
-### D5. Service, profiles and reconnect `[ ]`
+### D5. Service, profiles and reconnect `[~]`
 - **Why**: users change codec/bitpool per headset; the change must apply.
 - **Do**: native `SonatinaSvc.exe` (Win32 service) with the registry watcher,
   debounce and 20 s cooldown; profile write via `IOCTL_SONATINA_SET_PROFILE`;
-  reconnect by cycling the AVRCP devnode.
+  reconnect via `IOCTL_SONATINA_RECONNECT` and cycling the AVRCP devnode; initial
+  per-device profile load in `SontStartDevice`.
 - **Done**: `profile set --sbc-max-bitpool 35` → the headset reconnects and the
   wire bitpool is 35; two changes within 20 s apply once.
+- **Status**: driver IOCTLs (`GET_ADDRESS`, `SET_PROFILE`, `RECONNECT`),
+  registry boot-load, and native `SonatinaSvc.exe` implemented and compiled
+  cleanly (`gcc -Wall -Wextra -Werror`); VM runtime verification (A3) pending.
 
 ### D6. ABR, flush timeout and latency `[ ]`
 - **Why**: the commercial value is stability on a weak radio ("no stuttering")
@@ -165,30 +169,30 @@ reconnects the headset with the new parameters.
 
 ## 3. Phase S — service and control plane
 
-### S1. Native service skeleton `[ ]`
+### S1. Native service skeleton `[~]`
 - **Why**: the Python watcher proves the policy but cannot ship as a service.
 - **Do**: Win32 service (`StartServiceCtrlDispatcherW`, `SERVICE_WIN32_OWN_PROCESS`,
-  auto start). Keep the policy in a testable module.
+  auto start) in `sonatina/service/service_main.c` (+ `--console` / `--once`).
 - **Done**: installs, starts at boot, stops cleanly.
 
-### S2. Watcher, debounce, cooldown `[ ]`
+### S2. Watcher, debounce, cooldown `[~]`
 - **Why**: a registry burst must produce one apply, not a restart storm.
 - **Do**: `RegNotifyChangeKeyValue` (async, flags `0x10000004`), wait 5000 ms,
-  debounce, cooldown 20000 ms. Port the tested `ApplyPolicy` logic.
-- **Done**: unit test with an injected clock reproduces the Python tests;
-  manual: two quick changes → one apply, after 20 s → apply again.
+  debounce, cooldown 20000 ms (`service/apply_policy.c`).
+- **Done**: unit test with an injected clock reproduces the Python tests
+  (verified in `host_test.c`); manual: two quick changes → one apply, after 20 s → apply again.
 
-### S3. Reconnect strategy `[ ]`
+### S3. Reconnect strategy `[~]`
 - **Why**: parameters are read at (re)connection time.
-- **Do**: cycle the AVRCP devnode (`CM_Locate_DevNodeW`, `CM_Disable_DevNode`,
-  `Sleep(100)`, `CM_Enable_DevNode`) for the affected address, and call
-  `IOCTL_SONATINA_RECONNECT`.
+- **Do**: cycle the AVRCP devnode (`CM_Disable_DevNode`, `Sleep(100)`,
+  `CM_Enable_DevNode`) for the affected address, and call
+  `IOCTL_SONATINA_SET_PROFILE` + `IOCTL_SONATINA_RECONNECT` (`service/device_ctrl.c`).
 - **Done**: changing bitpool reconnects only the selected headset.
 
-### S4. Trigger semantics `[ ]`
+### S4. Trigger semantics `[~]`
 - **Why**: UI → service signalling without polling.
-- **Do**: `Control\Trigger` DWORD incremented by CLI/GUI; the service watches it
-  and also watches the device keys.
+- **Do**: `Control\Trigger` DWORD incremented by CLI/GUI; `SonatinaSvc.exe`
+  watches `Control` and syncs `Current` telemetry from `IOCTL_SONATINA_GET_STATE`.
 - **Done**: `profile set` bumps the trigger and the service applies within the
   debounce window.
 

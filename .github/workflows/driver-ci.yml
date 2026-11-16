@@ -28,6 +28,12 @@ jobs:
       - name: Run A1 host protocol tests (C vs Python)
         run: powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_host_tests.ps1
 
+      - name: Build native service (SonatinaSvc.exe)
+        run: powershell -ExecutionPolicy Bypass -File sonatina\service\build_service.ps1
+
+      - name: Smoke-test SonatinaSvc.exe --help
+        run: .\sonatina\service\build\SonatinaSvc.exe --help
+
   driver-compile-x64:
     runs-on: windows-latest
     strategy:

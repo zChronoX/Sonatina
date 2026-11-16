@@ -25,6 +25,9 @@ typedef struct _SONT_DEVICE_EXTENSION {
 
     KEVENT StopEvent;
     PVOID WorkerThread;
+    KMUTEX WorkerMutex;
+    volatile LONG Removing;
+    BOOLEAN ReconnectRequested;
 
     SONATINA_PROFILE Profile;
     SONATINA_STATE State;

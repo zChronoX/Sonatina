@@ -16,7 +16,9 @@
 #include "../src/avdtp_session.h"
 #include "../src/codec_sbc.h"
 #include "../src/media_stream.h"
+#include "../src/profile_validate.h"
 #include "../src/rtp.h"
+#include "../../service/apply_policy.h"
 #ifdef SONATINA_WITH_LIBSBC
 #include <sbc.h>
 #endif
@@ -413,6 +415,74 @@ static void RunUnitAssertions(void)
         assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_ERROR);
         assert(sess.state == SONT_AVDTP_STATE_FAILED);
         assert(sess.last_error == SONT_AVDTP_ERR_BAD_HEADER_FORMAT);
+    }
+
+    /* 7. D5 profile validation, BD_ADDR formatting/parsing, and S2 ApplyPolicy */
+    {
+        char hex[16];
+        SONT_APPLY_POLICY pol;
+        uint64_t elapsed = 0;
+
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 8, 1, 2, 53, 48000, 2, 256) == 1);
+        assert(SontProfileValidateFields(0, 48000, 3, 16, 8, 1, 2, 53, 0, 0, 0) == 1);
+        assert(SontProfileValidateFields(2, 48000, 3, 16, 8, 1, 2, 53, 44100, 2, 256) == 1);
+        assert(SontProfileValidateFields(5, 48000, 3, 16, 8, 1, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 22050, 3, 16, 8, 1, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 4, 16, 8, 1, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 10, 8, 1, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 2, 1, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 8, 2, 2, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 8, 1, 1, 53, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 8, 1, 40, 30, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(1, 48000, 3, 16, 8, 1, 2, 251, 0, 0, 0) == 0);
+        assert(SontProfileValidateFields(2, 48000, 3, 16, 8, 1, 2, 53, 32000, 2, 256) == 0);
+
+        SontFormatBdAddrHex(0x9880BB418BA7ULL, hex);
+        assert(strcmp(hex, "9880BB418BA7") == 0);
+        assert(SontParseBdAddrHex("00:11:22:aa:bb:cc", hex) == 1);
+        assert(strcmp(hex, "001122AABBCC") == 0);
+        assert(SontParseBdAddrHex(" 00-11-22-aa-bb-cc ", hex) == 1);
+        assert(strcmp(hex, "001122AABBCC") == 0);
+        assert(SontParseBdAddrHex("001122AABBCC", hex) == 1);
+        assert(strcmp(hex, "001122AABBCC") == 0);
+        assert(SontParseBdAddrHex("001122AABB", hex) == 0);
+        assert(SontParseBdAddrHex("ZZ1122AABBCC", hex) == 0);
+
+        /* Debounce waits for timer */
+        SontPolicyInit(&pol, 500, 3000);
+        assert(SontPolicyElapsedSinceApplyMs(&pol, 0, &elapsed) == 0);
+        SontPolicyNotify(&pol, 0);
+        assert(SontPolicyPoll(&pol, 0) == SONT_POLICY_NONE);
+        assert(SontPolicyPoll(&pol, 400) == SONT_POLICY_NONE);
+        assert(SontPolicyPoll(&pol, 600) == SONT_POLICY_APPLY);
+        assert(SontPolicyElapsedSinceApplyMs(&pol, 600, &elapsed) == 1 && elapsed == 0);
+        assert(SontPolicyElapsedSinceApplyMs(&pol, 2600, &elapsed) == 1 && elapsed == 2000);
+
+        /* Burst extends debounce */
+        SontPolicyInit(&pol, 500, 3000);
+        SontPolicyNotify(&pol, 0);
+        SontPolicyNotify(&pol, 300);
+        assert(SontPolicyPoll(&pol, 700) == SONT_POLICY_NONE);
+        assert(SontPolicyPoll(&pol, 900) == SONT_POLICY_APPLY);
+
+        /* Second apply inside cooldown is skipped and consumes pending request */
+        SontPolicyInit(&pol, 500, 3000);
+        SontPolicyNotify(&pol, 0);
+        assert(SontPolicyPoll(&pol, 600) == SONT_POLICY_APPLY);
+        SontPolicyNotify(&pol, 600);
+        assert(SontPolicyPoll(&pol, 1200) == SONT_POLICY_COOLDOWN);
+        assert(SontPolicyPoll(&pol, 1200) == SONT_POLICY_NONE);
+
+        /* Apply after cooldown succeeds */
+        SontPolicyNotify(&pol, 3700);
+        assert(SontPolicyPoll(&pol, 4300) == SONT_POLICY_APPLY);
+
+        /* Zero debounce and cooldown */
+        SontPolicyInit(&pol, 0, 0);
+        SontPolicyNotify(&pol, 10);
+        assert(SontPolicyPoll(&pol, 10) == SONT_POLICY_APPLY);
+        SontPolicyNotify(&pol, 10);
+        assert(SontPolicyPoll(&pol, 10) == SONT_POLICY_APPLY);
     }
 }
 

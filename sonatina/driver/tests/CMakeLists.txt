@@ -11,11 +11,13 @@ add_executable(host_test
     ../src/rtp.c
     ../src/codec_sbc.c
     ../src/media_stream.c
+    ../src/profile_validate.c
+    ../../service/apply_policy.c
     ../third_party/sbc/src/bits.c
     ../third_party/sbc/src/sbc.c
 )
 
-target_include_directories(host_test PRIVATE ../third_party/sbc/include)
+target_include_directories(host_test PRIVATE ../src ../third_party/sbc/include)
 target_compile_definitions(host_test PRIVATE SONATINA_HOST SONATINA_WITH_LIBSBC)
 
 if(MSVC)

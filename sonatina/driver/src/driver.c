@@ -15,6 +15,7 @@
 #include "device.h"
 #include "avdtp_session.h"
 #include "miniport_subdevices.h"
+#include "profile_validate.h"
 
 #define SONT_POOL_TAG 'anOS'
 #define SONT_AVDTP_RX_TIMEOUT_MS 5000u
@@ -42,6 +43,178 @@ static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp);
 static VOID SontSignalingWorker(PVOID context);
 static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext);
 static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext);
+static NTSTATUS SontReconnectSignalingWorker(PSONT_DEVICE_EXTENSION ext);
+
+static VOID SontInitDefaultProfile(PSONATINA_PROFILE prof)
+{
+    RtlZeroMemory(prof, sizeof(*prof));
+    prof->Size = sizeof(SONATINA_PROFILE);
+    prof->Codec = SonatinaCodecSbc;
+    prof->SbcSampling = 48000;
+    prof->SbcChannelMode = 3;
+    prof->SbcBlocks = 16;
+    prof->SbcSubbands = 8;
+    prof->SbcAllocation = 1;
+    prof->SbcMinBitpool = 2;
+    prof->SbcMaxBitpool = 53;
+    prof->AacSampling = 48000;
+    prof->AacChannels = 2;
+    prof->AacBitrate = 256;
+}
+
+static BOOLEAN SontValidateKernelProfile(const SONATINA_PROFILE *prof)
+{
+    if (prof == NULL || prof->Size != sizeof(SONATINA_PROFILE)) {
+        return FALSE;
+    }
+    return SontProfileValidateFields(prof->Codec,
+                                     prof->SbcSampling,
+                                     prof->SbcChannelMode,
+                                     prof->SbcBlocks,
+                                     prof->SbcSubbands,
+                                     prof->SbcAllocation,
+                                     prof->SbcMinBitpool,
+                                     prof->SbcMaxBitpool,
+                                     prof->AacSampling,
+                                     prof->AacChannels,
+                                     prof->AacBitrate) != 0;
+}
+
+static VOID SontRegReadDword(HANDLE key, PCWSTR name, ULONG *value_out)
+{
+    UNICODE_STRING val_name;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION info = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    ULONG result_len = 0;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&val_name, name);
+    status = ZwQueryValueKey(key, &val_name, KeyValuePartialInformation,
+                             buf, sizeof(buf), &result_len);
+    if (NT_SUCCESS(status) && info->Type == REG_DWORD &&
+        info->DataLength == sizeof(ULONG)) {
+        RtlCopyMemory(value_out, info->Data, sizeof(ULONG));
+    }
+}
+
+static VOID SontRegReadCodec(HANDLE key, ULONG *codec_out)
+{
+    UNICODE_STRING val_name;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 32];
+    PKEY_VALUE_PARTIAL_INFORMATION info = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    ULONG result_len = 0;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&val_name, L"Codec");
+    status = ZwQueryValueKey(key, &val_name, KeyValuePartialInformation,
+                             buf, sizeof(buf), &result_len);
+    if (!NT_SUCCESS(status) || info->Type != REG_SZ ||
+        info->DataLength < sizeof(WCHAR) || info->DataLength > 32) {
+        return;
+    }
+
+    {
+        UNICODE_STRING found;
+        UNICODE_STRING s_pcm;
+        UNICODE_STRING s_sbc;
+        UNICODE_STRING s_aac;
+        UNICODE_STRING s_aptx;
+        UNICODE_STRING s_ldac;
+        USHORT len = (USHORT)info->DataLength;
+        PWCHAR chars = (PWCHAR)info->Data;
+
+        while (len >= sizeof(WCHAR) && chars[(len / sizeof(WCHAR)) - 1] == L'\0') {
+            len = (USHORT)(len - sizeof(WCHAR));
+        }
+        found.Buffer = chars;
+        found.Length = len;
+        found.MaximumLength = (USHORT)info->DataLength;
+
+        RtlInitUnicodeString(&s_pcm, L"pcm");
+        RtlInitUnicodeString(&s_sbc, L"sbc");
+        RtlInitUnicodeString(&s_aac, L"aac");
+        RtlInitUnicodeString(&s_aptx, L"aptx");
+        RtlInitUnicodeString(&s_ldac, L"ldac");
+
+        if (RtlEqualUnicodeString(&found, &s_pcm, TRUE)) {
+            *codec_out = SonatinaCodecPcm;
+        } else if (RtlEqualUnicodeString(&found, &s_sbc, TRUE)) {
+            *codec_out = SonatinaCodecSbc;
+        } else if (RtlEqualUnicodeString(&found, &s_aac, TRUE)) {
+            *codec_out = SonatinaCodecAac;
+        } else if (RtlEqualUnicodeString(&found, &s_aptx, TRUE)) {
+            *codec_out = SonatinaCodecAptx;
+        } else if (RtlEqualUnicodeString(&found, &s_ldac, TRUE)) {
+            *codec_out = SonatinaCodecLdac;
+        }
+    }
+}
+
+static VOID SontLoadProfileFromRegistry(BTH_ADDR remote_addr, PSONATINA_PROFILE prof)
+{
+    static const WCHAR prefix[] =
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\SonatinaAudio\\Parameters\\Devices\\";
+    WCHAR path_buf[128];
+    char addr_hex[16];
+    UNICODE_STRING key_path;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE key = NULL;
+    SONATINA_PROFILE candidate;
+    ULONG i;
+    ULONG prefix_chars = (ULONG)(sizeof(prefix) / sizeof(prefix[0]) - 1);
+    NTSTATUS status;
+
+    if (remote_addr == 0) {
+        return;
+    }
+
+    SontFormatBdAddrHex((uint64_t)remote_addr, addr_hex);
+    for (i = 0; i < prefix_chars; i++) {
+        path_buf[i] = prefix[i];
+    }
+    for (i = 0; i < 12; i++) {
+        path_buf[prefix_chars + i] = (WCHAR)addr_hex[i];
+    }
+    path_buf[prefix_chars + 12] = L'\0';
+
+    RtlInitUnicodeString(&key_path, path_buf);
+    InitializeObjectAttributes(&oa, &key_path,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    status = ZwOpenKey(&key, KEY_READ, &oa);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    candidate = *prof;
+    SontRegReadCodec(key, &candidate.Codec);
+    SontRegReadDword(key, L"SbcSamplingFrequency", &candidate.SbcSampling);
+    SontRegReadDword(key, L"SbcChannelMode", &candidate.SbcChannelMode);
+    SontRegReadDword(key, L"SbcBlockLength", &candidate.SbcBlocks);
+    SontRegReadDword(key, L"SbcSubbands", &candidate.SbcSubbands);
+    SontRegReadDword(key, L"SbcAllocationMethod", &candidate.SbcAllocation);
+    SontRegReadDword(key, L"SbcMinimumBitpool", &candidate.SbcMinBitpool);
+    SontRegReadDword(key, L"SbcMaximumBitpool", &candidate.SbcMaxBitpool);
+    SontRegReadDword(key, L"AacSamplingFrequency", &candidate.AacSampling);
+    {
+        ULONG aac_mode = (candidate.AacChannels == 1) ? 0u : 1u;
+        SontRegReadDword(key, L"AacChannelMode", &aac_mode);
+        candidate.AacChannels = (aac_mode == 0u) ? 1u : 2u;
+    }
+    SontRegReadDword(key, L"AacBitrate", &candidate.AacBitrate);
+    ZwClose(key);
+
+    if (SontValidateKernelProfile(&candidate) &&
+        (candidate.Codec == SonatinaCodecPcm || candidate.Codec == SonatinaCodecSbc)) {
+        *prof = candidate;
+        DbgPrint("Sonatina: loaded profile for %s (codec=%lu sbc=%lu Hz bp=%lu..%lu)\n",
+                 addr_hex, prof->Codec, prof->SbcSampling,
+                 prof->SbcMinBitpool, prof->SbcMaxBitpool);
+    } else {
+        DbgPrint("Sonatina: ignoring invalid/unsupported registry profile for %s\n",
+                 addr_hex);
+    }
+}
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry_path)
 {
@@ -74,6 +247,7 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
     KeInitializeEvent(&ext->StopEvent, NotificationEvent, FALSE);
+    KeInitializeMutex(&ext->WorkerMutex, 0);
     KeInitializeSpinLock(&ext->PcmSource.Lock);
     KeInitializeEvent(&ext->PcmSource.DataEvent, NotificationEvent, FALSE);
     ext->PcmSource.BackingBuffer = (UCHAR *)ExAllocatePool2(
@@ -89,15 +263,7 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
         return status;
     }
     ext->LowerDeviceObject = IoGetLowerDeviceObject(device);
-    ext->Profile.Size = sizeof(SONATINA_PROFILE);
-    ext->Profile.Codec = SonatinaCodecSbc;
-    ext->Profile.SbcSampling = 48000;
-    ext->Profile.SbcChannelMode = 3;
-    ext->Profile.SbcBlocks = 16;
-    ext->Profile.SbcSubbands = 8;
-    ext->Profile.SbcAllocation = 1;
-    ext->Profile.SbcMinBitpool = 2;
-    ext->Profile.SbcMaxBitpool = 53;
+    SontInitDefaultProfile(&ext->Profile);
     ext->State.Size = sizeof(SONATINA_STATE);
 
     status = IoRegisterDeviceInterface(ext->PhysicalDeviceObject,
@@ -112,7 +278,9 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
                                               : ext->PhysicalDeviceObject;
     status = SontTransportInitialize(&ext->Transport, target);
     ext->TransportReady = NT_SUCCESS(status);
-    if (!ext->TransportReady) {
+    if (ext->TransportReady) {
+        SontLoadProfileFromRegistry(ext->Transport.RemoteAddress, &ext->Profile);
+    } else {
         DbgPrint("Sonatina: transport not ready (0x%08X); control interface only\n",
                  status);
     }
@@ -189,11 +357,22 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
-        /* TODO(D5): validate and apply; currently stores the profile. */
-        KeAcquireSpinLock(&ext->Lock, &old_irql);
-        RtlCopyMemory(&ext->Profile, buffer, sizeof(SONATINA_PROFILE));
-        ext->Profile.Size = sizeof(SONATINA_PROFILE);
-        KeReleaseSpinLock(&ext->Lock, old_irql);
+        {
+            SONATINA_PROFILE candidate;
+            RtlCopyMemory(&candidate, buffer, sizeof(SONATINA_PROFILE));
+            if (!SontValidateKernelProfile(&candidate)) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            if (candidate.Codec != SonatinaCodecPcm &&
+                candidate.Codec != SonatinaCodecSbc) {
+                status = STATUS_NOT_SUPPORTED;
+                break;
+            }
+            KeAcquireSpinLock(&ext->Lock, &old_irql);
+            ext->Profile = candidate;
+            KeReleaseSpinLock(&ext->Lock, old_irql);
+        }
         irp->IoStatus.Information = 0;
         break;
 
@@ -210,8 +389,33 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
         break;
 
     case IOCTL_SONATINA_RECONNECT:
-        /* TODO(D5): tear down and reopen the Bluetooth audio channels. */
-        status = STATUS_NOT_IMPLEMENTED;
+        if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
+        }
+        if (!ext->TransportReady) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+        status = SontReconnectSignalingWorker(ext);
+        irp->IoStatus.Information = 0;
+        break;
+
+    case IOCTL_SONATINA_GET_ADDRESS:
+        if (buffer == NULL || out_len < sizeof(SONATINA_DEVICE_INFO)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        {
+            SONATINA_DEVICE_INFO dev_info;
+            ULONGLONG addr = ext->TransportReady ? (ULONGLONG)ext->Transport.RemoteAddress : 0ULL;
+            RtlZeroMemory(&dev_info, sizeof(dev_info));
+            dev_info.Size = sizeof(SONATINA_DEVICE_INFO);
+            dev_info.RemoteAddress = addr;
+            SontFormatBdAddrHex((uint64_t)addr, dev_info.AddressHex);
+            RtlCopyMemory(buffer, &dev_info, sizeof(SONATINA_DEVICE_INFO));
+        }
+        irp->IoStatus.Information = sizeof(SONATINA_DEVICE_INFO);
         break;
 
     default:
@@ -532,17 +736,36 @@ static VOID SontSignalingWorker(PVOID context)
     }
 
 cleanup:
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    ext->State.Opened = FALSE;
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+
     if (scratch != NULL) {
+        if (ext->ReconnectRequested &&
+            scratch->session.state == SONT_AVDTP_STATE_STREAMING &&
+            ext->Transport.SignalingChannel != NULL) {
+            size_t close_len = 0;
+            if (SontAvdtpSessionClose(&scratch->session, scratch->tx,
+                                      sizeof(scratch->tx), &close_len) == SONT_AVDTP_STEP_SEND) {
+                (void)SontTransportSend(&ext->Transport, ext->Transport.SignalingChannel,
+                                        scratch->tx, (ULONG)close_len);
+            }
+        }
         ExFreePoolWithTag(scratch, SONT_POOL_TAG);
     }
+    SontTransportClose(&ext->Transport, &ext->Transport.MediaChannel);
+    SontTransportClose(&ext->Transport, &ext->Transport.SignalingChannel);
     PsTerminateSystemThread(status);
 }
 
-static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+static NTSTATUS SontStartSignalingWorkerLocked(PSONT_DEVICE_EXTENSION ext)
 {
     HANDLE thread_handle = NULL;
     NTSTATUS status;
 
+    if (ext->WorkerThread != NULL) {
+        return STATUS_SUCCESS;
+    }
     KeClearEvent(&ext->StopEvent);
     status = PsCreateSystemThread(&thread_handle, THREAD_ALL_ACCESS,
                                   NULL, NULL, NULL,
@@ -562,7 +785,7 @@ static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext)
     return status;
 }
 
-static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+static VOID SontStopSignalingWorkerLocked(PSONT_DEVICE_EXTENSION ext)
 {
     KeSetEvent(&ext->StopEvent, IO_NO_INCREMENT, FALSE);
     if (ext->WorkerThread != NULL) {
@@ -572,6 +795,50 @@ static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext)
     }
 }
 
+static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+{
+    NTSTATUS status;
+
+    KeWaitForSingleObject(&ext->WorkerMutex, Executive, KernelMode, FALSE, NULL);
+    if (InterlockedCompareExchange(&ext->Removing, 0, 0) != 0) {
+        KeReleaseMutex(&ext->WorkerMutex, FALSE);
+        return STATUS_DELETE_PENDING;
+    }
+    status = SontStartSignalingWorkerLocked(ext);
+    KeReleaseMutex(&ext->WorkerMutex, FALSE);
+    return status;
+}
+
+static VOID SontStopSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+{
+    KeWaitForSingleObject(&ext->WorkerMutex, Executive, KernelMode, FALSE, NULL);
+    SontStopSignalingWorkerLocked(ext);
+    KeReleaseMutex(&ext->WorkerMutex, FALSE);
+}
+
+static NTSTATUS SontReconnectSignalingWorker(PSONT_DEVICE_EXTENSION ext)
+{
+    KIRQL old_irql;
+    NTSTATUS status;
+
+    KeWaitForSingleObject(&ext->WorkerMutex, Executive, KernelMode, FALSE, NULL);
+    if (InterlockedCompareExchange(&ext->Removing, 0, 0) != 0) {
+        KeReleaseMutex(&ext->WorkerMutex, FALSE);
+        return STATUS_DELETE_PENDING;
+    }
+    ext->ReconnectRequested = TRUE;
+    SontStopSignalingWorkerLocked(ext);
+    ext->ReconnectRequested = FALSE;
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    ext->State.Opened = FALSE;
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+
+    status = SontStartSignalingWorkerLocked(ext);
+    KeReleaseMutex(&ext->WorkerMutex, FALSE);
+    return status;
+}
+
 static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
@@ -579,6 +846,7 @@ static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp)
 
     if (stack->MinorFunction == IRP_MN_SURPRISE_REMOVAL ||
         stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {
+        InterlockedExchange(&ext->Removing, 1);
         if (ext->ControlInterfaceRegistered) {
             (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, FALSE);
         }

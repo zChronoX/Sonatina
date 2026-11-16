@@ -9,6 +9,7 @@ sonatina/out.wav
 sonatina/driver/build/
 sonatina/driver/packages/
 sonatina/driver/tests/build/
+sonatina/service/build/
 *.user
 *.suo
 *.pdb

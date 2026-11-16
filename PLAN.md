@@ -107,8 +107,7 @@ selected codec in kernel. Design: `sonatina/driver/DESIGN.md`.
   into `SONT_PCM_SOURCE` (`miniport_wavert.cpp`), and wired `SontRunSbcMediaLoop`
   (`driver.c`) -> `BRB_L2CA_ACL_TRANSFER` on `MediaChannel` (PSM `0x0017`).
   Acceptance: audible audio, bitrate within 5% of `sonatina.sbc.bitrate`.
-- **D5 - service + profiles**: native service, registry
-  `Services\SonatinaAudio\Parameters`, reconnect on change.
+- **D5 - service + profiles**: partial (driver IOCTLs + native service compiled locally and live `HKCU` burst-debounce verified; WDK CI + VM runtime pending). Added portable `src/profile_validate.h/.c`, `IOCTL_SONATINA_GET_ADDRESS` (`public.h`), profile validation/apply in `IOCTL_SONATINA_SET_PROFILE`, mutex-serialized `IOCTL_SONATINA_RECONNECT` (`SontReconnectSignalingWorker` + AVDTP Close/L2CAP teardown), and initial `Services\SonatinaAudio\Parameters\Devices\<ADDR>` loading in `SontStartDevice` (`driver.c`); implemented native Win32 service `sonatina/service/` (`SonatinaSvc.exe`: SCM + `--console`/`--once`, `apply_policy.c`, `reg_store.c`, `device_ctrl.c`, `RegNotifyChangeKeyValue` + 20 s cooldown + `CM_Disable_DevNode`/`CM_Enable_DevNode` AVRCP cycle + `Current` telemetry sync).
 - **D6 - ABR/flush/latency**: tx-time measurement, thresholds, flush timeout.
 - **D7 - LDAC (and AAC/aptX only with a licence)**: codec selectable.
 - **D8 - signing + installer**: EV cert + attestation, install on clean
@@ -122,4 +121,4 @@ signing; AAC and aptX need commercial licences and cannot be implemented freely.
 - Registry values: `Codec`, `Sbc*`, `Aac*`, `Capability`, `Current`, `Trigger`.
 - Service constants: `RegNotifyChangeKeyValue(..., 0x10000004, ..., async)`, wait timeout 5000 ms, cooldown 20000 ms.
 - Exit codes: 0 ok, 1 error, 2 args, 3 codec not supported by sink, 4 device/session missing, 5 encoder unavailable.
-- Full suite: `cd sonatina; python -m unittest discover -s tests -v` (77 tests; 9 `test_reg` tests require HKCU registry write access outside the sandbox).
+- Full suite: `cd sonatina; python -m unittest discover -s tests -v` (77/77 passing locally including all 9 `test_reg` HKCU tests outside the sandbox).

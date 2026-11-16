@@ -114,6 +114,7 @@
     <ClCompile Include="src\rtp.c" />
     <ClCompile Include="src\codec_sbc.c" />
     <ClCompile Include="src\media_stream.c" />
+    <ClCompile Include="src\profile_validate.c" />
     <ClCompile Include="third_party\sbc\src\bits.c">
       <DisableSpecificWarnings>4090;4100;4127;4146;4189;4201;4204;4214;4221;4242;4244;4245;4267;4296;4310;4334;4389;4456;4457;4459;4701;4702;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
@@ -134,6 +135,7 @@
     <ClInclude Include="src\rtp.h" />
     <ClInclude Include="src\codec_sbc.h" />
     <ClInclude Include="src\media_stream.h" />
+    <ClInclude Include="src\profile_validate.h" />
     <ClInclude Include="src\portable.h" />
     <ClInclude Include="src\miniport_subdevices.h" />
     <ClInclude Include="src\miniport_topology.h" />

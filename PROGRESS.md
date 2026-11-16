@@ -5,7 +5,7 @@
 - Pacchetto Python `sonatina`, CLI `python -m sonatina`, registro `HKCU\Software\Sonatina`.
 - Nessun riferimento esterno nel progetto (verificato con ricerca case-sensitive).
 - Provenienza registrata a parte, in un unico file disaccoppiato: `NOTICE.md`.
-- Test: 76/76 verdi (`cd sonatina; python -m unittest discover -s tests -v`).
+- Test: 77/77 verdi (`cd sonatina; python -m unittest discover -s tests -v`, inclusi 9 test `test_reg` su `HKCU`).
 - Demo end-to-end: `scripts/run-demo.ps1 -Seconds 6` -> exit 0.
 
 ## Decisions
@@ -69,6 +69,9 @@
   (`0x0017`), aggiornamento `SonatinaAudio.vcxproj` + fix compatibilita'
   MSVC/WDK (`C4201`, `C4242`, `SBC_CLZ`, inizializzatori C89/C11) e test host
   con encoding/decoding SBC reale a 1 kHz + packetizer RTP (`36 vectors + 5 math cases, 0 failures`).
+- D5 + S1-S4 parziali (servizio nativo `SonatinaSvc.exe` compilato con `gcc -Wall -Wextra -Werror`, test host C estesi verdi, e watcher `RegNotifyChangeKeyValue` + debounce burst verificato dal vivo su `HKCU\Software\Sonatina-SvcTest`; WDK CI + verifica VM in attesa di A3):
+  - Driver (`sonatina/driver/`): aggiunto `src/profile_validate.h/.c`, `IOCTL_SONATINA_GET_ADDRESS` (`SONATINA_DEVICE_INFO`), validazione/applicazione in `IOCTL_SONATINA_SET_PROFILE`, `IOCTL_SONATINA_RECONNECT` serializzato con `WorkerMutex` (`SontReconnectSignalingWorker` con teardown AVDTP Close / L2CAP), e lettura iniziale del profilo per dispositivo da `\Registry\Machine\SYSTEM\CurrentControlSet\Services\SonatinaAudio\Parameters\Devices\<ADDR>` in `SontStartDevice`.
+  - Servizio nativo (`sonatina/service/`): `SonatinaSvc.exe` (`service_main.c` Win32 SCM + `--console`/`--once`, `apply_policy.c`, `reg_store.c`, `device_ctrl.c`, `build_service.ps1`) con `RegNotifyChangeKeyValue` su `Control\Trigger`, debounce 1000 ms + cooldown 20000 ms, push profilo via `IOCTL_SONATINA_SET_PROFILE` + `IOCTL_SONATINA_RECONNECT`, ciclo devnode AVRCP (`CM_Disable_DevNode`/`CM_Enable_DevNode`) e sync telemetria `Current` da `IOCTL_SONATINA_GET_STATE`.
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`
@@ -94,3 +97,4 @@
 - 2026-11-15 Completati A2 + A5 in GitHub Actions CI (run #5, commit `650c4ce`): `SonatinaAudio.sys` compilato (Debug/Release x64) + `InfVerif /w` verdi + 77 test Python + test host A1 su clang verdi.
 - 2026-11-15 Verificato D2 in WDK CI (run #8, commit `c3b6513`): `SonatinaAudio.sys` (WaveRT + Topology + BRB) compila e linka con 0 warning/errori; aggiunti `KSCATEGORY_REALTIME` + `Supports_EventDriven_Mode` in `SonatinaAudio.inf` e cleanup `IRP_MN_REMOVE_DEVICE` in `driver.c` durante l'audit pre-VM.
 - 2026-11-15 Verificati D3 e D4 in WDK CI (run #10 `ea2d3e3` e run #14 `e679e4c`): session engine AVDTP (`avdtp_session.c`), `SontSignalingWorker` + `SontRunSbcMediaLoop` (`driver.c`), tap WaveRT (`miniport_wavert.cpp`), `media_stream.c` e `google/libsbc` (`third_party/sbc/`) compilano e linkano con 0 warning/errori su x64 Debug/Release + `InfVerif /w` + test Python + `36 vectors + 5 math cases` host verdi.
+- 2026-11-16 Implementati D5 + S1-S4 (`IOCTL_SONATINA_GET_ADDRESS`/`SET_PROFILE`/`RECONNECT`, caricamento profilo da registro in `SontStartDevice`, e servizio nativo `sonatina/service/SonatinaSvc.exe`) e verificati in locale: 77/77 test Python (`test_reg` su `HKCU` inclusi), `run_host_tests.ps1` (`36 vectors + 5 math cases`, 0 failures + assert D5/S2), `SonatinaSvc.exe --console` con burst `profile set` su `HKCU` (`bp=2..35` + `bp=2..42` -> singolo `apply #1` dopo debounce 500 ms), e `run-demo.ps1 -Seconds 6` (`source_exit=0 sink_exit=0 wav_ok=True`).
