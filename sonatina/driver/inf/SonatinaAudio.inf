@@ -24,12 +24,18 @@ SonatinaAudio.sys = 1,,
 SonatinaAudio_CopyFiles = 13
 
 [Manufacturer]
-%Provider% = Sonatina,NTamd64.10.0...16299,NTamd64.10.0...22000
+%Provider% = Sonatina,NTamd64.10.0...16299,NTamd64.10.0...22000,NTARM64.10.0...16299,NTARM64.10.0...22000
 
 [Sonatina.NTamd64.10.0...16299]
 %DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
 
 [Sonatina.NTamd64.10.0...22000]
+%DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
+
+[Sonatina.NTARM64.10.0...16299]
+%DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
+
+[Sonatina.NTARM64.10.0...22000]
 %DeviceDesc% = SonatinaAudio_Inst, BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
 
 [SonatinaAudio_Inst]

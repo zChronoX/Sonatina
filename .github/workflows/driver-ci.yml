@@ -106,6 +106,12 @@ jobs:
         run: |
           msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=ARM64 /p:SignMode=Off
 
+      - name: Run InfVerif /w
+        run: |
+          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse | Select-Object -First 1
+          if (-not $infVerif) { throw 'InfVerif.exe not found in restored WDK packages' }
+          & $infVerif.FullName /w sonatina\driver\inf\SonatinaAudio.inf
+
       - name: Upload ARM64 driver build artifacts
         uses: actions/upload-artifact@v4
         with:

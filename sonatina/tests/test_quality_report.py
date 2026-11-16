@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import sys
 import unittest
 
 TESTS_DIR = os.path.abspath(
@@ -11,6 +12,7 @@ def _load_quality():
     path = os.path.join(TESTS_DIR, "quality_report.py")
     spec = importlib.util.spec_from_file_location("sonatina_quality_report", path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
