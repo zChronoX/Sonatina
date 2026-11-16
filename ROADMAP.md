@@ -215,12 +215,13 @@ reconnects the headset with the new parameters.
 
 ## 4. Phase G — GUI
 
-### G1. Keep Tkinter as the control panel `[~]`
+### G1. Keep Tkinter as the control panel `[x]`
 - **Why**: the existing GUI already speaks the registry contract; rewriting it
   now adds risk without user value.
 - **Do**: point it at `HKLM\SYSTEM\CurrentControlSet\Services\SonatinaAudio\
-  Parameters`, read `Current` for telemetry, write profiles through the CLI.
-- **Done**: device list, codec matrix, live bitrate/packets, Apply.
+  Parameters` (`--driver` CLI shortcut in `cli.py`), read `Current` (including
+  D6 ABR/latency fields in `gui.py`) for telemetry, write profiles.
+- **Done**: device list, codec matrix, live bitrate/packets/ABR telemetry, Apply.
 
 ### G2. Package the GUI `[ ]`
 - **Why**: shipping a Python GUI is fine only if the runtime is packaged.
@@ -236,11 +237,13 @@ reconnects the headset with the new parameters.
 - **Do**: generate vectors from `sonatina/`, assert equality in the C host test.
 - **Done**: identical bytes for all AVDTP/RTP/SBC cases (`28 vectors + 5 math cases, 0 failures`).
 
-### T2. Loopback before hardware `[ ]`
-- **Why**: debug the kernel state machine without a headset.
-- **Do**: a debug mode that speaks AVDTP/RTP over UDP to the Python sink (or a
-  named-pipe shim), compiled only in Debug.
-- **Done**: handshake and 10 s of media succeed with no hardware.
+### T2. Loopback before hardware `[x]`
+- **Why**: debug the driver state machine and media/ABR stack without a headset.
+- **Do**: `sonatina/driver/tests/loopback_e2e.c` + `run_loopback_e2e.ps1`
+  driving `avdtp_session.c`, `codec_sbc.c` (`google/libsbc`), `media_stream.c`,
+  `abr.c`, and `trace_ring.c` over UDP directly against `python -m sonatina sink`.
+- **Done**: handshake + SBC media + `-SimulateCongestion` ABR step-down succeed
+  with `lost=0`, `errors=0`, and real `libsbc` decode `RMS > 0.3`.
 
 ### T3. Driver Verifier + soak `[ ]`
 - **Why**: catch pool, IRQL and lifetime bugs before users do.

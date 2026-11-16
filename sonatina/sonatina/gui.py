@@ -265,16 +265,23 @@ class App:
         if current:
             for name in (
                 "Codec",
+                "Bitpool",
                 "Bitrate",
                 "Packets",
                 "Errors",
                 "TxTimeUs",
+                "TxTimeAvgUs",
+                "TxTimeMaxUs",
+                "TxTimeHighCount",
+                "TxTimeCriticalCount",
+                "AbrAdjustments",
+                "TxFlushTO",
                 "DelayMs",
                 "Opened",
                 "UpdatedAt",
             ):
                 if name in current:
-                    self.telemetry.insert("end", "%-10s %s\n" % (name, current[name]))
+                    self.telemetry.insert("end", "%-20s %s\n" % (name, current[name]))
         else:
             self.telemetry.insert("end", "no Current data (run: source ...)\n")
         self.telemetry.configure(state="disabled")

@@ -178,20 +178,28 @@ class SbcDecoder(Decoder):
         self._frames: list[bytes] = []
 
     def push(self, payload: bytes) -> None:
+        if len(payload) >= 2 and payload[1] == 0x9C:
+            count = payload[0] >> 4
+            body = payload[1:]
+            if count > 0 and len(body) % count == 0:
+                self._frames.extend(rtp.unpack_sbc(payload, len(body) // count))
+                return
         self._frames.extend(rtp.unpack_sbc(payload, self.frame_len))
 
     def finish(self) -> np.ndarray:
         spf = self.samples_per_frame
-        count = min(spf, self.frame_len)
         blocks = []
         for frame in self._frames:
-            raw = np.frombuffer(frame[:count], dtype=np.int8).astype(np.float32) * 256.0
-            if count == 1:
+            n = min(spf, len(frame))
+            if n == 0:
+                continue
+            raw = np.frombuffer(frame[:n], dtype=np.int8).astype(np.float32) * 256.0
+            if n == 1:
                 block = np.full(spf, float(raw[0]), dtype=np.float32)
             else:
                 block = np.interp(
-                    np.linspace(0.0, count - 1.0, spf),
-                    np.arange(count, dtype=np.float32),
+                    np.linspace(0.0, n - 1.0, spf),
+                    np.arange(n, dtype=np.float32),
                     raw,
                 ).astype(np.float32)
             blocks.append(block)

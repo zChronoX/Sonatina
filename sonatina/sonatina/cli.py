@@ -29,6 +29,11 @@ def _add_registry_options(parser: argparse.ArgumentParser) -> None:
         help="registry hive (HKLM needs administrator rights)",
     )
     parser.add_argument("--root", default=REG_ROOT, help="registry path under the hive")
+    parser.add_argument(
+        "--driver",
+        action="store_true",
+        help="target the native driver key (HKLM\\...\\Services\\SonatinaAudio\\Parameters)",
+    )
 
 
 def _add_port_options(parser: argparse.ArgumentParser) -> None:
@@ -366,6 +371,9 @@ def _cmd_gui(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "driver", False):
+        args.hive = "HKLM"
+        args.root = r"SYSTEM\CurrentControlSet\Services\SonatinaAudio\Parameters"
     try:
         if args.command == "devices":
             return _cmd_devices(args)
