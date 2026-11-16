@@ -9,4 +9,8 @@
           Condition="'$(Platform)' == 'x64' and Exists('$(_SontPkgDir)Microsoft.Windows.SDK.CPP.x64\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
   <Import Project="$(_SontPkgDir)Microsoft.Windows.WDK.x64\build\native\Microsoft.Windows.WDK.x64.props"
           Condition="'$(Platform)' == 'x64' and Exists('$(_SontPkgDir)Microsoft.Windows.WDK.x64\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <Import Project="$(_SontPkgDir)Microsoft.Windows.SDK.CPP.arm64\build\native\Microsoft.Windows.SDK.cpp.arm64.props"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(_SontPkgDir)Microsoft.Windows.SDK.CPP.arm64\build\native\Microsoft.Windows.SDK.cpp.arm64.props')" />
+  <Import Project="$(_SontPkgDir)Microsoft.Windows.WDK.ARM64\build\native\Microsoft.Windows.WDK.ARM64.props"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(_SontPkgDir)Microsoft.Windows.WDK.ARM64\build\native\Microsoft.Windows.WDK.ARM64.props')" />
 </Project>

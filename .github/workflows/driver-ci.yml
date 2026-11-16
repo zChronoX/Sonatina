@@ -33,11 +33,18 @@ jobs:
           powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5105 -MediaPort 5104
           powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5115 -MediaPort 5114 -SimulateCongestion
 
+      - name: Run T4 quality report sweep
+        run: python sonatina\driver\tests\quality_report.py --seconds 1
+
       - name: Build native service (SonatinaSvc.exe)
         run: powershell -ExecutionPolicy Bypass -File sonatina\service\build_service.ps1
 
-      - name: Smoke-test SonatinaSvc.exe --help
-        run: .\sonatina\service\build\SonatinaSvc.exe --help
+      - name: Smoke-test SonatinaSvc.exe and installer scripts
+        run: |
+          .\sonatina\service\build\SonatinaSvc.exe --help
+          powershell -ExecutionPolicy Bypass -File sonatina\scripts\install-driver.ps1 -DryRun
+          powershell -ExecutionPolicy Bypass -File sonatina\scripts\uninstall-driver.ps1 -DryRun
+          powershell -ExecutionPolicy Bypass -File sonatina\scripts\build-gui.ps1 -CheckOnly
 
   driver-compile-x64:
     runs-on: windows-latest
@@ -74,3 +81,33 @@ jobs:
         with:
           name: SonatinaAudio-${{ matrix.configuration }}-x64
           path: sonatina\driver\build\x64\${{ matrix.configuration }}\
+
+  driver-compile-arm64:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Restore WDK ARM64 and Windows SDK NuGet packages
+        run: |
+          nuget install Microsoft.Windows.WDK.ARM64 -ExcludeVersion -OutputDirectory sonatina\driver\packages
+
+      - name: Build SonatinaAudio.sys (${{ matrix.configuration }}|ARM64)
+        run: |
+          msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=ARM64 /p:SignMode=Off
+
+      - name: Upload ARM64 driver build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonatinaAudio-${{ matrix.configuration }}-ARM64
+          path: sonatina\driver\build\ARM64\${{ matrix.configuration }}\

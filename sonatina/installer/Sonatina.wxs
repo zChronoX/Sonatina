@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WiX v4 MSI packaging manifest for SonatinaAudio + SonatinaSvc (S5 / D8).
+     Build on a machine with WiX Toolset v4 and signed driver binaries:
+       wix build Sonatina.wxs -d DriverDir=..\driver\build\x64\Release\SonatinaAudio -d SvcDir=..\service\build -o Sonatina-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Sonatina Bluetooth Audio"
+           Manufacturer="Sonatina Project"
+           Version="0.1.0.0"
+           UpgradeCode="B8F3C21A-7C9E-4A12-9D65-3E1F4C8A9B20"
+           Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Sonatina is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Sonatina">
+        <Directory Id="DRIVERFOLDER" Name="Driver" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="SonatinaComponents">
+      <Component Id="ServiceComponent" Directory="INSTALLFOLDER" Guid="4A2D19C8-6F31-4E55-B1A0-92C3D4E5F601">
+        <File Id="SonatinaSvcExe" Source="$(var.SvcDir)\SonatinaSvc.exe" KeyPath="yes" />
+        <ServiceInstall Id="SonatinaSvcInstall"
+                        Name="SonatinaSvc"
+                        DisplayName="Sonatina Bluetooth Audio Service"
+                        Description="Watches per-device Bluetooth codec profiles and reconnects SonatinaAudio endpoints."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal" />
+        <ServiceControl Id="SonatinaSvcControl"
+                        Name="SonatinaSvc"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <Component Id="DriverFilesComponent" Directory="DRIVERFOLDER" Guid="9C7E12B4-3D22-48A1-8E44-112233445566">
+        <File Id="DriverInf" Source="$(var.DriverDir)\SonatinaAudio.inf" KeyPath="yes" />
+        <File Id="DriverSys" Source="$(var.DriverDir)\SonatinaAudio.sys" />
+        <File Id="DriverCat" Source="$(var.DriverDir)\SonatinaAudio.cat" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Driver PnP install, rollback, and uninstall via pnputil -->
+    <CustomAction Id="InstallDriver"
+                  Directory="DRIVERFOLDER"
+                  ExeCommand="[System64Folder]pnputil.exe /add-driver &quot;[DRIVERFOLDER]SonatinaAudio.inf&quot; /install"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <CustomAction Id="RollbackDriver"
+                  Directory="DRIVERFOLDER"
+                  ExeCommand="[System64Folder]pnputil.exe /delete-driver SonatinaAudio.inf /uninstall /force"
+                  Execute="rollback"
+                  Impersonate="no"
+                  Return="ignore" />
+    <CustomAction Id="UninstallDriver"
+                  Directory="DRIVERFOLDER"
+                  ExeCommand="[System64Folder]pnputil.exe /delete-driver SonatinaAudio.inf /uninstall /force"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RollbackDriver" Before="InstallDriver" Condition="NOT Installed" />
+      <Custom Action="InstallDriver" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="UninstallDriver" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Feature Id="MainFeature" Title="Sonatina Bluetooth Audio" Level="1">
+      <ComponentGroupRef Id="SonatinaComponents" />
+    </Feature>
+  </Package>
+</Wix>

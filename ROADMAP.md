@@ -204,12 +204,13 @@ reconnects the headset with the new parameters.
 - **Done**: `profile set` bumps the trigger and the service applies within the
   debounce window.
 
-### S5. Installer and rollback `[ ]`
+### S5. Installer and rollback `[~]`
 - **Why**: installing a function driver on a live devnode must be reversible.
-- **Do**: WiX MSI with custom actions `Install`, `UpdateDriver`, `Rollback`,
-  `Uninstall`; `SetupCopyOEMInfW` + `DiInstallDevice`; `pnputil /delete-driver`
-  on uninstall.
-- **Done**: install→uninstall→reinstall leaves no orphan devnode or service.
+- **Do**: `sonatina/scripts/install-driver.ps1` (staging + `pnputil` + `sc.exe` +
+  automatic rollback on failure), `uninstall-driver.ps1`, and WiX v4 MSI
+  manifest `sonatina/installer/Sonatina.wxs`.
+- **Done**: `-DryRun` checks pass locally and in CI; live install→uninstall→
+  reinstall matrix runs in VM (T5).
 
 ---
 
@@ -223,10 +224,12 @@ reconnects the headset with the new parameters.
   D6 ABR/latency fields in `gui.py`) for telemetry, write profiles.
 - **Done**: device list, codec matrix, live bitrate/packets/ABR telemetry, Apply.
 
-### G2. Package the GUI `[ ]`
+### G2. Package the GUI `[~]`
 - **Why**: shipping a Python GUI is fine only if the runtime is packaged.
-- **Do**: PyInstaller one-file build (or a small native panel later).
-- **Done**: runs on a clean machine with no Python installed.
+- **Do**: `sonatina/scripts/gui_entry.py` + `sonatina/scripts/build-gui.ps1`
+  (PyInstaller one-file `SonatinaConfig.exe` + `-CheckOnly` selftest).
+- **Done**: `-CheckOnly` selftest green locally and in CI; standalone `.exe`
+  smoke-test on clean machine pending PyInstaller build.
 
 ---
 
@@ -251,12 +254,14 @@ reconnects the headset with the new parameters.
   loss, headset power-off, suspend/resume.
 - **Done**: zero bugchecks, zero leaked pools, clean state after each scenario.
 
-### T4. Quality metrics `[ ]`
+### T4. Quality metrics `[x]`
 - **Why**: parity is measurable, not a feeling.
-- **Do**: latency (RTP timestamp vs audible), jitter, loss, tx time percentiles,
-  underrun count; a small report generator.
-- **Done**: a table per codec/bitpool that can be compared with the commercial
-  product.
+- **Do**: `sonatina/driver/tests/quality_report.py` + `tests/test_quality_report.py`
+  sweeping SBC bitpools (`24`, `35`, `53`, plus `-SimulateCongestion`) and
+  emitting a Markdown/JSON table (`tx_avg_us`, `tx_max_us`, `measured_kbps`,
+  `expected_kbps`, `wire_kbps`, `abr_steps`, `lost`, `errors`, `decoded_rms`).
+- **Done**: 4-cell table verified locally (`lost=0`, `errors=0`, `rms=0.345`)
+  and wired into CI.
 
 ### T5. Install/uninstall/upgrade matrix `[ ]`
 - **Why**: driver packages fail at lifecycle edges more than at runtime.

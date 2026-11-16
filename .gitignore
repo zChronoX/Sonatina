@@ -10,6 +10,9 @@ sonatina/driver/build/
 sonatina/driver/packages/
 sonatina/driver/tests/build/
 sonatina/service/build/
+sonatina/dist/
+sonatina/build/
+*.spec
 *.user
 *.suo
 *.pdb
