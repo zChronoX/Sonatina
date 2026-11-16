@@ -49,10 +49,10 @@
 ***************************************************************************************************/
 
 #define DECLFUNC static
-#ifdef _MSC_VER
-#define UNUSED_ATTR
-#else
+#if defined(__GNUC__) || defined(__clang__)
 #define UNUSED_ATTR __attribute__((unused))
+#else
+#define UNUSED_ATTR
 #endif
 
 #ifndef _32BIT_FIXED_POINT
