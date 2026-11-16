@@ -188,14 +188,18 @@ NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT paren
     return STATUS_SUCCESS;
 }
 
-NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
-                           L2CAP_CHANNEL_HANDLE *channel)
+NTSTATUS SontTransportOpenWithFlushTo(PSONT_TRANSPORT transport, USHORT psm,
+                                      USHORT flush_to_ms,
+                                      L2CAP_CHANNEL_HANDLE *channel)
 {
     struct _BRB_L2CA_OPEN_CHANNEL *brb;
     NTSTATUS status;
 
     if (transport == NULL || channel == NULL || !transport->HasBth) {
         return STATUS_INVALID_PARAMETER;
+    }
+    if (flush_to_ms == 0) {
+        flush_to_ms = 0xFFFF;
     }
     brb = (struct _BRB_L2CA_OPEN_CHANNEL *)transport->Bth.BthAllocateBrb(
         BRB_L2CA_OPEN_CHANNEL, SONT_POOL_TAG);
@@ -212,7 +216,7 @@ NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
     brb->ConfigOut.Mtu.Preferred = L2CAP_DEFAULT_MTU;
     brb->ConfigOut.FlushTO.Min = 1;
     brb->ConfigOut.FlushTO.Max = 0xFFFF;
-    brb->ConfigOut.FlushTO.Preferred = 0xFFFF;
+    brb->ConfigOut.FlushTO.Preferred = flush_to_ms;
     brb->ConfigIn.Flags = CFG_MTU;
     brb->ConfigIn.Mtu.Min = L2CAP_MIN_MTU;
     brb->ConfigIn.Mtu.Max = 0xFFFF;
@@ -231,6 +235,12 @@ NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
     }
     transport->Bth.BthFreeBrb((PBRB)brb);
     return status;
+}
+
+NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
+                           L2CAP_CHANNEL_HANDLE *channel)
+{
+    return SontTransportOpenWithFlushTo(transport, psm, 0xFFFF, channel);
 }
 
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,

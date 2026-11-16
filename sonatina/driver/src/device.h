@@ -11,6 +11,7 @@
 #include "brb_transport.h"
 #include "miniport_subdevices.h"
 #include "public.h"
+#include "trace_ring.h"
 
 typedef struct _SONT_DEVICE_EXTENSION {
     PDEVICE_OBJECT PhysicalDeviceObject;
@@ -29,8 +30,10 @@ typedef struct _SONT_DEVICE_EXTENSION {
     volatile LONG Removing;
     BOOLEAN ReconnectRequested;
 
+    LARGE_INTEGER QpcFreq;
     SONATINA_PROFILE Profile;
     SONATINA_STATE State;
+    SONT_TRACE_RING TraceRing;
     KSPIN_LOCK Lock;
 } SONT_DEVICE_EXTENSION, *PSONT_DEVICE_EXTENSION;
 

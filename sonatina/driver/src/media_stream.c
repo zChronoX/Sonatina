@@ -87,6 +87,29 @@ size_t SontPcmRingRead(SONT_PCM_RING *ring, uint8_t *out, size_t len)
     return to_read;
 }
 
+static uint8_t sont_calc_max_frames(unsigned frame_bytes, uint16_t mtu)
+{
+    unsigned payload_budget;
+    unsigned max_frames;
+
+    if (mtu < (uint16_t)(SONT_RTP_HEADER_LEN + 1u + frame_bytes)) {
+        payload_budget = frame_bytes;
+    } else {
+        payload_budget = (unsigned)mtu - SONT_RTP_HEADER_LEN - 1u;
+    }
+    if (payload_budget > SONT_MEDIA_MAX_FRAME_BUF) {
+        payload_budget = SONT_MEDIA_MAX_FRAME_BUF;
+    }
+
+    max_frames = payload_budget / frame_bytes;
+    if (max_frames == 0) {
+        max_frames = 1;
+    } else if (max_frames > 15u) {
+        max_frames = 15u;
+    }
+    return (uint8_t)max_frames;
+}
+
 bool SontMediaInit(SONT_MEDIA_PACKETIZER *ctx,
                    const SONT_SBC_PARAMS *params,
                    uint8_t bitpool,
@@ -95,8 +118,6 @@ bool SontMediaInit(SONT_MEDIA_PACKETIZER *ctx,
 {
     unsigned frame_bytes;
     unsigned samples_per_frame;
-    unsigned payload_budget;
-    unsigned max_frames;
     SONT_SBC_ENCODER *encoder;
 
     if (ctx == NULL || params == NULL) {
@@ -115,22 +136,6 @@ bool SontMediaInit(SONT_MEDIA_PACKETIZER *ctx,
         return false;
     }
 
-    if (mtu < (uint16_t)(SONT_RTP_HEADER_LEN + 1u + frame_bytes)) {
-        payload_budget = frame_bytes;
-    } else {
-        payload_budget = (unsigned)mtu - SONT_RTP_HEADER_LEN - 1u;
-    }
-    if (payload_budget > SONT_MEDIA_MAX_FRAME_BUF) {
-        payload_budget = SONT_MEDIA_MAX_FRAME_BUF;
-    }
-
-    max_frames = payload_budget / frame_bytes;
-    if (max_frames == 0) {
-        max_frames = 1;
-    } else if (max_frames > 15u) {
-        max_frames = 15u;
-    }
-
     SONT_MEMSET(ctx, 0, sizeof(*ctx));
     ctx->encoder = encoder;
     ctx->sbc_params = *params;
@@ -140,7 +145,35 @@ bool SontMediaInit(SONT_MEDIA_PACKETIZER *ctx,
     ctx->channels = SontSbcChannels(params);
     ctx->samples_per_frame = samples_per_frame;
     ctx->frame_bytes = frame_bytes;
-    ctx->max_frames_per_packet = (uint8_t)max_frames;
+    ctx->max_frames_per_packet = sont_calc_max_frames(frame_bytes, mtu);
+    return true;
+}
+
+bool SontMediaSetBitpool(SONT_MEDIA_PACKETIZER *ctx, uint8_t bitpool)
+{
+    unsigned frame_bytes;
+
+    if (ctx == NULL || ctx->encoder == NULL || ctx->frames_pending != 0) {
+        return false;
+    }
+    if (bitpool < ctx->sbc_params.min_bitpool || bitpool > ctx->sbc_params.max_bitpool) {
+        return false;
+    }
+    if (bitpool == ctx->bitpool) {
+        return true;
+    }
+
+    frame_bytes = SontSbcEncodedFrameBytes(&ctx->sbc_params, bitpool);
+    if (frame_bytes == 0 || frame_bytes > SONT_MEDIA_MAX_FRAME_BUF) {
+        return false;
+    }
+    if (SontSbcSetBitpool(ctx->encoder, &ctx->sbc_params, bitpool) != 0) {
+        return false;
+    }
+
+    ctx->bitpool = bitpool;
+    ctx->frame_bytes = frame_bytes;
+    ctx->max_frames_per_packet = sont_calc_max_frames(frame_bytes, ctx->mtu);
     return true;
 }
 

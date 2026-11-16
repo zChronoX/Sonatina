@@ -51,6 +51,7 @@ bool SontMediaInit(SONT_MEDIA_PACKETIZER *ctx,
                    uint8_t bitpool,
                    uint16_t mtu,
                    uint32_t ssrc);
+bool SontMediaSetBitpool(SONT_MEDIA_PACKETIZER *ctx, uint8_t bitpool);
 void SontMediaDestroy(SONT_MEDIA_PACKETIZER *ctx);
 
 /* Encodes one SBC frame worth of interleaved int16 PCM samples and appends it

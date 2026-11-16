@@ -12,12 +12,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../src/abr.h"
 #include "../src/avdtp.h"
 #include "../src/avdtp_session.h"
 #include "../src/codec_sbc.h"
 #include "../src/media_stream.h"
 #include "../src/profile_validate.h"
 #include "../src/rtp.h"
+#include "../src/trace_ring.h"
 #include "../../service/apply_policy.h"
 #ifdef SONATINA_WITH_LIBSBC
 #include <sbc.h>
@@ -483,6 +485,79 @@ static void RunUnitAssertions(void)
         assert(SontPolicyPoll(&pol, 10) == SONT_POLICY_APPLY);
         SontPolicyNotify(&pol, 10);
         assert(SontPolicyPoll(&pol, 10) == SONT_POLICY_APPLY);
+    }
+
+    /* 8. D6 ABR controller, dynamic SBC bitpool change, and A4 trace ring */
+    {
+        SONT_ABR abr;
+        uint8_t new_bp = 0;
+        unsigned i;
+        SONT_SBC_PARAMS params = {48000, 3, 16, 8, 1, 2, 53};
+        SONT_MEDIA_PACKETIZER pkt;
+        int16_t pcm[128 * 2];
+        uint8_t rtp[1024];
+        size_t rtp_len = 0;
+        SONT_TRACE_RING ring;
+        SONT_TRACE_ENTRY snap[SONT_TRACE_RING_CAPACITY];
+        uint32_t copied;
+
+        SontAbrInit(&abr, 18, 53);
+        assert(abr.current_bitpool == 53);
+
+        /* Healthy packets keep bitpool unchanged */
+        for (i = 0; i < 10; i++) {
+            assert(SontAbrOnPacketSent(&abr, 2000u, true, &new_bp) == 0);
+        }
+        assert(abr.current_bitpool == 53);
+
+        /* 3 consecutive high-latency packets step bitpool down by 4 */
+        assert(SontAbrOnPacketSent(&abr, 15000u, true, &new_bp) == 0);
+        assert(SontAbrOnPacketSent(&abr, 15000u, true, &new_bp) == 0);
+        assert(SontAbrOnPacketSent(&abr, 15000u, true, &new_bp) == 1);
+        assert(new_bp == 49 && abr.current_bitpool == 49);
+        assert(abr.tx_high_count == 3 && abr.abr_adjustments == 1);
+
+        /* Critical latency spikes step down aggressively by 8 */
+        assert(SontAbrOnPacketSent(&abr, 30000u, true, &new_bp) == 1);
+        assert(new_bp == 41 && abr.current_bitpool == 41);
+        assert(abr.tx_critical_count == 1 && abr.abr_adjustments == 2);
+
+        /* Clean recovery after 2 healthy windows steps bitpool up by 2 */
+        for (i = 0; i < 150; i++) {
+            if (SontAbrOnPacketSent(&abr, 1500u, true, &new_bp) == 1) {
+                break;
+            }
+        }
+        assert(abr.current_bitpool == 43);
+
+        /* Dynamic bitpool update in SontMediaSetBitpool keeps encoding valid */
+        memset(pcm, 0, sizeof(pcm));
+        assert(SontMediaInit(&pkt, &params, 53, 672, 0x11223344u));
+        assert(pkt.frame_bytes == 119 && pkt.max_frames_per_packet == 5);
+        assert(SontMediaSetBitpool(&pkt, 35));
+        assert(pkt.bitpool == 35);
+        assert(pkt.frame_bytes == SontSbcEncodedFrameBytes(&params, 35));
+        for (i = 0; i < pkt.max_frames_per_packet; i++) {
+            int step = SontMediaPushPcmFrame(&pkt, pcm, 128, rtp, sizeof(rtp), &rtp_len);
+            if (i + 1u < pkt.max_frames_per_packet) {
+                assert(step == 0);
+            } else {
+                assert(step == 1 && rtp_len > SONT_RTP_HEADER_LEN);
+            }
+        }
+        SontMediaDestroy(&pkt);
+
+        /* A4 TraceRing chronological wrap-around */
+        SontTraceRingInit(&ring);
+        for (i = 0; i < 40; i++) {
+            SontTraceRingPush(&ring, (uint64_t)(i * 100u), 1u, i, i + 10u);
+        }
+        assert(ring.total_events == 40u);
+        assert(ring.count == SONT_TRACE_RING_CAPACITY);
+        copied = SontTraceRingSnapshot(&ring, snap, SONT_TRACE_RING_CAPACITY);
+        assert(copied == SONT_TRACE_RING_CAPACITY);
+        assert(snap[0].arg0 == 8u && snap[0].timestamp_us == 800u);
+        assert(snap[copied - 1u].arg0 == 39u && snap[copied - 1u].timestamp_us == 3900u);
     }
 }
 

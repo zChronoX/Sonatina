@@ -6,12 +6,14 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_executable(host_test
     host_test.c
+    ../src/abr.c
     ../src/avdtp.c
     ../src/avdtp_session.c
     ../src/rtp.c
     ../src/codec_sbc.c
     ../src/media_stream.c
     ../src/profile_validate.c
+    ../src/trace_ring.c
     ../../service/apply_policy.c
     ../third_party/sbc/src/bits.c
     ../third_party/sbc/src/sbc.c

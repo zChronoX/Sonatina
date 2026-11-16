@@ -67,13 +67,15 @@ reconnects the headset with the new parameters.
 - **Done**: a deliberately broken build is caught by Verifier and the VM rolls
   back from the snapshot.
 
-### A4. Logging and tracing `[ ]`
+### A4. Logging and tracing `[~]`
 - **Why**: kernel audio bugs are timing bugs; `DbgPrint` alone is not enough.
-- **Do**: WPP/ETW tracing (`LogPages`, `VerboseOn` in the service key), a small
-  in-memory ring for the last N AVDTP/RTP events exposed through
-  `IOCTL_SONATINA_GET_STATS`.
+- **Do**: WPP/ETW tracing (`LogPages`, `VerboseOn` in the service key), plus
+  in-memory ring (`src/trace_ring.h/.c`, 32 events) for AVDTP/RTP/ABR events
+  exposed through `IOCTL_SONATINA_GET_STATS` (`SONATINA_STATS`).
 - **Done**: a 10-minute session produces a trace with packet counts, tx times
   and state transitions.
+- **Status**: `SONT_TRACE_RING` + `IOCTL_SONATINA_GET_STATS` implemented and
+  verified in host tests; WPP/ETW + VM session test pending.
 
 ### A5. Compile-only CI `[x]`
 - **Why**: keep the driver buildable while the main work is elsewhere.
@@ -143,13 +145,19 @@ reconnects the headset with the new parameters.
   registry boot-load, and native `SonatinaSvc.exe` implemented and compiled
   cleanly (`gcc -Wall -Wextra -Werror`); VM runtime verification (A3) pending.
 
-### D6. ABR, flush timeout and latency `[ ]`
+### D6. ABR, flush timeout and latency `[~]`
 - **Why**: the commercial value is stability on a weak radio ("no stuttering")
   and lower latency, not just a different codec.
-- **Do**: measure per-packet tx time; short/long-term thresholds; reduce
-  bitpool/flush timeout; expose the counters in `Current`.
+- **Do**: measure per-packet tx time (`src/abr.h/.c`); short/long-term
+  thresholds + clean recovery; dynamic bitpool updates (`SontSbcSetBitpool` /
+  `SontMediaSetBitpool`); L2CAP media `FlushTO` (40 ms via
+  `SontTransportOpenWithFlushTo`); expose counters in `SONATINA_STATE` and
+  `Current\`.
 - **Done**: with an artificially degraded link, audio does not drop out; the
   counters show ABR reacting; latency stays under the target.
+- **Status**: portable ABR, dynamic SBC bitpool change, 40 ms media `FlushTO`,
+  and registry telemetry sync implemented and host-tested; WDK CI + degraded-radio
+  VM test pending.
 
 ### D7. Additional codecs `[ ]`
 - **Why**: parity beyond SBC. Technical work only; licensing decides the rest.

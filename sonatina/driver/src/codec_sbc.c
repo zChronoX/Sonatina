@@ -93,6 +93,25 @@ void SontSbcEncoderDestroy(SONT_SBC_ENCODER *encoder)
     }
 }
 
+int SontSbcSetBitpool(SONT_SBC_ENCODER *encoder, const SONT_SBC_PARAMS *params, uint8_t bitpool)
+{
+    unsigned frame_bytes;
+
+    if (encoder == NULL || params == NULL) {
+        return -1;
+    }
+    if (bitpool < params->min_bitpool || bitpool > params->max_bitpool) {
+        return -1;
+    }
+    encoder->frame.bitpool = bitpool;
+    frame_bytes = sbc_get_frame_size(&encoder->frame);
+    if (frame_bytes == 0) {
+        return -1;
+    }
+    encoder->frame_bytes = frame_bytes;
+    return 0;
+}
+
 int SontSbcEncode(SONT_SBC_ENCODER *encoder, const int16_t *pcm, size_t samples,
                   uint8_t *out, size_t capacity, size_t *written)
 {
@@ -150,6 +169,18 @@ SONT_SBC_ENCODER *SontSbcEncoderCreate(const SONT_SBC_PARAMS *params, uint8_t bi
 void SontSbcEncoderDestroy(SONT_SBC_ENCODER *encoder)
 {
     SONT_FREE(encoder);
+}
+
+int SontSbcSetBitpool(SONT_SBC_ENCODER *encoder, const SONT_SBC_PARAMS *params, uint8_t bitpool)
+{
+    if (encoder == NULL || params == NULL) {
+        return -1;
+    }
+    if (bitpool < params->min_bitpool || bitpool > params->max_bitpool) {
+        return -1;
+    }
+    encoder->bitpool = bitpool;
+    return 0;
 }
 
 int SontSbcEncode(SONT_SBC_ENCODER *encoder, const int16_t *pcm, size_t samples,

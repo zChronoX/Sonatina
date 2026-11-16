@@ -16,6 +16,7 @@
 #include "avdtp_session.h"
 #include "miniport_subdevices.h"
 #include "profile_validate.h"
+#include "abr.h"
 
 #define SONT_POOL_TAG 'anOS'
 #define SONT_AVDTP_RX_TIMEOUT_MS 5000u
@@ -23,12 +24,14 @@
 #define SONT_AVDTP_MAX_IGNORED   8u
 #define SONT_MEDIA_WAIT_MS       50u
 #define SONT_MEDIA_L2CAP_MTU     672u
+#define SONT_MEDIA_FLUSH_TO_MS   40u
 #define SONT_MEDIA_MAX_PCM_CH    2u
 #define SONT_MEDIA_MAX_SAMPLES   128u
 
 typedef struct _SONT_SIGNALING_SCRATCH {
     SONT_AVDTP_SESSION session;
     SONT_MEDIA_PACKETIZER media;
+    SONT_ABR abr;
     uint8_t tx[SONT_AVDTP_MAX_PDU];
     uint8_t rx[SONT_AVDTP_MAX_PDU];
     uint8_t rtp[1024];
@@ -246,6 +249,8 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
 
     RtlZeroMemory(ext, sizeof(*ext));
     KeInitializeSpinLock(&ext->Lock);
+    (void)KeQueryPerformanceCounter(&ext->QpcFreq);
+    SontTraceRingInit(&ext->TraceRing);
     KeInitializeEvent(&ext->StopEvent, NotificationEvent, FALSE);
     KeInitializeMutex(&ext->WorkerMutex, 0);
     KeInitializeSpinLock(&ext->PcmSource.Lock);
@@ -381,11 +386,36 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
-        KeAcquireSpinLock(&ext->Lock, &old_irql);
-        ext->State.Size = sizeof(SONATINA_STATE);
-        RtlCopyMemory(buffer, &ext->State, sizeof(SONATINA_STATE));
-        KeReleaseSpinLock(&ext->Lock, old_irql);
-        irp->IoStatus.Information = sizeof(SONATINA_STATE);
+        if (out_len >= sizeof(SONATINA_STATS)) {
+            PSONATINA_STATS stats_out = (PSONATINA_STATS)buffer;
+            SONT_TRACE_ENTRY entries[SONATINA_TRACE_CAPACITY];
+            uint32_t copied;
+            uint32_t i;
+
+            RtlZeroMemory(stats_out, sizeof(*stats_out));
+            KeAcquireSpinLock(&ext->Lock, &old_irql);
+            ext->State.Size = sizeof(SONATINA_STATE);
+            stats_out->Size = sizeof(SONATINA_STATS);
+            stats_out->State = ext->State;
+            stats_out->TotalEvents = ext->TraceRing.total_events;
+            copied = SontTraceRingSnapshot(&ext->TraceRing, entries, SONATINA_TRACE_CAPACITY);
+            KeReleaseSpinLock(&ext->Lock, old_irql);
+
+            stats_out->EventCount = copied;
+            for (i = 0; i < copied; i++) {
+                stats_out->Events[i].TimestampUs = entries[i].timestamp_us;
+                stats_out->Events[i].Kind = entries[i].kind;
+                stats_out->Events[i].Arg0 = entries[i].arg0;
+                stats_out->Events[i].Arg1 = entries[i].arg1;
+            }
+            irp->IoStatus.Information = sizeof(SONATINA_STATS);
+        } else {
+            KeAcquireSpinLock(&ext->Lock, &old_irql);
+            ext->State.Size = sizeof(SONATINA_STATE);
+            RtlCopyMemory(buffer, &ext->State, sizeof(SONATINA_STATE));
+            KeReleaseSpinLock(&ext->Lock, old_irql);
+            irp->IoStatus.Information = sizeof(SONATINA_STATE);
+        }
         break;
 
     case IOCTL_SONATINA_RECONNECT:
@@ -427,12 +457,44 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
     return status;
 }
 
+static ULONGLONG SontQueryTimestampUs(PSONT_DEVICE_EXTENSION ext)
+{
+    LARGE_INTEGER now = KeQueryPerformanceCounter(NULL);
+    ULONGLONG freq = (ext->QpcFreq.QuadPart > 0) ? (ULONGLONG)ext->QpcFreq.QuadPart : 10000000ULL;
+    ULONGLONG q = (now.QuadPart > 0) ? (ULONGLONG)now.QuadPart : 0ULL;
+    return (q / freq) * 1000000ULL + ((q % freq) * 1000000ULL) / freq;
+}
+
+static VOID SontTraceLogLocked(PSONT_DEVICE_EXTENSION ext,
+                               SONATINA_EVENT_KIND kind,
+                               ULONG arg0,
+                               ULONG arg1)
+{
+    SontTraceRingPush(&ext->TraceRing,
+                      (uint64_t)SontQueryTimestampUs(ext),
+                      (uint32_t)kind,
+                      (uint32_t)arg0,
+                      (uint32_t)arg1);
+}
+
+static VOID SontTraceLog(PSONT_DEVICE_EXTENSION ext,
+                         SONATINA_EVENT_KIND kind,
+                         ULONG arg0,
+                         ULONG arg1)
+{
+    KIRQL old_irql;
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    SontTraceLogLocked(ext, kind, arg0, arg1);
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+}
+
 static VOID SontRecordSignalingError(PSONT_DEVICE_EXTENSION ext)
 {
     KIRQL old_irql;
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
     ext->State.Errors++;
+    SontTraceLogLocked(ext, SonatinaEventError, ext->State.Errors, 0);
     KeReleaseSpinLock(&ext->Lock, old_irql);
 }
 
@@ -497,28 +559,60 @@ static BOOLEAN SontDequeuePcmFrame(PSONT_PCM_SOURCE src,
 
 static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
                                     L2CAP_CHANNEL_HANDLE media_ch,
-                                    const uint8_t *rtp,
+                                    const SONT_SBC_PARAMS *sbc,
+                                    PSONT_SIGNALING_SCRATCH scratch,
                                     size_t rtp_len)
 {
     LARGE_INTEGER freq;
     LARGE_INTEGER t0;
     LARGE_INTEGER t1;
+    ULONG tx_us = 0;
+    uint8_t old_bp;
+    uint8_t new_bp = 0;
+    int abr_changed;
     NTSTATUS status;
     KIRQL old_irql;
 
     t0 = KeQueryPerformanceCounter(&freq);
-    status = SontTransportSend(&ext->Transport, media_ch, rtp, (ULONG)rtp_len);
+    status = SontTransportSend(&ext->Transport, media_ch, scratch->rtp, (ULONG)rtp_len);
     t1 = KeQueryPerformanceCounter(NULL);
+
+    if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
+        tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
+    }
+
+    old_bp = scratch->abr.current_bitpool;
+    abr_changed = SontAbrOnPacketSent(&scratch->abr,
+                                      (uint32_t)tx_us,
+                                      NT_SUCCESS(status),
+                                      &new_bp);
+    if (abr_changed) {
+        if (!SontMediaSetBitpool(&scratch->media, new_bp)) {
+            abr_changed = 0;
+        }
+    }
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
     if (NT_SUCCESS(status)) {
         ext->State.Packets++;
-        if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
-            ext->State.TxTimeUs = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) /
-                                          freq.QuadPart);
-        }
+        ext->State.TxTimeUs = tx_us;
     } else {
         ext->State.Errors++;
+    }
+    ext->State.TxTimeMaxUs = scratch->abr.tx_max_us;
+    ext->State.TxTimeAvgUs = scratch->abr.tx_avg_us;
+    ext->State.TxTimeHighCount = scratch->abr.tx_high_count;
+    ext->State.TxTimeCriticalCount = scratch->abr.tx_critical_count;
+    ext->State.AbrAdjustments = scratch->abr.abr_adjustments;
+    ext->State.CurrentBitpool = scratch->media.bitpool;
+    ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(sbc, scratch->media.bitpool);
+    ext->State.DelayMs = (scratch->abr.tx_avg_us + 500u) / 1000u;
+
+    if (!NT_SUCCESS(status) || tx_us >= scratch->abr.tx_critical_us) {
+        SontTraceLogLocked(ext, SonatinaEventTxCritical, tx_us, (ULONG)status);
+    }
+    if (abr_changed) {
+        SontTraceLogLocked(ext, SonatinaEventAbrStep, (ULONG)old_bp, (ULONG)new_bp);
     }
     KeReleaseSpinLock(&ext->Lock, old_irql);
     return status;
@@ -540,6 +634,8 @@ static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
         SontRecordSignalingError(ext);
         return STATUS_UNSUCCESSFUL;
     }
+    SontAbrInit(&scratch->abr, sbc->min_bitpool, sbc->max_bitpool);
+    SontTraceLog(ext, SonatinaEventMediaStart, (ULONG)sbc->sampling, (ULONG)sbc->max_bitpool);
 
     wait_objs[0] = &ext->PcmSource.DataEvent;
     wait_objs[1] = &ext->StopEvent;
@@ -564,7 +660,7 @@ static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
                                              sizeof(scratch->rtp),
                                              &rtp_len);
             if (step == 1) {
-                status = SontSendMediaPacket(ext, media_ch, scratch->rtp, rtp_len);
+                status = SontSendMediaPacket(ext, media_ch, sbc, scratch, rtp_len);
                 if (!NT_SUCCESS(status)) {
                     break;
                 }
@@ -579,7 +675,7 @@ static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
         if (!stream_running && scratch->media.frames_pending > 0) {
             size_t rtp_len = 0;
             if (SontMediaFlush(&scratch->media, scratch->rtp, sizeof(scratch->rtp), &rtp_len) == 1) {
-                status = SontSendMediaPacket(ext, media_ch, scratch->rtp, rtp_len);
+                status = SontSendMediaPacket(ext, media_ch, sbc, scratch, rtp_len);
                 if (!NT_SUCCESS(status)) {
                     break;
                 }
@@ -593,6 +689,7 @@ static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
         }
     }
 
+    SontTraceLog(ext, SonatinaEventMediaStop, (ULONG)status, (ULONG)scratch->abr.current_bitpool);
     SontMediaDestroy(&scratch->media);
     return status;
 }
@@ -699,7 +796,10 @@ static VOID SontSignalingWorker(PVOID context)
 
     if (scratch->session.state == SONT_AVDTP_STATE_STREAMING &&
         KeReadStateEvent(&ext->StopEvent) == 0) {
-        status = SontTransportOpen(&ext->Transport, SONT_L2CAP_PSM_MEDIA, &media_ch);
+        status = SontTransportOpenWithFlushTo(&ext->Transport,
+                                              SONT_L2CAP_PSM_MEDIA,
+                                              SONT_MEDIA_FLUSH_TO_MS,
+                                              &media_ch);
         if (!NT_SUCCESS(status)) {
             SontRecordSignalingError(ext);
             goto cleanup;
@@ -708,19 +808,26 @@ static VOID SontSignalingWorker(PVOID context)
 
         KeAcquireSpinLock(&ext->Lock, &old_irql);
         ext->State.Opened = TRUE;
+        ext->State.TxFlushTO = SONT_MEDIA_FLUSH_TO_MS;
         if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_RAW) {
             ext->State.Codec = SonatinaCodecPcm;
             ext->State.NegotiatedSampling = 48000;
             ext->State.NegotiatedChannels = 2;
             ext->State.BitrateKbps = 1536;
+            ext->State.CurrentBitpool = 0;
         } else {
             ext->State.Codec = SonatinaCodecSbc;
             ext->State.NegotiatedSampling = scratch->session.negotiated.sbc.sampling;
             ext->State.NegotiatedChannels = (ULONG)SontSbcChannels(&scratch->session.negotiated.sbc);
+            ext->State.CurrentBitpool = scratch->session.negotiated.sbc.max_bitpool;
             ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(
                 &scratch->session.negotiated.sbc,
                 scratch->session.negotiated.sbc.max_bitpool);
         }
+        SontTraceLogLocked(ext,
+                           SonatinaEventAvdtpState,
+                           (ULONG)scratch->session.state,
+                           (ULONG)scratch->session.selected_acp_seid);
         KeReleaseSpinLock(&ext->Lock, old_irql);
 
         DbgPrint("Sonatina: D3 AVDTP streaming open (SEID=%u, %lu Hz, %lu kbps)\n",
@@ -832,6 +939,7 @@ static NTSTATUS SontReconnectSignalingWorker(PSONT_DEVICE_EXTENSION ext)
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
     ext->State.Opened = FALSE;
+    SontTraceLogLocked(ext, SonatinaEventReconnect, ext->Profile.Codec, ext->Profile.SbcMaxBitpool);
     KeReleaseSpinLock(&ext->Lock, old_irql);
 
     status = SontStartSignalingWorkerLocked(ext);

@@ -33,6 +33,13 @@ CURRENT_SCHEMA = {
     "TxTimeUs": "dword",
     "DelayMs": "dword",
     "Opened": "dword",
+    "Bitpool": "dword",
+    "TxTimeMaxUs": "dword",
+    "TxTimeAvgUs": "dword",
+    "TxTimeHighCount": "dword",
+    "TxTimeCriticalCount": "dword",
+    "AbrAdjustments": "dword",
+    "TxFlushTO": "dword",
     "UpdatedAt": "sz",
 }
 

@@ -29,6 +29,9 @@ typedef struct _SONT_TRANSPORT {
 NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT parent);
 NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
                            L2CAP_CHANNEL_HANDLE *channel);
+NTSTATUS SontTransportOpenWithFlushTo(PSONT_TRANSPORT transport, USHORT psm,
+                                      USHORT flush_to_ms,
+                                      L2CAP_CHANNEL_HANDLE *channel);
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
                            const void *data, ULONG length);
 NTSTATUS SontTransportReceive(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,

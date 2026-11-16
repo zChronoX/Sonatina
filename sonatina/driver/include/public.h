@@ -54,7 +54,42 @@ typedef struct _SONATINA_STATE {
     ULONG DelayMs;
     ULONG NegotiatedSampling;
     ULONG NegotiatedChannels;
+    ULONG CurrentBitpool;
+    ULONG TxTimeMaxUs;
+    ULONG TxTimeAvgUs;
+    ULONG TxTimeHighCount;
+    ULONG TxTimeCriticalCount;
+    ULONG AbrAdjustments;
+    ULONG TxFlushTO;
 } SONATINA_STATE, *PSONATINA_STATE;
+
+#define SONATINA_TRACE_CAPACITY 32
+
+typedef enum _SONATINA_EVENT_KIND {
+    SonatinaEventNone = 0,
+    SonatinaEventAvdtpState = 1,
+    SonatinaEventMediaStart = 2,
+    SonatinaEventMediaStop = 3,
+    SonatinaEventAbrStep = 4,
+    SonatinaEventTxCritical = 5,
+    SonatinaEventReconnect = 6,
+    SonatinaEventError = 7
+} SONATINA_EVENT_KIND;
+
+typedef struct _SONATINA_TRACE_EVENT {
+    ULONGLONG TimestampUs;
+    ULONG Kind;
+    ULONG Arg0;
+    ULONG Arg1;
+} SONATINA_TRACE_EVENT, *PSONATINA_TRACE_EVENT;
+
+typedef struct _SONATINA_STATS {
+    ULONG Size;                 /* sizeof(SONATINA_STATS) */
+    SONATINA_STATE State;
+    ULONG TotalEvents;
+    ULONG EventCount;
+    SONATINA_TRACE_EVENT Events[SONATINA_TRACE_CAPACITY];
+} SONATINA_STATS, *PSONATINA_STATS;
 
 typedef struct _SONATINA_DEVICE_INFO {
     ULONG Size;                 /* sizeof(SONATINA_DEVICE_INFO) */

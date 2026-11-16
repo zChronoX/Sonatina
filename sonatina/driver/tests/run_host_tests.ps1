@@ -30,12 +30,14 @@ if (-not (Test-Path $OutDir)) {
 $exe = Join-Path $OutDir 'host_test.exe'
 $sources = @(
     (Join-Path $testsDir 'host_test.c'),
+    (Join-Path $srcDir 'abr.c'),
     (Join-Path $srcDir 'avdtp.c'),
     (Join-Path $srcDir 'avdtp_session.c'),
     (Join-Path $srcDir 'rtp.c'),
     (Join-Path $srcDir 'codec_sbc.c'),
     (Join-Path $srcDir 'media_stream.c'),
     (Join-Path $srcDir 'profile_validate.c'),
+    (Join-Path $srcDir 'trace_ring.c'),
     (Join-Path $svcDir 'apply_policy.c'),
     (Join-Path $sbcSrcDir 'bits.c'),
     (Join-Path $sbcSrcDir 'sbc.c')

@@ -31,6 +31,7 @@ double   SontSbcBitrateKbps(const SONT_SBC_PARAMS *params, uint8_t bitpool);
 typedef struct SONT_SBC_ENCODER SONT_SBC_ENCODER;
 
 SONT_SBC_ENCODER *SontSbcEncoderCreate(const SONT_SBC_PARAMS *params, uint8_t bitpool);
+int SontSbcSetBitpool(SONT_SBC_ENCODER *encoder, const SONT_SBC_PARAMS *params, uint8_t bitpool);
 void SontSbcEncoderDestroy(SONT_SBC_ENCODER *encoder);
 
 /* Encode interleaved int16 PCM. `samples` is the number of samples per channel.

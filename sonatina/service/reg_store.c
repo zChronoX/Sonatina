@@ -300,6 +300,20 @@ LONG SontSvcWriteCurrent(HKEY hive,
                          (const BYTE *)&state->DelayMs, sizeof(DWORD));
     (void)RegSetValueExW(key, L"Opened", 0, REG_DWORD,
                          (const BYTE *)&state->Opened, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"Bitpool", 0, REG_DWORD,
+                         (const BYTE *)&state->CurrentBitpool, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"TxTimeMaxUs", 0, REG_DWORD,
+                         (const BYTE *)&state->TxTimeMaxUs, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"TxTimeAvgUs", 0, REG_DWORD,
+                         (const BYTE *)&state->TxTimeAvgUs, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"TxTimeHighCount", 0, REG_DWORD,
+                         (const BYTE *)&state->TxTimeHighCount, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"TxTimeCriticalCount", 0, REG_DWORD,
+                         (const BYTE *)&state->TxTimeCriticalCount, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"AbrAdjustments", 0, REG_DWORD,
+                         (const BYTE *)&state->AbrAdjustments, sizeof(DWORD));
+    (void)RegSetValueExW(key, L"TxFlushTO", 0, REG_DWORD,
+                         (const BYTE *)&state->TxFlushTO, sizeof(DWORD));
 
     GetSystemTime(&st);
     _snwprintf(updated, sizeof(updated) / sizeof(updated[0]),
