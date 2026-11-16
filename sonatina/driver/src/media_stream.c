@@ -87,6 +87,254 @@ size_t SontPcmRingRead(SONT_PCM_RING *ring, uint8_t *out, size_t len)
     return to_read;
 }
 
+size_t SontPcmRingDiscard(SONT_PCM_RING *ring, size_t len)
+{
+    size_t n;
+
+    if (ring == NULL || ring->capacity == 0 || len == 0) {
+        return 0;
+    }
+    n = (len < ring->used) ? len : ring->used;
+    ring->read_pos = (ring->read_pos + n) % ring->capacity;
+    ring->used -= n;
+    return n;
+}
+
+bool SontPcmRingHasSignal(const SONT_PCM_RING *ring, size_t max_bytes, int16_t threshold)
+{
+    size_t n;
+    size_t i;
+    size_t pos;
+
+    if (ring == NULL || ring->buf == NULL || ring->capacity < 2 || ring->used < 2) {
+        return false;
+    }
+    n = (ring->used < max_bytes) ? ring->used : max_bytes;
+    n &= ~(size_t)1;
+    pos = ring->write_pos;
+    for (i = 0; i < n; i += 2) {
+        uint8_t lo;
+        uint8_t hi;
+        int16_t v;
+
+        pos = (pos >= 2) ? pos - 2 : pos + ring->capacity - 2;
+        lo = ring->buf[pos];
+        hi = ring->buf[(pos + 1) % ring->capacity];
+        v = (int16_t)(uint16_t)((uint16_t)lo | ((uint16_t)hi << 8));
+        if (v > threshold || v < (int16_t)-threshold) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------ resampler */
+
+static bool sont_read_frame(SONT_RESAMPLER *rs, SONT_PCM_RING *ring, int16_t out[2])
+{
+    int16_t in[2];
+    size_t bytes = (size_t)rs->in_channels * sizeof(int16_t);
+
+    if (SontPcmRingAvailable(ring) < bytes ||
+        SontPcmRingRead(ring, (uint8_t *)in, bytes) != bytes) {
+        return false;
+    }
+    if (rs->in_channels == rs->out_channels) {
+        out[0] = in[0];
+        out[1] = (rs->in_channels == 2) ? in[1] : in[0];
+    } else if (rs->in_channels == 2) {
+        out[0] = (int16_t)(((int32_t)in[0] + (int32_t)in[1]) / 2);  /* downmix */
+        out[1] = out[0];
+    } else {
+        out[0] = in[0];
+        out[1] = in[0];                                             /* upmix */
+    }
+    return true;
+}
+
+void SontResamplerInit(SONT_RESAMPLER *rs, uint32_t in_rate, unsigned in_channels,
+                       uint32_t out_rate, unsigned out_channels)
+{
+    if (rs == NULL) {
+        return;
+    }
+    SONT_MEMSET(rs, 0, sizeof(*rs));
+    rs->in_rate = (in_rate != 0) ? in_rate : 48000u;
+    rs->out_rate = (out_rate != 0) ? out_rate : rs->in_rate;
+    rs->in_channels = (in_channels == 1) ? 1u : 2u;
+    rs->out_channels = (out_channels == 1) ? 1u : 2u;
+    rs->step_q16 = (uint32_t)(((uint64_t)rs->in_rate << 16) / rs->out_rate);
+    if (rs->step_q16 == 0) {
+        rs->step_q16 = 1;
+    }
+}
+
+size_t SontResamplerPull(SONT_RESAMPLER *rs, SONT_PCM_RING *ring,
+                         int16_t *out, size_t out_frames)
+{
+    size_t i;
+    unsigned c;
+
+    if (rs == NULL || ring == NULL || out == NULL) {
+        return 0;
+    }
+    if (!rs->primed) {
+        if (SontPcmRingAvailable(ring) < 2u * rs->in_channels * sizeof(int16_t)) {
+            return 0;
+        }
+        (void)sont_read_frame(rs, ring, rs->prev);
+        (void)sont_read_frame(rs, ring, rs->next);
+        rs->frac_q16 = 0;
+        rs->primed = true;
+    }
+    for (i = 0; i < out_frames; i++) {
+        while (rs->frac_q16 >= 0x10000u) {
+            int16_t f[2];
+            if (!sont_read_frame(rs, ring, f)) {
+                return i;
+            }
+            rs->prev[0] = rs->next[0];
+            rs->prev[1] = rs->next[1];
+            rs->next[0] = f[0];
+            rs->next[1] = f[1];
+            rs->frac_q16 -= 0x10000u;
+        }
+        for (c = 0; c < rs->out_channels; c++) {
+            int32_t a = rs->prev[c];
+            int32_t b = rs->next[c];
+            out[i * rs->out_channels + c] =
+                (int16_t)(a + (int32_t)(((int64_t)(b - a) * (int64_t)rs->frac_q16) >> 16));
+        }
+        rs->frac_q16 += rs->step_q16;
+    }
+    return out_frames;
+}
+
+void SontPcmPullInit(SONT_PCM_PULL *pull, uint32_t in_rate, unsigned in_channels,
+                     uint32_t out_rate, unsigned out_channels,
+                     uint32_t prefill_ms, uint32_t max_ms)
+{
+    if (pull == NULL) {
+        return;
+    }
+    SONT_MEMSET(pull, 0, sizeof(*pull));
+    SontResamplerInit(&pull->rs, in_rate, in_channels, out_rate, out_channels);
+    pull->prefill_frames = (uint32_t)(((uint64_t)pull->rs.in_rate * prefill_ms) / 1000u);
+    pull->max_frames = (uint32_t)(((uint64_t)pull->rs.in_rate * max_ms) / 1000u);
+    if (pull->max_frames < pull->prefill_frames * 2u) {
+        pull->max_frames = pull->prefill_frames * 2u;
+    }
+}
+
+size_t SontPcmPull(SONT_PCM_PULL *pull, SONT_PCM_RING *ring,
+                   int16_t *out, size_t out_frames)
+{
+    size_t frame_bytes;
+    size_t avail_frames;
+    size_t got = 0;
+
+    if (pull == NULL || out == NULL || out_frames == 0) {
+        return 0;
+    }
+    frame_bytes = (size_t)pull->rs.in_channels * sizeof(int16_t);
+    avail_frames = (ring != NULL) ? SontPcmRingAvailable(ring) / frame_bytes : 0;
+
+    if (avail_frames > pull->max_frames) {
+        /* The producer ran ahead (e.g. after a stall): drop the oldest audio so
+         * latency stays bounded. */
+        size_t drop = avail_frames - pull->prefill_frames;
+        pull->dropped_frames += SontPcmRingDiscard(ring, drop * frame_bytes) / frame_bytes;
+        avail_frames -= drop;
+    }
+    if (!pull->playing && avail_frames >= pull->prefill_frames && avail_frames >= 2u) {
+        pull->playing = true;
+        pull->rs.primed = false;
+    }
+    if (pull->playing) {
+        got = SontResamplerPull(&pull->rs, ring, out, out_frames);
+        if (got < out_frames) {
+            pull->playing = false;
+            pull->underruns++;
+        }
+    }
+    if (got < out_frames) {
+        SONT_MEMSET(out + got * pull->rs.out_channels, 0,
+                    (out_frames - got) * pull->rs.out_channels * sizeof(int16_t));
+    }
+    return got;
+}
+
+/* ------------------------------------------------------------------ media clock */
+
+void SontMediaClockStart(SONT_MEDIA_CLOCK *clk, uint64_t now_us, uint32_t rate, uint32_t lead_us)
+{
+    if (clk == NULL) {
+        return;
+    }
+    SONT_MEMSET(clk, 0, sizeof(*clk));
+    clk->origin_us = now_us;
+    clk->rate = (rate != 0) ? rate : 48000u;
+    clk->lead_us = lead_us;
+}
+
+static uint64_t sont_clock_target(const SONT_MEDIA_CLOCK *clk, uint64_t now_us)
+{
+    uint64_t elapsed = (now_us > clk->origin_us) ? (now_us - clk->origin_us) : 0;
+    return ((elapsed + clk->lead_us) * (uint64_t)clk->rate) / 1000000u;
+}
+
+uint32_t SontMediaClockFramesDue(SONT_MEDIA_CLOCK *clk, uint64_t now_us,
+                                 uint32_t samples_per_frame, uint32_t max_burst)
+{
+    uint64_t target;
+    uint64_t frames;
+
+    if (clk == NULL || samples_per_frame == 0) {
+        return 0;
+    }
+    target = sont_clock_target(clk, now_us);
+    if (target <= clk->samples_done) {
+        return 0;
+    }
+    frames = (target - clk->samples_done) / samples_per_frame;
+    if (max_burst != 0 && frames > max_burst) {
+        clk->samples_done += (frames - max_burst) * samples_per_frame;
+        clk->skips++;
+        frames = max_burst;
+    }
+    return (uint32_t)frames;
+}
+
+void SontMediaClockConsume(SONT_MEDIA_CLOCK *clk, uint32_t samples)
+{
+    if (clk != NULL) {
+        clk->samples_done += samples;
+    }
+}
+
+uint32_t SontMediaClockUsUntilNext(const SONT_MEDIA_CLOCK *clk, uint64_t now_us,
+                                   uint32_t samples_per_frame)
+{
+    uint64_t target;
+    uint64_t need;
+    uint64_t due_us;
+    uint64_t elapsed;
+
+    if (clk == NULL || clk->rate == 0) {
+        return 0;
+    }
+    target = sont_clock_target(clk, now_us);
+    need = clk->samples_done + samples_per_frame;
+    if (target >= need) {
+        return 0;
+    }
+    /* Time at which `need` samples are due, measured from origin minus lead. */
+    due_us = (need * 1000000u + clk->rate - 1u) / clk->rate;
+    elapsed = (now_us > clk->origin_us) ? (now_us - clk->origin_us) : 0;
+    elapsed += clk->lead_us;
+    return (due_us > elapsed) ? (uint32_t)(due_us - elapsed) : 0;
+}
+
 static uint8_t sont_calc_max_frames(unsigned frame_bytes, uint16_t mtu)
 {
     unsigned payload_budget;

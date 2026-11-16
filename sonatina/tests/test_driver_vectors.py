@@ -22,10 +22,10 @@ class TestDriverVectors(unittest.TestCase):
         self.assertGreaterEqual(len(vectors), 36)
         self.assertGreaterEqual(len(math_cases), 5)
         self.assertEqual(vectors["sbc_cap_default"], "11150235")
-        self.assertEqual(vectors["avdtp_discover_cmd"], "0004")
+        self.assertEqual(vectors["avdtp_discover_cmd"], "0001")
         self.assertEqual(vectors["avdtp_caps_sbc_default"], "01000706000011150235")
-        self.assertEqual(vectors["d3_hs_01_discover_cmd"], "0004")
-        self.assertEqual(vectors["d3_hs_05_start_cmd"], "401c02")
+        self.assertEqual(vectors["d3_hs_01_discover_cmd"], "0001")
+        self.assertEqual(vectors["d3_hs_05_start_cmd"], "400708")
         self.assertEqual(math_cases["sbc_default_bp53"], (126, 378000))
 
 

@@ -16,7 +16,7 @@ size_t SontAvdtpEncode(uint8_t transaction, uint8_t packet_type, uint8_t message
     out[0] = (uint8_t)(((transaction & 0x0F) << 4) |
                        ((packet_type & 0x03) << 2) |
                        (message_type & 0x03));
-    out[1] = (uint8_t)((signal & 0x3F) << 2);
+    out[1] = (uint8_t)(signal & 0x3F); /* RFA in bits 7..6, signal ID in 5..0 */
     if (payload_len != 0 && payload != NULL) {
         SONT_MEMCPY(out + SONT_AVDTP_HEADER_LEN, payload, payload_len);
     }
@@ -28,13 +28,11 @@ bool SontAvdtpDecode(const uint8_t *data, size_t length, SONT_AVDTP_MESSAGE *mes
     if (data == NULL || message == NULL || length < SONT_AVDTP_HEADER_LEN) {
         return false;
     }
-    if ((data[1] & 0x03) != 0) {
-        return false; /* RFA bits must be zero */
-    }
+    /* RFA bits (7..6 of octet 1) are ignored on receive, as the spec requires. */
     message->transaction = (uint8_t)((data[0] >> 4) & 0x0F);
     message->packet_type = (uint8_t)((data[0] >> 2) & 0x03);
     message->message_type = (uint8_t)(data[0] & 0x03);
-    message->signal = (uint8_t)((data[1] >> 2) & 0x3F);
+    message->signal = (uint8_t)(data[1] & 0x3F);
     message->payload = data + SONT_AVDTP_HEADER_LEN;
     message->payload_len = length - SONT_AVDTP_HEADER_LEN;
     return true;
@@ -315,7 +313,7 @@ size_t SontAvdtpEncodeSingleSeid(uint8_t seid, uint8_t *out, size_t capacity)
     if (out == NULL || capacity < 1 || seid == 0 || seid > 62) {
         return 0;
     }
-    out[0] = (uint8_t)(seid & 0x3F);
+    out[0] = (uint8_t)((seid & 0x3F) << 2); /* SEID in bits 7..2, RFA in 1..0 */
     return 1;
 }
 
@@ -331,10 +329,12 @@ size_t SontAvdtpEncodeSepList(const SONT_SEP_INFO *seps, size_t count,
         if (seps[i].seid == 0 || seps[i].seid > 62) {
             return 0;
         }
-        out[i * 2] = (uint8_t)((seps[i].in_use ? 0x80 : 0x00) |
-                               ((seps[i].seid & 0x3F) << 1));
+        /* Octet 0: SEID (7..2), In Use (1), RFA (0).
+         * Octet 1: Media Type (7..4), TSEP (3), RFA (2..0). */
+        out[i * 2] = (uint8_t)(((seps[i].seid & 0x3F) << 2) |
+                               (seps[i].in_use ? 0x02 : 0x00));
         out[i * 2 + 1] = (uint8_t)(((seps[i].media_type & 0x0F) << 4) |
-                                   ((seps[i].tsep & 0x03) << 2));
+                                   ((seps[i].tsep & 0x01) << 3));
     }
     return count * 2;
 }
@@ -350,15 +350,15 @@ bool SontAvdtpParseSepList(const uint8_t *data, size_t length,
         return false;
     }
     for (i = 0; i < length; i += 2) {
-        uint8_t seid = (uint8_t)((data[i] >> 1) & 0x3F);
+        uint8_t seid = (uint8_t)((data[i] >> 2) & 0x3F);
         if (seid == 0) {
             return false;
         }
         if (count < max_seps) {
             seps[count].seid = seid;
-            seps[count].in_use = (data[i] & 0x80) != 0;
+            seps[count].in_use = (data[i] & 0x02) != 0;
             seps[count].media_type = (uint8_t)((data[i + 1] >> 4) & 0x0F);
-            seps[count].tsep = (uint8_t)((data[i + 1] >> 2) & 0x03);
+            seps[count].tsep = (uint8_t)((data[i + 1] >> 3) & 0x01);
             count++;
         }
     }
@@ -575,11 +575,102 @@ size_t SontAvdtpEncodeSetConfiguration(uint8_t acp_seid, uint8_t int_seid,
     if (out == NULL || capacity < 2) {
         return 0;
     }
-    out[0] = (uint8_t)(acp_seid & 0x3F);
-    out[1] = (uint8_t)(int_seid & 0x3F);
+    if (acp_seid == 0 || acp_seid > 62 || int_seid == 0 || int_seid > 62) {
+        return 0;
+    }
+    out[0] = (uint8_t)((acp_seid & 0x3F) << 2);
+    out[1] = (uint8_t)((int_seid & 0x3F) << 2);
     written = SontAvdtpEncodeCapabilities(caps, out + 2, capacity - 2);
     if (written == 0) {
         return 0;
     }
     return written + 2;
+}
+
+/* ------------------------------------------------------------------ source SEP */
+
+size_t SontAvdtpEncodeSourceSbcCapabilities(uint8_t max_bitpool,
+                                            uint8_t *out, size_t capacity)
+{
+    size_t offset;
+
+    if (out == NULL || capacity < 2 + 2 + 2 + 4) {
+        return 0;
+    }
+    if (max_bitpool < 2) {
+        max_bitpool = 2;
+    }
+    offset = SontAppendCapability(out, 0, capacity, SONT_AVDTP_CAT_MEDIA_TRANSPORT, NULL, 0);
+    out[offset++] = SONT_AVDTP_CAT_MEDIA_CODEC;
+    out[offset++] = 6;
+    out[offset++] = 0x00;                 /* audio */
+    out[offset++] = SONT_AVDTP_CODEC_SBC;
+    out[offset++] = 0x20 | 0x10 | 0x0F;   /* 44.1/48 kHz, all channel modes */
+    out[offset++] = 0xF0 | 0x0C | 0x03;   /* 4..16 blocks, 4/8 subbands, SNR+loudness */
+    out[offset++] = 2;
+    out[offset++] = max_bitpool;
+    return offset;
+}
+
+size_t SontAvdtpEncodeSourceLdacCapabilities(uint8_t ldac_sampling_mask,
+                                             uint8_t *out, size_t capacity)
+{
+    size_t offset;
+
+    ldac_sampling_mask &= 0x3C; /* 44.1/48/88.2/96 kHz */
+    if (out == NULL || capacity < 2 + 2 + 2 + 8 || ldac_sampling_mask == 0) {
+        return 0;
+    }
+    offset = SontAppendCapability(out, 0, capacity, SONT_AVDTP_CAT_MEDIA_TRANSPORT, NULL, 0);
+    out[offset++] = SONT_AVDTP_CAT_MEDIA_CODEC;
+    out[offset++] = 10;
+    out[offset++] = 0x00;                 /* audio */
+    out[offset++] = SONT_AVDTP_CODEC_RAW; /* vendor specific */
+    out[offset++] = 0x2Du;
+    out[offset++] = 0x01u;
+    out[offset++] = 0x00u;
+    out[offset++] = 0x00u;
+    out[offset++] = 0xAAu;
+    out[offset++] = 0x00u;
+    out[offset++] = ldac_sampling_mask;
+    out[offset++] = 0x07u;                /* mono, dual, stereo */
+    return offset;
+}
+
+static bool SontIsSingleBit(uint8_t v)
+{
+    return v != 0 && (v & (uint8_t)(v - 1u)) == 0;
+}
+
+bool SontAvdtpSourceAcceptsConfig(const SONT_CAPABILITIES *cfg, uint8_t max_bitpool,
+                                  uint8_t ldac_sampling_mask)
+{
+    if (cfg == NULL) {
+        return false;
+    }
+    if (cfg->codec == SONT_AVDTP_CODEC_SBC) {
+        const uint8_t *o = cfg->raw_sbc;
+        if (!cfg->has_raw_sbc) {
+            return false;
+        }
+        /* Exactly one choice per field, inside what the source advertises. */
+        if (!SontIsSingleBit((uint8_t)(o[0] & 0xF0)) || (o[0] & 0xC0) != 0 ||
+            !SontIsSingleBit((uint8_t)(o[0] & 0x0F)) ||
+            !SontIsSingleBit((uint8_t)(o[1] & 0xF0)) ||
+            !SontIsSingleBit((uint8_t)(o[1] & 0x0C)) ||
+            !SontIsSingleBit((uint8_t)(o[1] & 0x03))) {
+            return false;
+        }
+        return cfg->sbc.min_bitpool >= 2 && cfg->sbc.max_bitpool <= max_bitpool &&
+               cfg->sbc.min_bitpool <= cfg->sbc.max_bitpool;
+    }
+    if (cfg->codec == SONT_AVDTP_CODEC_LDAC) {
+        const uint8_t *o = cfg->raw_ldac;
+        if (!cfg->has_raw_ldac) {
+            return false;
+        }
+        return SontIsSingleBit(o[6]) && (o[6] & ldac_sampling_mask & 0x3C) != 0 &&
+               SontIsSingleBit((uint8_t)(o[7] & 0x07));
+    }
+    return false;
 }

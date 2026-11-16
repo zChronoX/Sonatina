@@ -66,7 +66,7 @@
   (`SONT_PCM_RING` + `SONT_MEDIA_PACKETIZER`), tap PCM ciclico in
   `CMiniportWaveRTStreamSonatina` (`SONT_PCM_SOURCE` in `miniport_wavert.cpp`),
   loop media `SontRunSbcMediaLoop` (`src/driver.c`) su `MediaChannel`
-  (`0x0017`), aggiornamento `SonatinaAudio.vcxproj` + fix compatibilita'
+  (PSM `0x0019`, corretto il 2026-11-16), aggiornamento `SonatinaAudio.vcxproj` + fix compatibilita'
   MSVC/WDK (`C4201`, `C4242`, `SBC_CLZ`, inizializzatori C89/C11) e test host
   con encoding/decoding SBC reale a 1 kHz + packetizer RTP (`36 vectors + 5 math cases, 0 failures`).
 - D5 + S1-S4 parziali (WDK CI run #16 `d45d8d7` verde su `python-and-host-tests` + `driver-compile-x64` Debug/Release; servizio nativo `SonatinaSvc.exe` compilato con `gcc -Wall -Wextra -Werror`, test host C estesi verdi, e ciclo completo `RegNotifyChangeKeyValue` + debounce + cooldown + post-cooldown verificato dal vivo su `HKCU\Software\Sonatina-SvcTest`; verifica VM in attesa di A3):
@@ -78,15 +78,59 @@
 - Architettura confermata: function driver KS/PortCls su `BTHENUM\{0000110b}`.
 - Trasporto kernel confermato dalla documentazione Microsoft: BTHDDI
   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` + `IOCTL_INTERNAL_BTH_SUBMIT_BRB`
-  (`BRB_L2CA_OPEN_CHANNEL`, PSM 0x0019/0x0017, `BRB_L2CA_ACL_TRANSFER`).
+  (`BRB_L2CA_OPEN_CHANNEL`, PSM 0x0019 per segnalazione e media, `BRB_L2CA_ACL_TRANSFER`).
 - Nota VM: nessun file `.sys` e' stato ancora caricato; prima di caricare driver
   kernel servono VM Windows + snapshot + `testsigning` + Driver Verifier (A3).
 - Licenze: SBC e LDAC da AOSP (Apache-2.0) sono implementabili; AAC e aptX
   richiedono accordi commerciali.
 
+## Revisione 2026-11-16 (sera) - compatibilita' con cuffie reali
+Audit del percorso Bluetooth prima del primo test su hardware; corretti difetti che
+avrebbero impedito l'audio con qualsiasi cuffia reale (i test di parita' C/Python
+non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo):
+- **Formato AVDTP sul filo** (C e Python): signal ID nei bit 5..0 dell'ottetto 1
+  (era spostato di 2 bit: Discover usciva `00 04` invece di `00 01`); SEID nei bit
+  7..2, In-Use bit 1, TSEP bit 3 nelle liste SEP e nei comandi. Aggiunti test con
+  byte di riferimento della specifica (`test_wire_format_matches_specification`,
+  host test 6c) indipendenti dall'implementazione.
+- **Canale media su PSM `0x0019`** (era `0x0017`, cioe' AVCTP/AVRCP).
+- **Ordine Open -> canale media -> Start** (`SONT_AVDTP_STEP_OPEN_MEDIA` +
+  `SontAvdtpSessionMediaReady`).
+- **Ruolo acceptor**: risposte a tutti i comandi della cuffia (Discover,
+  Get(All)Capabilities, Set/GetConfiguration, Reconfigure, Open, Start, Suspend,
+  Close, Abort, DelayReport, General Reject), gestione collisioni, fallback
+  LDAC -> SBC; codici errore AVDTP corretti (0x17/0x19/0x29/0x31).
+- **Trasporto**: server L2CAP per l'indirizzo della cuffia (riconnessione avviata
+  dalla cuffia), `OPEN_CHANNEL_RESPONSE` a PASSIVE, MTU negoziato, receive
+  asincrono sempre attivo sulla segnalazione, disconnessione via evento.
+- **Worker** riscritto come ciclo a eventi con supervisore di connessione
+  (retry 2/5/10 s, poi solo con audio reale), media pacing su clock QPC,
+  silenzio digitale quando Windows non suona (niente Suspend/Start: e' il
+  sintomo "audio che sparisce finche' non riaccendo le cuffie"), jitter buffer
+  30 ms, ricampionamento/up-downmix, ripresa dopo Suspend della cuffia solo con
+  audio reale (multipoint).
+- Verifiche: host test C `39 vectors + 5 math cases, 0 failures` (+ nuovi test
+  acceptor/collisione/fallback/pull/clock); loopback T2 SBC 225 pkt, LDAC 562
+  pkt, congestione bp 53->43, tutti `lost=0 errors=0`; 82 test Python OK
+  (Linux, registro simulato); controllo di sintassi kernel con clang sulle
+  intestazioni WDK 10.0.16299 (`-Wall -Wextra -Wconversion`) pulito per tutti i
+  sorgenti `.c` e `.cpp`. Compilazione MSVC/WDK reale: da rifare in CI.
+
+## Preparazione test in VM (2026-11-16)
+- Interfaccia di controllo registrata con reference string `SonatinaCtl` e gestione
+  di `IRP_MJ_CREATE/CLEANUP/CLOSE` per i propri handle (prima `CreateFile` sarebbe
+  finito a KS/PortCls); IOCTL accettati solo sui propri handle.
+- `install-driver.ps1`: `-Force` (UpdateDriverForPlugAndPlayDevices, come
+  `devcon update`, per scavalcare il driver inbox) e `-SkipService`.
+- Nuovo `scripts/driver-status.ps1` (stato + trace via IOCTL, senza Python);
+  offset delle strutture verificati con `_Static_assert` sulle intestazioni WDK.
+- CI: artefatto `Sonatina-VM-<cfg>-x64` con driver firmato con certificato di
+  test usa e getta (`SonatinaTest.cer`), `SonatinaSvc.exe` e script.
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
-- L2CAP reale non implementato (richiede che lo stack Bluetooth audio di Windows non occupi la connessione).
+- Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.
+- Ricompilare in WDK CI dopo la revisione del 2026-11-16.
 - `install-autostart.ps1` non e' stato eseguito (registra un task di sistema); va provato manualmente.
 
 ## Log

@@ -82,9 +82,9 @@ static void RunUnitAssertions(void)
         assert(msg.payload_len == 1);
         assert(msg.payload[0] == 1);
 
-        /* Reject non-zero RFA bits and short buffer */
-        buf[1] |= 0x01;
-        assert(!SontAvdtpDecode(buf, len, &msg));
+        /* RFA bits are ignored on receive; a short buffer is rejected */
+        buf[1] |= 0xC0;
+        assert(SontAvdtpDecode(buf, len, &msg) && msg.signal == SONT_AVDTP_SIG_GET_CAPABILITIES);
         assert(!SontAvdtpDecode(buf, 1, &msg));
     }
 
@@ -286,7 +286,7 @@ static void RunUnitAssertions(void)
 
         assert(SontAvdtpEncodeSingleSeid(0, buf, sizeof(buf)) == 0);
         assert(SontAvdtpEncodeSingleSeid(63, buf, sizeof(buf)) == 0);
-        assert(SontAvdtpEncodeSingleSeid(5, buf, sizeof(buf)) == 1 && buf[0] == 5);
+        assert(SontAvdtpEncodeSingleSeid(5, buf, sizeof(buf)) == 1 && buf[0] == 0x14);
 
         len = SontAvdtpEncodeSepList(seps_in, 3, buf, sizeof(buf));
         assert(len == 6);
@@ -336,7 +336,7 @@ static void RunUnitAssertions(void)
             assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
             assert(sess.state == SONT_AVDTP_STATE_WAIT_GET_CAPS);
             assert(sess.pending_signal == SONT_AVDTP_SIG_GET_CAPABILITIES);
-            assert(tx[2] == 3);
+            assert(tx[2] == (3 << 2));
         }
 
         /* Wrong transaction response must be ignored without corrupting state */
@@ -357,7 +357,7 @@ static void RunUnitAssertions(void)
                                      SONT_AVDTP_SIG_GET_CAPABILITIES, &err, 1, rx, sizeof(rx));
             assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
             assert(sess.state == SONT_AVDTP_STATE_WAIT_GET_CAPS);
-            assert(tx[2] == 4);
+            assert(tx[2] == (4 << 2));
         }
 
         /* SEP 4 accepts with bitmask SBC capabilities -> SetConfiguration */
@@ -381,7 +381,10 @@ static void RunUnitAssertions(void)
 
         rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
                                  SONT_AVDTP_SIG_OPEN, NULL, 0, rx, sizeof(rx));
-        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        /* AVDTP order: Open accepted -> transport channel -> Start (never Start first) */
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_OPEN_MEDIA);
+        assert(tx_len == 0 && sess.state == SONT_AVDTP_STATE_OPEN_WAIT_MEDIA);
+        assert(SontAvdtpSessionMediaReady(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
         assert(sess.state == SONT_AVDTP_STATE_WAIT_START);
 
         rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
@@ -418,7 +421,301 @@ static void RunUnitAssertions(void)
                                  0, NULL, 0, rx, sizeof(rx));
         assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_ERROR);
         assert(sess.state == SONT_AVDTP_STATE_FAILED);
-        assert(sess.last_error == SONT_AVDTP_ERR_BAD_HEADER_FORMAT);
+        assert(sess.last_error == SONT_AVDTP_ERR_NOT_SUPPORTED_COMMAND);
+    }
+
+    /* 6g. PCM pull: jitter buffer, silence on underrun, resampling, latency bound; media clock. */
+    {
+        static uint8_t backing[32768];
+        static int16_t in[4800 * 2];
+        int16_t out[512 * 2];
+        SONT_PCM_RING ring;
+        SONT_PCM_PULL pull;
+        SONT_MEDIA_CLOCK clk;
+        size_t i, got;
+
+        SontPcmRingInit(&ring, backing, sizeof(backing));
+        /* 48 kHz stereo engine -> 44.1 kHz stereo codec, 20 ms prefill, 100 ms max */
+        SontPcmPullInit(&pull, 48000, 2, 44100, 2, 20, 100);
+        assert(pull.prefill_frames == 960);
+
+        /* Nothing buffered: full frame of silence, no real audio */
+        memset(out, 0x55, sizeof(out));
+        assert(SontPcmPull(&pull, &ring, out, 128) == 0);
+        for (i = 0; i < 256; i++) assert(out[i] == 0);
+
+        /* 10 ms buffered (< prefill): still silence and nothing consumed */
+        for (i = 0; i < 480; i++) { in[2 * i] = 1000; in[2 * i + 1] = -1000; }
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 480 * 4);
+        assert(SontPcmPull(&pull, &ring, out, 128) == 0);
+        assert(SontPcmRingAvailable(&ring) == 480 * 4);
+
+        /* 40 ms buffered: playback starts, constant input stays constant after resampling */
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 480 * 4);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 480 * 4);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 480 * 4);
+        got = SontPcmPull(&pull, &ring, out, 441);
+        assert(got == 441 && pull.playing);
+        for (i = 0; i < 441; i++) assert(out[2 * i] == 1000 && out[2 * i + 1] == -1000);
+        /* 441 output frames at 44.1k consume ~480 input frames at 48k */
+        assert(SontPcmRingAvailable(&ring) / 4 >= 1920 - 482 && SontPcmRingAvailable(&ring) / 4 <= 1920 - 479);
+
+        /* Drain past the end: partial audio then silence, one underrun, gate closes */
+        got = SontPcmPull(&pull, &ring, out, 512);
+        got += SontPcmPull(&pull, &ring, out, 512);
+        got += SontPcmPull(&pull, &ring, out, 512);
+        assert(pull.underruns == 1 && !pull.playing);
+        assert(out[2 * 511] == 0);
+
+        /* Producer far ahead (> 100 ms): backlog trimmed back to the prefill level */
+        for (i = 0; i < 4800; i++) { in[2 * i] = (int16_t)i; in[2 * i + 1] = (int16_t)i; }
+        SontPcmRingWrite(&ring, (const uint8_t *)in, sizeof(in));
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 1000 * 4);  /* 5800 frames > 4800 max */
+        (void)SontPcmPull(&pull, &ring, out, 1);
+        assert(pull.dropped_frames > 0);
+        assert(SontPcmRingAvailable(&ring) / 4 <= 960);
+
+        /* Stereo -> mono downmix at equal rate */
+        SontPcmRingReset(&ring);
+        SontPcmPullInit(&pull, 48000, 2, 48000, 1, 0, 100);
+        for (i = 0; i < 64; i++) { in[2 * i] = 300; in[2 * i + 1] = 100; }
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 64 * 4);
+        assert(SontPcmPull(&pull, &ring, out, 32) == 32);
+        for (i = 0; i < 32; i++) assert(out[i] == 200);
+
+        /* Signal detector: silence vs real audio among the newest bytes */
+        SontPcmRingReset(&ring);
+        memset(in, 0, 256 * 4);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 256 * 4);
+        assert(!SontPcmRingHasSignal(&ring, 4096, 8));
+        in[0] = 4; in[1] = -4;                      /* dither-level noise */
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 4);
+        assert(!SontPcmRingHasSignal(&ring, 4096, 8));
+        in[0] = -900;
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 4);
+        assert(SontPcmRingHasSignal(&ring, 4096, 8));
+        memset(in, 0, 2048 * 4);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 2048 * 4);  /* loud sample now older than 4 KB */
+        assert(!SontPcmRingHasSignal(&ring, 4096, 8));
+
+        /* Media clock: 20 ms lead, 128-sample frames at 48 kHz (2.667 ms) */
+        SontMediaClockStart(&clk, 1000000u, 48000, 20000);
+        assert(SontMediaClockFramesDue(&clk, 1000000u, 128, 32) == 7);   /* 960 samples ahead */
+        SontMediaClockConsume(&clk, 7 * 128);
+        assert(SontMediaClockFramesDue(&clk, 1000000u, 128, 32) == 0);
+        assert(SontMediaClockUsUntilNext(&clk, 1000000u, 128) > 0);
+        assert(SontMediaClockFramesDue(&clk, 1010000u, 128, 32) == 4);  /* +10 ms: 1440 due, 896 sent */
+        SontMediaClockConsume(&clk, 4 * 128);
+        /* Starved for 1 s: skip instead of bursting 375 frames */
+        assert(SontMediaClockFramesDue(&clk, 2010000u, 128, 16) == 16);
+        assert(clk.skips == 1);
+    }
+
+    /* 6c. Wire format golden bytes straight from the AVDTP specification. */
+    {
+        SONT_SEP_INFO snk1 = {1, false, SONT_AVDTP_MEDIA_AUDIO, SONT_AVDTP_TSEP_SNK};
+        SONT_SEP_INFO src2_busy = {2, true, SONT_AVDTP_MEDIA_AUDIO, SONT_AVDTP_TSEP_SRC};
+        SONT_SEP_INFO parsed[2];
+        uint8_t b[16], seid1[1];
+        size_t n, count = 0;
+        SONT_AVDTP_MESSAGE m;
+
+        n = SontAvdtpEncode(0, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND, SONT_AVDTP_SIG_DISCOVER,
+                            NULL, 0, b, sizeof(b));
+        assert(n == 2 && b[0] == 0x00 && b[1] == 0x01);
+        assert(SontAvdtpEncodeSingleSeid(1, seid1, 1) == 1 && seid1[0] == 0x04);
+        n = SontAvdtpEncode(1, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                            SONT_AVDTP_SIG_GET_CAPABILITIES, seid1, 1, b, sizeof(b));
+        assert(n == 3 && b[0] == 0x10 && b[1] == 0x02 && b[2] == 0x04);
+        assert(SontAvdtpEncodeSepList(&snk1, 1, b, sizeof(b)) == 2 && b[0] == 0x04 && b[1] == 0x08);
+        assert(SontAvdtpEncodeSepList(&src2_busy, 1, b, sizeof(b)) == 2 && b[0] == 0x0A && b[1] == 0x00);
+        b[0] = 0x04; b[1] = 0x08; b[2] = 0x0A; b[3] = 0x00;
+        assert(SontAvdtpParseSepList(b, 4, parsed, 2, &count) && count == 2);
+        assert(parsed[0].seid == 1 && !parsed[0].in_use && parsed[0].tsep == SONT_AVDTP_TSEP_SNK);
+        assert(parsed[1].seid == 2 && parsed[1].in_use && parsed[1].tsep == SONT_AVDTP_TSEP_SRC);
+        b[0] = 0x02; b[1] = 0xC1;  /* accept Discover, RFA bits set: must be ignored */
+        assert(SontAvdtpDecode(b, 2, &m) && m.message_type == SONT_AVDTP_MT_ACCEPT &&
+               m.signal == SONT_AVDTP_SIG_DISCOVER);
+    }
+
+    /* 6d. Acceptor role: the headset drives the stream itself. */
+    {
+        SONT_AVDTP_SESSION sess;
+        SONT_SBC_PARAMS pref = {48000, 3, 16, 8, 1, 2, 53};
+        uint8_t tx[SONT_AVDTP_MAX_PDU], rx[SONT_AVDTP_MAX_PDU];
+        size_t tx_len = 0, rx_len;
+        /* SetConfiguration(ACP SEID 1, INT SEID 3, SBC 44.1k joint 16/8 loudness bp 2..35) */
+        const uint8_t setcfg[] = {0x04, 0x0C, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x21, 0x15, 2, 35};
+        const uint8_t bad_cfg[] = {0x04, 0x0C, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x31, 0x15, 2, 35};
+        const uint8_t seid1[] = {0x04};
+        const uint8_t delay[] = {0x04, 0x07, 0xD0};
+
+        SontAvdtpSessionInit(&sess, 1, SONT_AVDTP_CODEC_SBC, &pref);
+        SontAvdtpSessionSetLocalCaps(&sess, 53, 0);
+
+        rx_len = SontAvdtpEncode(3, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_DISCOVER, NULL, 0, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 4 && tx[0] == 0x32 && tx[1] == 0x01 && tx[2] == 0x04 && tx[3] == 0x00);
+
+        rx_len = SontAvdtpEncode(4, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_GET_ALL_CAPABILITIES, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 12 && tx[0] == 0x42 && tx[1] == 0x0C && tx[2] == 0x01 && tx[4] == 0x07 &&
+               tx[7] == SONT_AVDTP_CODEC_SBC && tx[8] == 0x3F && tx[9] == 0xFF && tx[11] == 53);
+
+        /* Unknown SEID -> Reject BAD_ACP_SEID */
+        {
+            const uint8_t seid9[] = {0x24};
+            rx_len = SontAvdtpEncode(5, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                     SONT_AVDTP_SIG_GET_CAPABILITIES, seid9, 1, rx, sizeof(rx));
+            assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+            assert(tx_len == 3 && tx[0] == 0x53 && tx[2] == SONT_AVDTP_ERR_BAD_ACP_SEID);
+        }
+
+        /* A configuration we cannot encode (two sampling bits) -> codec-category reject */
+        rx_len = SontAvdtpEncode(6, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_SET_CONFIGURATION, bad_cfg, sizeof(bad_cfg), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 4 && tx[0] == 0x63 && tx[2] == SONT_AVDTP_CAT_MEDIA_CODEC &&
+               tx[3] == SONT_AVDTP_ERR_UNSUPPORTED_CONFIGURATION);
+        assert(sess.state == SONT_AVDTP_STATE_IDLE);
+
+        rx_len = SontAvdtpEncode(7, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_SET_CONFIGURATION, setcfg, sizeof(setcfg), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 2 && tx[0] == 0x72 && tx[1] == SONT_AVDTP_SIG_SET_CONFIGURATION);
+        assert(sess.state == SONT_AVDTP_STATE_CONFIGURED && sess.remote_initiated);
+        assert(sess.selected_acp_seid == 3 && sess.configured_local_seid == 1);
+        assert(sess.negotiated.sbc.sampling == 44100 && sess.negotiated.sbc.max_bitpool == 35);
+        assert(SontAvdtpSessionTakeEvents(&sess) == SONT_AVDTP_EV_CONFIGURED);
+
+        /* Start before Open / before the transport channel -> BAD_STATE, [seid][err] */
+        rx_len = SontAvdtpEncode(8, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_START, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 4 && tx[0] == 0x83 && tx[2] == 0x04 && tx[3] == SONT_AVDTP_ERR_BAD_STATE);
+
+        rx_len = SontAvdtpEncode(9, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_OPEN, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx[0] == 0x92 && sess.state == SONT_AVDTP_STATE_OPEN_WAIT_MEDIA);
+        assert(SontAvdtpSessionTakeEvents(&sess) == SONT_AVDTP_EV_REMOTE_OPENED);
+
+        /* Remote's transport channel accepted -> we start the stream */
+        assert(SontAvdtpSessionMediaReady(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        assert(tx_len == 3 && tx[1] == SONT_AVDTP_SIG_START && tx[2] == 0x0C);
+        /* ...and the headset sends its own Start at the same time: accept it */
+        rx_len = SontAvdtpEncode(10, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_START, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx[0] == 0xA2 && sess.state == SONT_AVDTP_STATE_STREAMING);
+        /* our Start is then rejected with BAD_STATE: harmless */
+        {
+            uint8_t rej[2] = {0x0C, SONT_AVDTP_ERR_BAD_STATE};
+            rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_REJECT,
+                                     SONT_AVDTP_SIG_START, rej, 2, rx, sizeof(rx));
+            assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_IGNORE);
+            assert(sess.state == SONT_AVDTP_STATE_STREAMING && !SontAvdtpSessionIsWaiting(&sess));
+        }
+
+        /* Commands while streaming are answered */
+        rx_len = SontAvdtpEncode(11, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_GET_CONFIGURATION, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx[0] == 0xB2 && tx_len == 12 && tx[8] == 0x21);
+        rx_len = SontAvdtpEncode(12, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_DELAY_REPORT, delay, sizeof(delay), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(sess.remote_delay_100us == 2000);
+        rx_len = SontAvdtpEncode(13, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 0x3E, NULL, 0, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx_len == 2 && tx[0] == 0xD1 && tx[1] == 0x3E);  /* General Reject */
+
+        /* Remote Suspend (e.g. the phone took over on multipoint) then our Resume */
+        rx_len = SontAvdtpEncode(14, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_SUSPEND, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(sess.state == SONT_AVDTP_STATE_OPEN_PAUSED);
+        assert((SontAvdtpSessionTakeEvents(&sess) & SONT_AVDTP_EV_SUSPENDED) != 0);
+        assert(SontAvdtpSessionResume(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        assert(tx[1] == SONT_AVDTP_SIG_START && tx[2] == 0x0C);
+        rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
+                                 SONT_AVDTP_SIG_START, NULL, 0, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_DONE);
+        assert(sess.state == SONT_AVDTP_STATE_STREAMING);
+
+        /* Remote Close releases the stream */
+        rx_len = SontAvdtpEncode(15, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_CLOSE, seid1, 1, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(sess.state == SONT_AVDTP_STATE_CLOSED && sess.configured_local_seid == 0);
+        assert((SontAvdtpSessionTakeEvents(&sess) & SONT_AVDTP_EV_CLOSED) != 0);
+    }
+
+    /* 6e. Collision: headset configures us while our own Discover is in flight. */
+    {
+        SONT_AVDTP_SESSION sess;
+        SONT_SBC_PARAMS pref = {48000, 3, 16, 8, 1, 2, 53};
+        uint8_t tx[SONT_AVDTP_MAX_PDU], rx[SONT_AVDTP_MAX_PDU], raw[16];
+        size_t tx_len = 0, rx_len, raw_len;
+        uint8_t our_tx;
+        const uint8_t setcfg[] = {0x04, 0x08, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x11, 0x15, 2, 53};
+        SONT_SEP_INFO snk = {1, false, SONT_AVDTP_MEDIA_AUDIO, SONT_AVDTP_TSEP_SNK};
+
+        SontAvdtpSessionInit(&sess, 1, SONT_AVDTP_CODEC_SBC, &pref);
+        assert(SontAvdtpSessionStartHandshake(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        our_tx = sess.pending_tx;
+        rx_len = SontAvdtpEncode(0, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_SET_CONFIGURATION, setcfg, sizeof(setcfg), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx[0] == 0x02 && sess.state == SONT_AVDTP_STATE_CONFIGURED);
+        assert(!SontAvdtpSessionIsWaiting(&sess));
+        /* The late Discover answer must not restart our handshake */
+        raw_len = SontAvdtpEncodeSepList(&snk, 1, raw, sizeof(raw));
+        rx_len = SontAvdtpEncode(our_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
+                                 SONT_AVDTP_SIG_DISCOVER, raw, raw_len, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_IGNORE);
+        assert(sess.state == SONT_AVDTP_STATE_CONFIGURED);
+        /* A second SetConfiguration is refused: SEP in use */
+        rx_len = SontAvdtpEncode(1, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
+                                 SONT_AVDTP_SIG_SET_CONFIGURATION, setcfg, sizeof(setcfg), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_REPLY);
+        assert(tx[0] == 0x13 && tx[3] == SONT_AVDTP_ERR_SEP_IN_USE);
+    }
+
+    /* 6f. LDAC preferred but only SBC offered (LDAC off in the headset app): fall back to SBC. */
+    {
+        SONT_AVDTP_SESSION sess;
+        SONT_SBC_PARAMS pref = {48000, 3, 16, 8, 1, 2, 53};
+        SONT_LDAC_PARAMS ldac_pref = {96000, SONT_LDAC_CHMODE_STEREO, SONT_LDAC_EQMID_HQ};
+        uint8_t tx[SONT_AVDTP_MAX_PDU], rx[SONT_AVDTP_MAX_PDU], raw[16];
+        size_t tx_len = 0, rx_len, raw_len;
+        SONT_SEP_INFO snk[2] = {
+            {1, false, SONT_AVDTP_MEDIA_AUDIO, SONT_AVDTP_TSEP_SNK},
+            {2, false, SONT_AVDTP_MEDIA_AUDIO, SONT_AVDTP_TSEP_SNK}
+        };
+        const uint8_t sbc_caps[] = {0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F, 0xFF, 2, 53};
+        const uint8_t aac_caps[] = {0x01, 0x00, 0x07, 0x08, 0x00, 0x02, 0x80, 0x01, 0x8C, 0x84, 0xE2, 0x00};
+
+        SontAvdtpSessionInit(&sess, 1, SONT_AVDTP_CODEC_LDAC, &pref);
+        SontAvdtpSessionSetLdacPreference(&sess, &ldac_pref);
+        assert(SontAvdtpSessionStartHandshake(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        raw_len = SontAvdtpEncodeSepList(snk, 2, raw, sizeof(raw));
+        rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
+                                 SONT_AVDTP_SIG_DISCOVER, raw, raw_len, rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
+                                 SONT_AVDTP_SIG_GET_CAPABILITIES, sbc_caps, sizeof(sbc_caps), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        assert(sess.state == SONT_AVDTP_STATE_WAIT_GET_CAPS && tx[2] == 0x08); /* keeps probing SEP 2 */
+        rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
+                                 SONT_AVDTP_SIG_GET_CAPABILITIES, aac_caps, sizeof(aac_caps), rx, sizeof(rx));
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        assert(sess.state == SONT_AVDTP_STATE_WAIT_SET_CONFIG);
+        assert(sess.selected_acp_seid == 1 && sess.negotiated.codec == SONT_AVDTP_CODEC_SBC);
+        assert(tx[2] == 0x04 && tx[3] == 0x04); /* ACP SEID 1, INT SEID 1 (SBC source SEP) */
     }
 
     /* 7. D5 profile validation, BD_ADDR formatting/parsing, and S2 ApplyPolicy */
@@ -604,9 +901,9 @@ int main(void)
     PrintVector("avdtp_discover_cmd_tx15", buf, len);
 
     {
-        /* Sep(seid=1, in_use=0, audio=0, snk=1) -> 0x02, 0x04
-         * Sep(seid=2, in_use=0, audio=0, src=0) -> 0x04, 0x00 */
-        const uint8_t seps[] = {0x02, 0x04, 0x04, 0x00};
+        /* Sep(seid=1, in_use=0, audio=0, snk=1) -> 0x04, 0x08
+         * Sep(seid=2, in_use=0, audio=0, src=0) -> 0x08, 0x00 */
+        const uint8_t seps[] = {0x04, 0x08, 0x08, 0x00};
         len = SontAvdtpEncode(0, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
                               SONT_AVDTP_SIG_DISCOVER, seps, sizeof(seps),
                               buf, sizeof(buf));
@@ -615,8 +912,8 @@ int main(void)
 
     /* 8-9: AVDTP GetCapabilities commands */
     {
-        uint8_t seid1 = 1;
-        uint8_t seid7 = 7;
+        uint8_t seid1 = (uint8_t)(1u << 2); /* SEID field: bits 7..2 */
+        uint8_t seid7 = (uint8_t)(7u << 2);
         len = SontAvdtpEncode(1, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
                               SONT_AVDTP_SIG_GET_CAPABILITIES, &seid1, 1,
                               buf, sizeof(buf));
@@ -677,7 +974,7 @@ int main(void)
 
     /* 17-22: Open, Start, Suspend, Close, Abort, Reject */
     {
-        uint8_t seid1 = 1;
+        uint8_t seid1 = (uint8_t)(1u << 2); /* SEID field: bits 7..2 */
         uint8_t err_bad_acp_seid = 0x12;
 
         len = SontAvdtpEncode(4, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_COMMAND,
@@ -799,7 +1096,8 @@ int main(void)
 
         rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,
                                  SONT_AVDTP_SIG_OPEN, NULL, 0, rx, sizeof(rx));
-        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
+        assert(SontAvdtpSessionOnRx(&sess, rx, rx_len, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_OPEN_MEDIA);
+        assert(SontAvdtpSessionMediaReady(&sess, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND);
         PrintVector("d3_hs_05_start_cmd", tx, tx_len);
 
         rx_len = SontAvdtpEncode(sess.pending_tx, SONT_AVDTP_PT_SINGLE, SONT_AVDTP_MT_ACCEPT,

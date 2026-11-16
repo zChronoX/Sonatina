@@ -24,6 +24,7 @@ static NTSTATUS SontQueryBthInterface(PDEVICE_OBJECT parent,
     if (irp == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    irp->IoStatus.Status = STATUS_NOT_SUPPORTED;  /* required for PnP IRPs */
     stack = IoGetNextIrpStackLocation(irp);
     stack->MajorFunction = IRP_MJ_PNP;
     stack->MinorFunction = IRP_MN_QUERY_INTERFACE;
@@ -134,29 +135,45 @@ static NTSTATUS SontSubmitBrb(PDEVICE_OBJECT parent, PVOID brb)
     return SontSubmitBrbTimed(parent, brb, NULL, 0);
 }
 
-static void SontL2capCallback(PVOID context, INDICATION_CODE indication,
-                              PINDICATION_PARAMETERS parameters)
+/* ------------------------------------------------------------------ indications
+ * Both callbacks may run at DISPATCH_LEVEL: they only record and signal. */
+
+static void SontChannelCallback(PVOID context, INDICATION_CODE indication,
+                                PINDICATION_PARAMETERS parameters)
 {
     PSONT_TRANSPORT transport = (PSONT_TRANSPORT)context;
+    LONG bit;
 
-    UNREFERENCED_PARAMETER(parameters);
-
-    switch (indication) {
-    case IndicationRemoteConnect:
-        /* Incoming request: accepted only after SetConfiguration in D3. */
-        DbgPrint("Sonatina: remote L2CAP connect indication\n");
-        break;
-    case IndicationRemoteDisconnect:
-        DbgPrint("Sonatina: remote L2CAP disconnect indication\n");
-        if (transport != NULL) {
-            transport->SignalingChannel = NULL;
-            transport->MediaChannel = NULL;
-        }
-        break;
-    default:
-        break;
+    if (transport == NULL || indication != IndicationRemoteDisconnect || parameters == NULL) {
+        return;
     }
+    bit = (parameters->ConnectionHandle == transport->MediaChannel) ? SONT_LOST_MEDIA
+                                                                    : SONT_LOST_SIGNALING;
+    InterlockedOr(&transport->LostMask, bit);
+    KeSetEvent(&transport->LinkEvent, IO_NO_INCREMENT, FALSE);
 }
+
+static void SontServerCallback(PVOID context, INDICATION_CODE indication,
+                               PINDICATION_PARAMETERS parameters)
+{
+    PSONT_TRANSPORT transport = (PSONT_TRANSPORT)context;
+    KIRQL old_irql;
+
+    if (transport == NULL || parameters == NULL || indication != IndicationRemoteConnect) {
+        return;
+    }
+    KeAcquireSpinLock(&transport->IndicationLock, &old_irql);
+    if (transport->IncomingCount < SONT_TRANSPORT_MAX_INCOMING) {
+        PSONT_INCOMING slot = &transport->Incoming[transport->IncomingCount++];
+        slot->Handle = parameters->ConnectionHandle;
+        slot->Address = parameters->BtAddress;
+        slot->Psm = parameters->Parameters.Connect.Request.PSM;
+    }
+    KeSetEvent(&transport->IncomingEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&transport->IndicationLock, old_irql);
+}
+
+/* ------------------------------------------------------------------ setup */
 
 NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT parent)
 {
@@ -167,30 +184,206 @@ NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT paren
     }
     RtlZeroMemory(transport, sizeof(*transport));
     transport->Parent = parent;
+    KeInitializeSpinLock(&transport->IndicationLock);
+    KeInitializeEvent(&transport->IncomingEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&transport->LinkEvent, NotificationEvent, FALSE);
 
     status = SontQueryBthInterface(parent, &transport->Bth);
     if (!NT_SUCCESS(status)) {
         DbgPrint("Sonatina: QUERY_INTERFACE(BTHDDI) failed 0x%08X\n", status);
         return status;
     }
-    if (transport->Bth.BthAllocateBrb == NULL ||
-        transport->Bth.BthFreeBrb == NULL) {
+    if (transport->Bth.BthAllocateBrb == NULL || transport->Bth.BthFreeBrb == NULL ||
+        transport->Bth.BthReuseBrb == NULL) {
         return STATUS_UNSUCCESSFUL;
     }
     transport->HasBth = TRUE;
 
     status = SontQueryRemoteAddress(parent, &transport->RemoteAddress);
     if (!NT_SUCCESS(status)) {
-        DbgPrint("Sonatina: BTENUM GET_DEVINFO failed 0x%08X\n", status);
+        DbgPrint("Sonatina: BTHENUM GET_DEVINFO failed 0x%08X\n", status);
         return status;
     }
     DbgPrint("Sonatina: remote address %llX\n", (unsigned long long)transport->RemoteAddress);
     return STATUS_SUCCESS;
 }
 
-NTSTATUS SontTransportOpenWithFlushTo(PSONT_TRANSPORT transport, USHORT psm,
-                                      USHORT flush_to_ms,
-                                      L2CAP_CHANNEL_HANDLE *channel)
+NTSTATUS SontTransportRegisterServer(PSONT_TRANSPORT transport)
+{
+    struct _BRB_L2CA_REGISTER_SERVER *brb;
+    NTSTATUS status;
+
+    if (transport == NULL || !transport->HasBth) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (transport->ServerRegistered) {
+        return STATUS_SUCCESS;
+    }
+    brb = (struct _BRB_L2CA_REGISTER_SERVER *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_REGISTER_SERVER, SONT_POOL_TAG);
+    if (brb == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    /* Specific device/PSM pair: only this headset, only AVDTP. */
+    brb->BtAddress = transport->RemoteAddress;
+    brb->PSM = SONT_L2CAP_PSM_AVDTP;
+    brb->IndicationFlags = 0;
+    brb->IndicationCallback = SontServerCallback;
+    brb->IndicationCallbackContext = transport;
+    brb->ReferenceObject = transport->Parent;
+
+    status = SontSubmitBrb(transport->Parent, brb);
+    if (NT_SUCCESS(status)) {
+        transport->ServerHandle = brb->ServerHandle;
+        transport->ServerRegistered = TRUE;
+    } else {
+        DbgPrint("Sonatina: BRB_L2CA_REGISTER_SERVER(0x19) failed 0x%08X; outgoing only\n", status);
+    }
+    transport->Bth.BthFreeBrb((PBRB)brb);
+    return status;
+}
+
+VOID SontTransportUnregisterServer(PSONT_TRANSPORT transport)
+{
+    struct _BRB_L2CA_UNREGISTER_SERVER *brb;
+
+    if (transport == NULL || !transport->HasBth || !transport->ServerRegistered) {
+        return;
+    }
+    brb = (struct _BRB_L2CA_UNREGISTER_SERVER *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_UNREGISTER_SERVER, SONT_POOL_TAG);
+    if (brb != NULL) {
+        brb->BtAddress = transport->RemoteAddress;
+        brb->Psm = SONT_L2CAP_PSM_AVDTP;
+        brb->ServerHandle = transport->ServerHandle;
+        (void)SontSubmitBrb(transport->Parent, brb);
+        transport->Bth.BthFreeBrb((PBRB)brb);
+    }
+    transport->ServerRegistered = FALSE;
+    transport->ServerHandle = NULL;
+}
+
+BOOLEAN SontTransportTakeIncoming(PSONT_TRANSPORT transport, PSONT_INCOMING incoming)
+{
+    KIRQL old_irql;
+    BOOLEAN got = FALSE;
+    ULONG i;
+
+    if (transport == NULL || incoming == NULL) {
+        return FALSE;
+    }
+    KeAcquireSpinLock(&transport->IndicationLock, &old_irql);
+    if (transport->IncomingCount > 0) {
+        *incoming = transport->Incoming[0];
+        for (i = 1; i < transport->IncomingCount; i++) {
+            transport->Incoming[i - 1] = transport->Incoming[i];
+        }
+        transport->IncomingCount--;
+        got = TRUE;
+    }
+    if (transport->IncomingCount == 0) {
+        KeClearEvent(&transport->IncomingEvent);
+    }
+    KeReleaseSpinLock(&transport->IndicationLock, old_irql);
+    return got;
+}
+
+static USHORT SontNegotiatedMtu(USHORT out_mtu, USHORT in_mtu)
+{
+    /* We advertise a large local MTU, so the smaller of the two negotiated
+     * values is the headset's receive MTU, whichever field carries it. */
+    USHORT mtu = 0;
+    if (out_mtu != 0 && in_mtu != 0) {
+        mtu = (out_mtu < in_mtu) ? out_mtu : in_mtu;
+    } else {
+        mtu = (out_mtu != 0) ? out_mtu : in_mtu;
+    }
+    if (mtu < L2CAP_MIN_MTU) {
+        mtu = SONT_L2CAP_DEFAULT_MTU;
+    }
+    return mtu;
+}
+
+static VOID SontFillChannelConfig(struct _BRB_L2CA_OPEN_CHANNEL *brb, PSONT_TRANSPORT transport,
+                                  USHORT flush_to_ms)
+{
+    brb->ChannelFlags = CF_ROLE_EITHER;
+    brb->ConfigOut.Flags = CFG_MTU;
+    brb->ConfigOut.Mtu.Min = L2CAP_MIN_MTU;
+    brb->ConfigOut.Mtu.Max = SONT_L2CAP_LOCAL_MTU;
+    brb->ConfigOut.Mtu.Preferred = SONT_L2CAP_LOCAL_MTU;
+    if (flush_to_ms != 0 && flush_to_ms != 0xFFFF) {
+        brb->ConfigOut.Flags |= CFG_FLUSHTO;
+        brb->ConfigOut.FlushTO.Min = 1;
+        brb->ConfigOut.FlushTO.Max = 0xFFFF;
+        brb->ConfigOut.FlushTO.Preferred = flush_to_ms;
+    }
+    brb->ConfigIn.Flags = CFG_MTU;
+    brb->ConfigIn.Mtu.Min = L2CAP_MIN_MTU;
+    brb->ConfigIn.Mtu.Max = 0xFFFF;
+    brb->ConfigIn.Mtu.Preferred = SONT_L2CAP_DEFAULT_MTU;
+    brb->CallbackFlags = CALLBACK_DISCONNECT;
+    brb->Callback = SontChannelCallback;
+    brb->CallbackContext = transport;
+    brb->ReferenceObject = transport->Parent;
+    brb->IncomingQueueDepth = 16;
+}
+
+NTSTATUS SontTransportAccept(PSONT_TRANSPORT transport, const SONT_INCOMING *incoming,
+                             USHORT flush_to_ms, L2CAP_CHANNEL_HANDLE *channel, USHORT *mtu)
+{
+    struct _BRB_L2CA_OPEN_CHANNEL *brb;
+    NTSTATUS status;
+
+    if (transport == NULL || incoming == NULL || channel == NULL || !transport->HasBth) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    brb = (struct _BRB_L2CA_OPEN_CHANNEL *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_OPEN_CHANNEL_RESPONSE, SONT_POOL_TAG);
+    if (brb == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    brb->BtAddress = incoming->Address;
+    brb->ChannelHandle = incoming->Handle;
+    brb->Response = CONNECT_RSP_RESULT_SUCCESS;   /* union with Psm: do not set Psm */
+    SontFillChannelConfig(brb, transport, flush_to_ms);
+
+    status = SontSubmitBrbTimed(transport->Parent, brb, NULL, 10000);
+    if (NT_SUCCESS(status)) {
+        *channel = brb->ChannelHandle;
+        if (mtu != NULL) {
+            *mtu = SontNegotiatedMtu(brb->OutResults.Params.Mtu, brb->InResults.Params.Mtu);
+        }
+    } else {
+        DbgPrint("Sonatina: OPEN_CHANNEL_RESPONSE failed 0x%08X\n", status);
+    }
+    transport->Bth.BthFreeBrb((PBRB)brb);
+    return status;
+}
+
+VOID SontTransportRefuse(PSONT_TRANSPORT transport, const SONT_INCOMING *incoming)
+{
+    struct _BRB_L2CA_OPEN_CHANNEL *brb;
+
+    if (transport == NULL || incoming == NULL || !transport->HasBth) {
+        return;
+    }
+    brb = (struct _BRB_L2CA_OPEN_CHANNEL *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_OPEN_CHANNEL_RESPONSE, SONT_POOL_TAG);
+    if (brb == NULL) {
+        return;
+    }
+    brb->BtAddress = incoming->Address;
+    brb->ChannelHandle = incoming->Handle;
+    brb->Response = CONNECT_RSP_RESULT_NO_RESOURCES;
+    brb->ReferenceObject = transport->Parent;
+    (void)SontSubmitBrbTimed(transport->Parent, brb, NULL, 5000);
+    transport->Bth.BthFreeBrb((PBRB)brb);
+}
+
+NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm, USHORT flush_to_ms,
+                           PKEVENT stop_event, ULONG timeout_ms,
+                           L2CAP_CHANNEL_HANDLE *channel, USHORT *mtu)
 {
     struct _BRB_L2CA_OPEN_CHANNEL *brb;
     NTSTATUS status;
@@ -198,49 +391,26 @@ NTSTATUS SontTransportOpenWithFlushTo(PSONT_TRANSPORT transport, USHORT psm,
     if (transport == NULL || channel == NULL || !transport->HasBth) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (flush_to_ms == 0) {
-        flush_to_ms = 0xFFFF;
-    }
     brb = (struct _BRB_L2CA_OPEN_CHANNEL *)transport->Bth.BthAllocateBrb(
         BRB_L2CA_OPEN_CHANNEL, SONT_POOL_TAG);
     if (brb == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-
     brb->BtAddress = transport->RemoteAddress;
     brb->Psm = psm;
-    brb->ChannelFlags = CF_ROLE_EITHER;
-    brb->ConfigOut.Flags = CFG_MTU | CFG_FLUSHTO;
-    brb->ConfigOut.Mtu.Min = L2CAP_MIN_MTU;
-    brb->ConfigOut.Mtu.Max = 0xFFFF;
-    brb->ConfigOut.Mtu.Preferred = L2CAP_DEFAULT_MTU;
-    brb->ConfigOut.FlushTO.Min = 1;
-    brb->ConfigOut.FlushTO.Max = 0xFFFF;
-    brb->ConfigOut.FlushTO.Preferred = flush_to_ms;
-    brb->ConfigIn.Flags = CFG_MTU;
-    brb->ConfigIn.Mtu.Min = L2CAP_MIN_MTU;
-    brb->ConfigIn.Mtu.Max = 0xFFFF;
-    brb->ConfigIn.Mtu.Preferred = L2CAP_DEFAULT_MTU;
-    brb->CallbackFlags = CALLBACK_DISCONNECT;
-    brb->Callback = SontL2capCallback;
-    brb->CallbackContext = transport;
-    brb->ReferenceObject = transport->Parent;
-    brb->IncomingQueueDepth = 10;
+    SontFillChannelConfig(brb, transport, flush_to_ms);
 
-    status = SontSubmitBrb(transport->Parent, brb);
+    status = SontSubmitBrbTimed(transport->Parent, brb, stop_event, timeout_ms);
     if (NT_SUCCESS(status)) {
         *channel = brb->ChannelHandle;
+        if (mtu != NULL) {
+            *mtu = SontNegotiatedMtu(brb->OutResults.Params.Mtu, brb->InResults.Params.Mtu);
+        }
     } else {
         DbgPrint("Sonatina: BRB_L2CA_OPEN_CHANNEL(psm=0x%04X) failed 0x%08X\n", psm, status);
     }
     transport->Bth.BthFreeBrb((PBRB)brb);
     return status;
-}
-
-NTSTATUS SontTransportOpen(PSONT_TRANSPORT transport, USHORT psm,
-                           L2CAP_CHANNEL_HANDLE *channel)
-{
-    return SontTransportOpenWithFlushTo(transport, psm, 0xFFFF, channel);
 }
 
 NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
@@ -257,6 +427,7 @@ NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE chann
     if (brb == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    brb->BtAddress = transport->RemoteAddress;
     brb->ChannelHandle = channel;
     brb->TransferFlags = ACL_TRANSFER_DIRECTION_OUT;
     brb->Buffer = (PVOID)data;
@@ -264,46 +435,21 @@ NTSTATUS SontTransportSend(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE chann
     brb->BufferMDL = NULL;
     brb->Timeout = 0;
 
-    status = SontSubmitBrb(transport->Parent, brb);
+    /* Bounded so a stuck controller cannot freeze the worker forever. */
+    status = SontSubmitBrbTimed(transport->Parent, brb, NULL, 2000);
     transport->Bth.BthFreeBrb((PBRB)brb);
     return status;
 }
 
-NTSTATUS SontTransportReceive(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE channel,
-                              void *buffer, ULONG capacity, ULONG *received,
-                              PKEVENT stop_event, ULONG timeout_ms)
+LONG SontTransportTakeLost(PSONT_TRANSPORT transport)
 {
-    struct _BRB_L2CA_ACL_TRANSFER *brb;
-    NTSTATUS status;
-
-    if (received == NULL) {
-        return STATUS_INVALID_PARAMETER;
+    LONG mask;
+    if (transport == NULL) {
+        return 0;
     }
-    *received = 0;
-
-    if (transport == NULL || channel == NULL || buffer == NULL ||
-        capacity == 0 || !transport->HasBth) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    brb = (struct _BRB_L2CA_ACL_TRANSFER *)transport->Bth.BthAllocateBrb(
-        BRB_L2CA_ACL_TRANSFER, SONT_POOL_TAG);
-    if (brb == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    brb->ChannelHandle = channel;
-    brb->TransferFlags = ACL_TRANSFER_DIRECTION_IN | ACL_SHORT_TRANSFER_OK;
-    brb->Buffer = buffer;
-    brb->BufferSize = capacity;
-    brb->BufferMDL = NULL;
-    brb->Timeout = 0;
-
-    status = SontSubmitBrbTimed(transport->Parent, brb, stop_event, timeout_ms);
-    if (NT_SUCCESS(status)) {
-        *received = (brb->BufferSize <= capacity) ? brb->BufferSize : capacity;
-    }
-    transport->Bth.BthFreeBrb((PBRB)brb);
-    return status;
+    KeClearEvent(&transport->LinkEvent);
+    mask = InterlockedExchange(&transport->LostMask, 0);
+    return mask;
 }
 
 VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel)
@@ -318,7 +464,7 @@ VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel
     if (brb != NULL) {
         brb->BtAddress = transport->RemoteAddress;
         brb->ChannelHandle = *channel;
-        (void)SontSubmitBrb(transport->Parent, brb);
+        (void)SontSubmitBrbTimed(transport->Parent, brb, NULL, 5000);
         transport->Bth.BthFreeBrb((PBRB)brb);
     }
     *channel = NULL;
@@ -326,10 +472,117 @@ VOID SontTransportClose(PSONT_TRANSPORT transport, L2CAP_CHANNEL_HANDLE *channel
 
 VOID SontTransportTeardown(PSONT_TRANSPORT transport)
 {
-    if (transport == NULL) {
+    SONT_INCOMING pending;
+
+    if (transport == NULL || !transport->HasBth) {
         return;
     }
     SontTransportClose(transport, &transport->MediaChannel);
     SontTransportClose(transport, &transport->SignalingChannel);
+    SontTransportUnregisterServer(transport);
+    while (SontTransportTakeIncoming(transport, &pending)) {
+        SontTransportRefuse(transport, &pending);
+    }
     transport->HasBth = FALSE;
+}
+
+/* ------------------------------------------------------------------ async receive */
+
+static NTSTATUS SontAsyncRxCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
+{
+    PSONT_ASYNC_RX rx = (PSONT_ASYNC_RX)Context;
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+    KeSetEvent(&rx->Done, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;  /* the IRP is reused */
+}
+
+NTSTATUS SontAsyncRxInit(PSONT_ASYNC_RX rx, PSONT_TRANSPORT transport)
+{
+    if (rx == NULL || transport == NULL || !transport->HasBth) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(rx, FIELD_OFFSET(SONT_ASYNC_RX, Buffer));
+    rx->Transport = transport;
+    KeInitializeEvent(&rx->Done, NotificationEvent, FALSE);
+    rx->Irp = IoAllocateIrp(transport->Parent->StackSize, FALSE);
+    rx->Brb = (struct _BRB_L2CA_ACL_TRANSFER *)transport->Bth.BthAllocateBrb(
+        BRB_L2CA_ACL_TRANSFER, SONT_POOL_TAG);
+    if (rx->Irp == NULL || rx->Brb == NULL) {
+        SontAsyncRxFree(rx);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SontAsyncRxStart(PSONT_ASYNC_RX rx, L2CAP_CHANNEL_HANDLE channel)
+{
+    PIO_STACK_LOCATION stack;
+    PSONT_TRANSPORT transport;
+
+    if (rx == NULL || rx->Irp == NULL || rx->Brb == NULL || channel == NULL || rx->Pending) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    transport = rx->Transport;
+    transport->Bth.BthReuseBrb((PBRB)rx->Brb, BRB_L2CA_ACL_TRANSFER);
+    rx->Brb->BtAddress = transport->RemoteAddress;
+    rx->Brb->ChannelHandle = channel;
+    rx->Brb->TransferFlags = ACL_TRANSFER_DIRECTION_IN | ACL_SHORT_TRANSFER_OK;
+    rx->Brb->Buffer = rx->Buffer;
+    rx->Brb->BufferSize = sizeof(rx->Buffer);
+    rx->Brb->BufferMDL = NULL;
+    rx->Brb->Timeout = 0;
+
+    IoReuseIrp(rx->Irp, STATUS_SUCCESS);
+    stack = IoGetNextIrpStackLocation(rx->Irp);
+    stack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    stack->Parameters.DeviceIoControl.IoControlCode = IOCTL_INTERNAL_BTH_SUBMIT_BRB;
+    stack->Parameters.Others.Argument1 = rx->Brb;
+    IoSetCompletionRoutine(rx->Irp, SontAsyncRxCompletion, rx, TRUE, TRUE, TRUE);
+
+    KeClearEvent(&rx->Done);
+    rx->Pending = TRUE;
+    rx->Length = 0;
+    (void)IoCallDriver(transport->Parent, rx->Irp);
+    return STATUS_PENDING;
+}
+
+VOID SontAsyncRxComplete(PSONT_ASYNC_RX rx)
+{
+    if (rx == NULL || !rx->Pending) {
+        return;
+    }
+    KeWaitForSingleObject(&rx->Done, Executive, KernelMode, FALSE, NULL);
+    rx->Pending = FALSE;
+    rx->Status = rx->Irp->IoStatus.Status;
+    rx->Length = 0;
+    if (NT_SUCCESS(rx->Status)) {
+        rx->Length = (rx->Brb->BufferSize <= sizeof(rx->Buffer)) ? rx->Brb->BufferSize
+                                                                 : (ULONG)sizeof(rx->Buffer);
+    }
+}
+
+VOID SontAsyncRxCancel(PSONT_ASYNC_RX rx)
+{
+    if (rx == NULL || !rx->Pending) {
+        return;
+    }
+    (void)IoCancelIrp(rx->Irp);
+    SontAsyncRxComplete(rx);
+}
+
+VOID SontAsyncRxFree(PSONT_ASYNC_RX rx)
+{
+    if (rx == NULL) {
+        return;
+    }
+    SontAsyncRxCancel(rx);
+    if (rx->Brb != NULL && rx->Transport != NULL) {
+        rx->Transport->Bth.BthFreeBrb((PBRB)rx->Brb);
+    }
+    if (rx->Irp != NULL) {
+        IoFreeIrp(rx->Irp);
+    }
+    rx->Brb = NULL;
+    rx->Irp = NULL;
 }

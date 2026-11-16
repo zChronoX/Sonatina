@@ -37,6 +37,9 @@ SIG_START = 0x07
 SIG_CLOSE = 0x08
 SIG_SUSPEND = 0x09
 SIG_ABORT = 0x0A
+SIG_SECURITY_CONTROL = 0x0B
+SIG_GET_ALL_CAPABILITIES = 0x0C
+SIG_DELAY_REPORT = 0x0D
 
 SIGNAL_NAMES = {
     SIG_DISCOVER: "Discover",
@@ -49,6 +52,9 @@ SIGNAL_NAMES = {
     SIG_CLOSE: "Close",
     SIG_SUSPEND: "Suspend",
     SIG_ABORT: "Abort",
+    SIG_SECURITY_CONTROL: "SecurityControl",
+    SIG_GET_ALL_CAPABILITIES: "GetAllCapabilities",
+    SIG_DELAY_REPORT: "DelayReport",
 }
 
 # Service categories
@@ -78,8 +84,12 @@ ERR_BAD_LENGTH = 0x11
 ERR_BAD_ACP_SEID = 0x12
 ERR_SEP_IN_USE = 0x13
 ERR_SEP_NOT_IN_USE = 0x14
-ERR_BAD_SERVICE_CATEGORY = 0x19
+ERR_BAD_SERVICE_CATEGORY = 0x17
+ERR_BAD_PAYLOAD_FORMAT = 0x18
+ERR_NOT_SUPPORTED_COMMAND = 0x19
 ERR_INVALID_CAPABILITIES = 0x1A
+ERR_UNSUPPORTED_CONFIGURATION = 0x29
+ERR_BAD_STATE = 0x31
 
 MEDIA_TYPE_AUDIO = 0
 TSEP_SRC = 0
@@ -111,6 +121,18 @@ AAC_FREQ_INDEX = {
     7350: 12,
 }
 AAC_FREQ_BY_INDEX = {v: k for k, v in AAC_FREQ_INDEX.items()}
+
+
+def seid_octet(seid: int) -> int:
+    """Encode a SEID field: 6-bit SEID in bits 7..2, RFA in bits 1..0."""
+    if not 1 <= seid <= 62:
+        raise ValueError("SEID must be 1..62, got %d" % seid)
+    return (seid & 0x3F) << 2
+
+
+def parse_seid(octet: int) -> int:
+    """Decode a SEID field (bits 7..2)."""
+    return (octet >> 2) & 0x3F
 
 
 class AvdtpError(Exception):
@@ -236,22 +258,24 @@ class SepInfo:
     def to_bytes(self) -> bytes:
         if not 1 <= self.seid <= 62:
             raise AvdtpError("SEID must be 1..62, got %d" % self.seid)
-        first = (0x80 if self.in_use else 0) | ((self.seid & 0x3F) << 1)
-        second = ((self.media_type & 0x0F) << 4) | ((self.tsep & 0x03) << 2)
+        # Octet 0: SEID (bits 7..2), In Use (bit 1), RFA (bit 0).
+        # Octet 1: Media Type (bits 7..4), TSEP (bit 3), RFA (bits 2..0).
+        first = ((self.seid & 0x3F) << 2) | (0x02 if self.in_use else 0)
+        second = ((self.media_type & 0x0F) << 4) | ((self.tsep & 0x01) << 3)
         return bytes([first, second])
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "SepInfo":
         if len(data) < 2:
             raise AvdtpError("SEP info must be 2 bytes")
-        seid = (data[0] >> 1) & 0x3F
+        seid = (data[0] >> 2) & 0x3F
         if seid == 0:
             raise AvdtpError("invalid SEID 0")
         return cls(
             seid=seid,
-            in_use=bool(data[0] & 0x80),
+            in_use=bool(data[0] & 0x02),
             media_type=(data[1] >> 4) & 0x0F,
-            tsep=(data[1] >> 2) & 0x03,
+            tsep=(data[1] >> 3) & 0x01,
         )
 
 
@@ -269,7 +293,8 @@ class Message:
                 ((self.transaction & 0x0F) << 4)
                 | ((self.packet_type & 0x03) << 2)
                 | (self.message_type & 0x03),
-                (self.signal & 0x3F) << 2,
+                # Octet 1: RFA (bits 7..6), Signal Identifier (bits 5..0).
+                self.signal & 0x3F,
             ]
         )
         return header + self.payload
@@ -279,13 +304,12 @@ class Message:
         if len(data) < 2:
             raise AvdtpError("AVDTP message too short (%d bytes)" % len(data))
         first, second = data[0], data[1]
-        if (second & 0x03) != 0:
-            raise AvdtpError("AVDTP RFA bits are not zero")
+        # RFA bits (7..6 of octet 1) are ignored on receive, as the spec requires.
         return cls(
             transaction=(first >> 4) & 0x0F,
             packet_type=(first >> 2) & 0x03,
             message_type=first & 0x03,
-            signal=(second >> 2) & 0x3F,
+            signal=second & 0x3F,
             payload=data[2:],
         )
 
@@ -432,11 +456,11 @@ def command(signal: int, payload: bytes = b"", transaction: int = 0) -> Message:
 
 
 def set_configuration(int_seid: int, acp_seid: int, cap: CodecCapability) -> bytes:
-    return bytes([acp_seid & 0x3F, int_seid & 0x3F]) + encode_capabilities(cap)
+    return bytes([seid_octet(acp_seid), seid_octet(int_seid)]) + encode_capabilities(cap)
 
 
 def single_seid(seid: int) -> bytes:
-    return bytes([seid & 0x3F])
+    return bytes([seid_octet(seid)])
 
 
 def find_codec(

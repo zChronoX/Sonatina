@@ -52,7 +52,7 @@ typedef struct _SONATINA_STATE {
     ULONG Opened;
     ULONG Packets;
     ULONG Errors;
-    ULONG LostPackets;
+    ULONG LostPackets;          /* PCM underruns on the WaveRT tap (silence inserted) */
     ULONG TxTimeUs;
     ULONG DelayMs;
     ULONG NegotiatedSampling;

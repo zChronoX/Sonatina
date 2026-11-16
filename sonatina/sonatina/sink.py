@@ -60,7 +60,7 @@ class SinkSession:
         if message.signal == avdtp.SIG_GET_CAPABILITIES:
             if len(message.payload) < 1:
                 return message.reject(avdtp.ERR_BAD_LENGTH)
-            item = self._find(message.payload[0] & 0x3F)
+            item = self._find(avdtp.parse_seid(message.payload[0]))
             if item is None:
                 return message.reject(avdtp.ERR_BAD_ACP_SEID)
             return message.accept(avdtp.encode_capabilities(item.capability))
@@ -68,7 +68,7 @@ class SinkSession:
         if message.signal == avdtp.SIG_SET_CONFIGURATION:
             if len(message.payload) < 2:
                 return message.reject(avdtp.ERR_BAD_LENGTH)
-            acp_seid = message.payload[0] & 0x3F
+            acp_seid = avdtp.parse_seid(message.payload[0])
             item = self._find(acp_seid)
             if item is None:
                 return message.reject(avdtp.ERR_BAD_ACP_SEID)
@@ -117,7 +117,7 @@ class SinkSession:
                 return message.reject(avdtp.ERR_SEP_NOT_IN_USE)
             if len(message.payload) < 1:
                 return message.reject(avdtp.ERR_BAD_LENGTH)
-            item = self._find(message.payload[0] & 0x3F)
+            item = self._find(avdtp.parse_seid(message.payload[0]))
             if item is None:
                 return message.reject(avdtp.ERR_BAD_ACP_SEID)
             if message.signal == avdtp.SIG_START:

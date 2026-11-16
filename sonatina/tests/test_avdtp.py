@@ -19,13 +19,34 @@ class TestMessage(unittest.TestCase):
         self.assertEqual(reject.message_type, avdtp.MT_REJECT)
         self.assertEqual(reject.payload, bytes([avdtp.ERR_BAD_ACP_SEID]))
 
-    def test_rejects_rfa_bits_and_short_input(self):
+    def test_ignores_rfa_bits_and_rejects_short_input(self):
         raw = bytearray(avdtp.command(avdtp.SIG_DISCOVER).encode())
-        raw[1] |= 0x01
-        with self.assertRaises(avdtp.AvdtpError):
-            avdtp.Message.decode(bytes(raw))
+        raw[1] |= 0xC0  # RFA bits 7..6 of the signal octet must be ignored
+        self.assertEqual(avdtp.Message.decode(bytes(raw)).signal, avdtp.SIG_DISCOVER)
         with self.assertRaises(avdtp.AvdtpError):
             avdtp.Message.decode(b"\x00")
+
+    def test_wire_format_matches_specification(self):
+        # Golden bytes from the AVDTP specification (section 8) as seen in real
+        # captures: they must never be derived from this implementation.
+        self.assertEqual(avdtp.command(avdtp.SIG_DISCOVER).encode(), bytes.fromhex("0001"))
+        self.assertEqual(
+            avdtp.command(avdtp.SIG_GET_CAPABILITIES, avdtp.single_seid(1), transaction=1).encode(),
+            bytes.fromhex("100204"),
+        )
+        self.assertEqual(
+            avdtp.command(avdtp.SIG_START, avdtp.single_seid(3), transaction=5).encode(),
+            bytes.fromhex("50070c"),
+        )
+        # SEP list entry: SEID 1, not in use, audio sink -> 04 08; SEID 2 in use, source -> 0a 00
+        self.assertEqual(avdtp.SepInfo(seid=1, tsep=avdtp.TSEP_SNK).to_bytes(), bytes.fromhex("0408"))
+        self.assertEqual(
+            avdtp.SepInfo(seid=2, in_use=True, tsep=avdtp.TSEP_SRC).to_bytes(), bytes.fromhex("0a00")
+        )
+        sep = avdtp.SepInfo.from_bytes(bytes.fromhex("0408"))
+        self.assertEqual((sep.seid, sep.in_use, sep.tsep), (1, False, avdtp.TSEP_SNK))
+        accept = avdtp.Message.decode(bytes.fromhex("0201"))
+        self.assertEqual((accept.message_type, accept.signal), (avdtp.MT_ACCEPT, avdtp.SIG_DISCOVER))
 
 
 class TestCapabilities(unittest.TestCase):

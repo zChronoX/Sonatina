@@ -7,6 +7,11 @@
     into Program Files, publishes SonatinaAudio.inf via pnputil, creates and
     starts SonatinaSvc, and rolls back cleanly if any step fails.
     Use -DryRun to verify staging and commands without modifying system state.
+
+    -Force        binds SonatinaAudio.inf to every present Bluetooth AudioSink devnode
+                  (BTHENUM\{0000110b-...}) even though the inbox Windows driver ranks
+                  higher (same as `devcon update`). Needed for test-signed builds.
+    -SkipService  installs only the kernel driver (enough for the first tests).
 #>
 [CmdletBinding()]
 param(
@@ -14,6 +19,8 @@ param(
     [string]$ServiceExe = '',
     [string]$InstallDir = '',
     [switch]$AllowUnsigned,
+    [switch]$Force,
+    [switch]$SkipService,
     [switch]$DryRun
 )
 
@@ -48,16 +55,22 @@ if (-not (Test-Path $infPath)) {
 if (-not $DryRun -and -not (Test-Path $sysPath)) {
     throw "SonatinaAudio.sys not found in $DriverDir (build WDK package first)"
 }
-if (-not (Test-Path $ServiceExe)) {
-    throw "SonatinaSvc.exe not found at $ServiceExe (run service/build_service.ps1)"
+if (-not $SkipService -and -not (Test-Path $ServiceExe)) {
+    throw "SonatinaSvc.exe not found at $ServiceExe (run service/build_service.ps1, or pass -SkipService)"
 }
+$audioSinkHwid = 'BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}'
 
 if ($DryRun) {
     Write-Host ("[dry-run] DriverDir   = {0}" -f $DriverDir)
     Write-Host ("[dry-run] ServiceExe  = {0}" -f $ServiceExe)
     Write-Host ("[dry-run] InstallDir  = {0}" -f $InstallDir)
     Write-Host ("[dry-run] Would run: pnputil /add-driver `"{0}`" /install" -f $infPath)
-    Write-Host ("[dry-run] Would create service SonatinaSvc -> `"{0}`"" -f (Join-Path $InstallDir 'SonatinaSvc.exe'))
+    if ($Force) {
+        Write-Host ("[dry-run] Would force-bind {0} with UpdateDriverForPlugAndPlayDevices" -f $audioSinkHwid)
+    }
+    if (-not $SkipService) {
+        Write-Host ("[dry-run] Would create service SonatinaSvc -> `"{0}`"" -f (Join-Path $InstallDir 'SonatinaSvc.exe'))
+    }
     exit 0
 }
 
@@ -85,7 +98,9 @@ try {
         $stagedDir = $true
     }
     $targetSvc = Join-Path $InstallDir 'SonatinaSvc.exe'
-    Copy-Item -Path $ServiceExe -Destination $targetSvc -Force
+    if (-not $SkipService) {
+        Copy-Item -Path $ServiceExe -Destination $targetSvc -Force
+    }
 
     $pnpOut = (& pnputil /add-driver $infPath /install 2>&1)
     if ($LASTEXITCODE -ne 0) {
@@ -97,6 +112,34 @@ try {
     }
     $pubLabel = if ($publishedOem) { $publishedOem } else { 'published' }
     Write-Host ("Driver installed ({0})" -f $pubLabel)
+
+    if ($Force) {
+        if (-not ('Sonatina.NewDev' -as [type])) {
+            Add-Type -Namespace Sonatina -Name NewDev -MemberDefinition @'
+[DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwndParent, string hardwareId,
+    string fullInfPath, uint installFlags, out bool rebootRequired);
+'@
+        }
+        $fullInf = (Resolve-Path $infPath).Path
+        $reboot = $false
+        # INSTALLFLAG_FORCE = 0x1: install even if the inbox driver is a better match.
+        $ok = [Sonatina.NewDev]::UpdateDriverForPlugAndPlayDevices([IntPtr]::Zero, $audioSinkHwid, $fullInf, 1, [ref]$reboot)
+        if (-not $ok) {
+            $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            if (($err -band 0xFFFFFFFF) -eq 0xE000020B) {
+                throw 'No Bluetooth AudioSink device is present: pair and connect the headset first.'
+            }
+            throw ("UpdateDriverForPlugAndPlayDevices failed (Win32 error 0x{0:X8})" -f ($err -band 0xFFFFFFFF))
+        }
+        $suffix = if ($reboot) { ' (reboot required)' } else { '' }
+        Write-Host ("SonatinaAudio bound to {0}{1}" -f $audioSinkHwid, $suffix)
+    }
+
+    if ($SkipService) {
+        Write-Host 'SonatinaSvc not installed (-SkipService).'
+        exit 0
+    }
 
     & sc.exe query SonatinaSvc | Out-Null
     if ($LASTEXITCODE -ne 0) {

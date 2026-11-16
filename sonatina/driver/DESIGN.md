@@ -40,7 +40,7 @@ That is the path we implement.
 |---|---|---|---|
 | OS integration | none (user process) | KS function driver on the AudioSink devnode | **driver** |
 | Audio endpoint | none | WaveRT render + topology subdevices | **driver** |
-| Transport | UDP loopback | L2CAP via BRB (`0x0019` signalling, `0x0017` media) | **driver** |
+| Transport | UDP loopback | L2CAP via BRB (PSM `0x0019` for both signalling and media) | **driver** |
 | AVDTP | reduced subset, loopback | same subset over L2CAP + stream endpoints | medium |
 | RTP media | yes | yes, plus jitter buffer and clock drift | medium |
 | SBC | framing + bitrate model, synthetic payload | real libsbc encoder/decoder | **codec** |
@@ -93,31 +93,66 @@ and keeps the clean-room line clear.
 
 1. In `StartDevice`, get the parent PDO (`PcGetPhysicalDeviceObject`) and send
    `IRP_MN_QUERY_INTERFACE` for `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE` down the
-   parent stack. This yields a `PBTH_INTERFACE` with `BthAllocateBrb`,
-   `BthFreeBrb`, `BthInitializeBrb`, `BthReuseBrb`.
-2. Open the AVDTP signalling channel with `BRB_L2CA_OPEN_CHANNEL` on PSM
-   `0x0019`; open the media transport channel on PSM `0x0017` after
-   `SetConfiguration`.
-3. Send/receive with `BRB_L2CA_ACL_TRANSFER` (MDL for sends, callback for
-   receives). Each BRB is submitted with `IRP_MJ_INTERNAL_DEVICE_CONTROL` +
-   `IOCTL_INTERNAL_BTH_SUBMIT_BRB`, BRB pointer in `Parameters.Others.Argument1`.
-4. Handle `IndicationRemoteConnect` / `IndicationRemoteDisconnect` in the BTHDDI
-   callback; re-arm receive BRBs from a dedicated system thread at
-   `PASSIVE_LEVEL`.
-5. Tear down with `BRB_L2CA_CLOSE_CHANNEL` on stop/remove.
+   parent stack. This yields `BthAllocateBrb`, `BthFreeBrb`, `BthInitializeBrb`,
+   `BthReuseBrb`.
+2. **Both AVDTP channels use PSM `0x0019`**: the first L2CAP channel is
+   signalling, the second one (opened after `Open`) is the media transport.
+   PSM `0x0017` is AVCTP (AVRCP) and never carries audio.
+3. The worker registers an L2CAP server for the headset's own address
+   (`BRB_L2CA_REGISTER_SERVER`, PSM `0x0019`). Headsets reconnect by themselves
+   on power-on; the indication callback (≤ DISPATCH_LEVEL) only queues the
+   request, and the worker answers it with `BRB_L2CA_OPEN_CHANNEL_RESPONSE` at
+   PASSIVE_LEVEL.
+4. Outgoing connections (`BRB_L2CA_OPEN_CHANNEL`) are bounded by a timeout and
+   cancelled by `StopEvent`. Retry policy: a few attempts after start
+   (2 s / 5 s / 10 s), then only while Windows is really playing audio, so a
+   headset that is switched off is not paged forever.
+5. A single asynchronous receive (`BRB_L2CA_ACL_TRANSFER` IN, reused IRP/BRB)
+   stays posted on the signalling channel for the whole connection, so commands
+   from the headset are answered while streaming.
+6. `IndicationRemoteDisconnect` sets a flag and an event; the worker closes the
+   handles (`BRB_L2CA_CLOSE_CHANNEL`) and reconnects.
+7. The headset's receive MTU is read from the open/response results and used
+   for packetization (we advertise a 1024-byte local MTU so the smaller
+   negotiated value is always the headset's).
+
+### 3.2.1 AVDTP roles (`avdtp_session.c`)
+
+- **Initiator**: Discover → GetCapabilities on every sink SEP (preferred codec
+  first, SBC kept as fallback, e.g. when LDAC is switched off in the headset
+  app) → SetConfiguration → Open → *open the transport channel* → Start.
+  Start is never sent before the transport channel exists.
+- **Acceptor**: every command the headset may send gets an answer —
+  Discover (our SBC SEP 1, LDAC SEP 2 when enabled), Get(All)Capabilities,
+  SetConfiguration, GetConfiguration, Reconfigure (rejected), Open, Start,
+  Suspend, Close, Abort, DelayReport; unknown signals get General Reject.
+- Collisions: if the headset configures us before our own SetConfiguration is
+  out, its choice wins and our handshake is abandoned; afterwards its
+  SetConfiguration is rejected with `SEP_IN_USE`.
+- After an incoming connection the driver waits 1 s for the headset to drive
+  the setup before starting its own Discover.
+- Wire format follows the specification bit layout (signal ID in bits 5..0 of
+  octet 1, SEID in bits 7..2, In-Use bit 1, TSEP bit 3) and is pinned by golden
+  bytes in the C and Python tests.
 
 ### 3.3 Audio path
 
-- WaveRT render miniport with a notification/callback stream; the stream thread
-  pulls interleaved PCM from the cyclic buffer.
-- Resample only when the endpoint format differs from the negotiated codec
-  format; otherwise pass through (the point of the product is avoiding forced
-  44.1 kHz).
-- Encode → packetize (RTP, 90 kHz timestamp) → queue → `BRB_L2CA_ACL_TRANSFER`.
-- Measure per-packet tx time; feed ABR (short/long term thresholds) and the
-  flush-timeout logic.
-- Jitter buffer and sequence tracking on the return path is only needed for
-  monitoring; Bluetooth audio render is one-way.
+- WaveRT render miniport; its timer DPC copies the cyclic buffer into a PCM
+  ring (`SONT_PCM_SOURCE`).
+- The media engine is paced by a QPC media clock (`SONT_MEDIA_CLOCK`, 20 ms
+  send-ahead, burst cap) — not by PCM arrival. Each due codec frame pulls PCM
+  through `SONT_PCM_PULL`: 30 ms jitter buffer, linear resampler and
+  up/down-mix when the endpoint format differs from the negotiated codec
+  format, latency bound (backlog > 150 ms is trimmed).
+- When Windows plays nothing (or underruns) the headset receives **digital
+  silence** and the stream stays started: no Suspend/Start cycles, which is
+  where many headsets fall silent until power-cycled.
+- If the headset suspends the stream (e.g. the phone takes over on multipoint),
+  the driver resumes only when real audio (not an open silent stream) shows
+  up in the tap, with exponential back-off when Start is rejected.
+- Encode → packetize (RTP, timestamps in samples) → `BRB_L2CA_ACL_TRANSFER`
+  with a bounded timeout; per-packet tx time feeds ABR (SBC bitpool, LDAC
+  EQMID). Timer resolution is raised to 2 ms only while streaming.
 
 ### 3.4 Control plane
 

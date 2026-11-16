@@ -85,6 +85,46 @@ jobs:
           name: SonatinaAudio-${{ matrix.configuration }}-x64
           path: sonatina\driver\build\x64\${{ matrix.configuration }}\
 
+      # Ready-to-install package for the test VM: driver test-signed with a
+      # throw-away self-signed certificate (exported as SonatinaTest.cer), the
+      # native service and the install / uninstall / status scripts.
+      - name: Build native service for the VM package
+        run: powershell -ExecutionPolicy Bypass -File sonatina\service\build_service.ps1
+
+      - name: Test-sign and assemble the VM package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cfg = '${{ matrix.configuration }}'
+          $inf = Get-ChildItem "sonatina\driver\build\x64\$cfg" -Recurse -Filter SonatinaAudio.inf |
+            Where-Object { Test-Path (Join-Path $_.DirectoryName 'SonatinaAudio.cat') } | Select-Object -First 1
+          if (-not $inf) { throw 'packaged SonatinaAudio.inf/.cat not found' }
+          $out = Join-Path $env:RUNNER_TEMP 'SonatinaVM'
+          New-Item -ItemType Directory -Force -Path "$out\driver", "$out\scripts" | Out-Null
+          foreach ($f in 'SonatinaAudio.inf', 'SonatinaAudio.sys', 'SonatinaAudio.cat') {
+            Copy-Item (Join-Path $inf.DirectoryName $f) "$out\driver\"
+          }
+          $signtool = Get-ChildItem 'sonatina\driver\packages', 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe not found' }
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Sonatina Test Signing' `
+            -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(2)
+          Export-Certificate -Cert $cert -FilePath "$out\SonatinaTest.cer" | Out-Null
+          # Signing the .sys does not change its Authenticode hash, so the catalog stays valid.
+          foreach ($f in "$out\driver\SonatinaAudio.sys", "$out\driver\SonatinaAudio.cat") {
+            & $signtool.FullName sign /fd SHA256 /s My /sha1 $cert.Thumbprint $f
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $f" }
+          }
+          Copy-Item sonatina\service\build\SonatinaSvc.exe "$out\"
+          Copy-Item sonatina\scripts\install-driver.ps1, sonatina\scripts\uninstall-driver.ps1, sonatina\scripts\driver-status.ps1 "$out\scripts\"
+          Get-ChildItem $out -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload VM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonatina-VM-${{ matrix.configuration }}-x64
+          path: ${{ runner.temp }}\SonatinaVM\
+
   driver-compile-arm64:
     runs-on: windows-latest
     strategy:

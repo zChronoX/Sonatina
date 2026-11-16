@@ -1,7 +1,15 @@
 /* SonatinaAudio.sys - WDM/PortCls function driver for the Bluetooth AudioSink
- * devnode. This file is the scaffold: it initialises the BTHDDI transport and
- * the private control interface. WaveRT/topology subdevices and the streaming
- * thread are added in D2-D4 (see DESIGN.md).
+ * devnode (A2DP source).
+ *
+ *  - PortCls WaveRT + Topology subdevices expose the render endpoint
+ *    (miniport_*.cpp); the WaveRT timer copies PCM into SONT_PCM_SOURCE.
+ *  - One system thread per device (SontSignalingWorker) supervises the
+ *    Bluetooth connection: it accepts the headset's own reconnection or
+ *    connects out, runs AVDTP in both roles on PSM 0x0019 (avdtp_session.c),
+ *    and paces SBC/LDAC encoding on a media clock, streaming silence when
+ *    Windows is idle so the A2DP stream is never suspended by us.
+ *  - A private device interface (include/public.h) serves the service/GUI.
+ * See DESIGN.md.
  */
 #include <ntifs.h>
 #pragma warning(push)
@@ -20,30 +28,88 @@
 #include "codec_ldac.h"
 
 #define SONT_POOL_TAG 'anOS'
-#define SONT_AVDTP_RX_TIMEOUT_MS 5000u
-#define SONT_AVDTP_MAX_STEPS     32u
-#define SONT_AVDTP_MAX_IGNORED   8u
-#define SONT_MEDIA_WAIT_MS       50u
-#define SONT_MEDIA_L2CAP_MTU     679u
-#define SONT_MEDIA_FLUSH_TO_MS   40u
-#define SONT_MEDIA_MAX_PCM_CH    2u
-#define SONT_MEDIA_MAX_SAMPLES   128u
+
+/* Signalling / connection policy */
+#define SONT_CMD_TIMEOUT_MS          5000u   /* AVDTP response timeout */
+#define SONT_CONNECT_TIMEOUT_MS      15000u  /* outgoing L2CAP (includes paging) */
+#define SONT_REMOTE_FIRST_MS         1000u   /* let the headset configure after it connects */
+#define SONT_REHANDSHAKE_MS          1500u   /* after a remote Close/Abort */
+#define SONT_MEDIA_OPEN_WAIT_MS      3000u   /* remote Open without its transport channel */
+#define SONT_RESUME_MIN_MS           3000u   /* after a remote Suspend */
+#define SONT_RESUME_MAX_MS           60000u
+#define SONT_RECONNECT_AFTER_DROP_MS 1000u
+#define SONT_EAGER_ATTEMPTS          4u      /* outgoing attempts before waiting for audio */
+#define SONT_IDLE_POLL_MS            1000u
+
+/* Media path */
+#define SONT_MEDIA_FLUSH_TO_MS       40u
+#define SONT_MEDIA_LEAD_US           20000u  /* send-ahead */
+#define SONT_MEDIA_PREFILL_MS        30u     /* jitter buffer on the WaveRT tap */
+#define SONT_MEDIA_MAX_BUFFER_MS     150u
+#define SONT_MEDIA_MAX_BURST         24u
+#define SONT_MEDIA_MAX_WAIT_MS       10u
+#define SONT_MEDIA_MAX_TX_FAILURES   8u
+#define SONT_MEDIA_MAX_PCM_CH        2u
+#define SONT_MEDIA_MAX_SAMPLES       128u
+#define SONT_TIMER_RESOLUTION_100NS  20000u  /* 2 ms while streaming */
+#define SONT_SIGNAL_SCAN_BYTES       4096u   /* ~20 ms of 48 kHz stereo */
+#define SONT_SIGNAL_THRESHOLD        16
+
+typedef struct _SONT_MEDIA_ENGINE {
+    BOOLEAN Active;
+    BOOLEAN TimerResolutionSet;
+    BOOLEAN SentFirst;
+    UCHAR Codec;                 /* SONT_AVDTP_CODEC_SBC / _LDAC */
+    ULONG Rate;
+    ULONG Channels;
+    ULONG SamplesPerPush;        /* PCM frames per encoder call */
+    ULONG FrameSamples;          /* LDAC samples per codec frame (RTP timestamp) */
+    USHORT Mtu;
+    SONT_MEDIA_CLOCK Clock;
+    SONT_PCM_PULL Pull;
+    ULONG PullInRate;
+    ULONG PullInChannels;
+    SONT_LDAC_ENCODER *Ldac;
+    uint8_t LdacEqmid;
+    uint16_t Seq;
+    uint32_t Timestamp;
+    ULONG TxAvgUs;
+    ULONG TxMaxUs;
+    ULONG TxFailures;
+} SONT_MEDIA_ENGINE, *PSONT_MEDIA_ENGINE;
 
 typedef struct _SONT_SIGNALING_SCRATCH {
     SONT_AVDTP_SESSION session;
-    SONT_MEDIA_PACKETIZER media;
+    SONT_MEDIA_PACKETIZER media;   /* SBC packetizer */
     SONT_ABR abr;
+    SONT_MEDIA_ENGINE engine;
+    SONT_ASYNC_RX rx;              /* outstanding receive on the signalling channel */
+    KWAIT_BLOCK wait_blocks[4];
+    BOOLEAN StartRejected;
     uint8_t tx[SONT_AVDTP_MAX_PDU];
-    uint8_t rx[SONT_AVDTP_MAX_PDU];
     uint8_t rtp[1200];
     uint8_t ldac_frames[1024];
     int16_t pcm_frame[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH];
-    int16_t pcm_2x[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH * 2];
 } SONT_SIGNALING_SCRATCH, *PSONT_SIGNALING_SCRATCH;
 
 static NTSTATUS SontAddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo);
 static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources);
 static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp);
+static NTSTATUS SontCreateCloseDispatch(PDEVICE_OBJECT device, PIRP irp);
+
+/* The control interface is registered with this reference string, so opens of
+ * it reach us with FileObject->FileName == "\SonatinaCtl" and are kept apart
+ * from the KS/PortCls filter and pin opens on the same device object. */
+#define SONT_CONTROL_REF_STRING L"SonatinaCtl"
+
+/* Its address marks our control handles in FileObject->FsContext (PortCls/KS
+ * store their object header there, so the two can never be confused). */
+static LONG g_SontControlTag;
+
+static BOOLEAN SontIsControlFile(PFILE_OBJECT file)
+{
+    return (file != NULL && file->FsContext == (PVOID)&g_SontControlTag) ? TRUE : FALSE;
+}
 static NTSTATUS SontPnpDispatch(PDEVICE_OBJECT device, PIRP irp);
 static VOID SontSignalingWorker(PVOID context);
 static NTSTATUS SontStartSignalingWorker(PSONT_DEVICE_EXTENSION ext);
@@ -247,6 +313,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry_path)
         return status;
     }
     /* Private control interface + PnP teardown; everything else falls through to PortCls. */
+    driver->MajorFunction[IRP_MJ_CREATE] = SontCreateCloseDispatch;
+    driver->MajorFunction[IRP_MJ_CLEANUP] = SontCreateCloseDispatch;
+    driver->MajorFunction[IRP_MJ_CLOSE] = SontCreateCloseDispatch;
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = SontDeviceControl;
     driver->MajorFunction[IRP_MJ_PNP] = SontPnpDispatch;
     return STATUS_SUCCESS;
@@ -290,9 +359,12 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
     SontInitDefaultProfile(&ext->Profile);
     ext->State.Size = sizeof(SONATINA_STATE);
 
-    status = IoRegisterDeviceInterface(ext->PhysicalDeviceObject,
-                                       &GUID_DEVINTERFACE_SONATINA_CONTROL,
-                                       NULL, &ext->ControlInterfaceName);
+    {
+        UNICODE_STRING ref = RTL_CONSTANT_STRING(SONT_CONTROL_REF_STRING);
+        status = IoRegisterDeviceInterface(ext->PhysicalDeviceObject,
+                                           &GUID_DEVINTERFACE_SONATINA_CONTROL,
+                                           &ref, &ext->ControlInterfaceName);
+    }
     if (NT_SUCCESS(status)) {
         ext->ControlInterfaceRegistered = TRUE;
         (void)IoSetDeviceInterfaceState(&ext->ControlInterfaceName, TRUE);
@@ -340,6 +412,38 @@ static NTSTATUS SontStartDevice(PDEVICE_OBJECT device, PIRP irp,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS SontCreateCloseDispatch(PDEVICE_OBJECT device, PIRP irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+    PFILE_OBJECT file = stack->FileObject;
+    BOOLEAN ours = FALSE;
+
+    if (stack->MajorFunction == IRP_MJ_CREATE) {
+        if (file != NULL && file->FileName.Length != 0) {
+            UNICODE_STRING want = RTL_CONSTANT_STRING(SONT_CONTROL_REF_STRING);
+            UNICODE_STRING got = file->FileName;
+            if (got.Length >= sizeof(WCHAR) && got.Buffer[0] == L'\\') {
+                got.Buffer++;
+                got.Length -= sizeof(WCHAR);
+                got.MaximumLength -= sizeof(WCHAR);
+            }
+            if (RtlEqualUnicodeString(&got, &want, TRUE)) {
+                file->FsContext = (PVOID)&g_SontControlTag;
+                ours = TRUE;
+            }
+        }
+    } else {
+        ours = SontIsControlFile(file);
+    }
+    if (!ours) {
+        return PcDispatchIrp(device, irp);  /* KS filter / pin objects */
+    }
+    irp->IoStatus.Status = STATUS_SUCCESS;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
 {
     PSONT_DEVICE_EXTENSION ext = SONT_GET_EXTENSION(device);
@@ -350,6 +454,10 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
     PVOID buffer = irp->AssociatedIrp.SystemBuffer;
     KIRQL old_irql;
     NTSTATUS status = STATUS_SUCCESS;
+
+    if (!SontIsControlFile(stack->FileObject)) {
+        return PcDispatchIrp(device, irp);  /* IOCTL_KS_* on filter / pin handles */
+    }
 
     switch (code) {
     case IOCTL_SONATINA_GET_STATE:
@@ -469,7 +577,10 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
         break;
 
     default:
-        return PcDispatchIrp(device, irp);
+        /* Never hand our own file object to PortCls: its FsContext is not a KS header. */
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        irp->IoStatus.Information = 0;
+        break;
     }
 
     irp->IoStatus.Status = status;
@@ -529,60 +640,167 @@ static VOID SontBuildSbcPreference(const SONATINA_PROFILE *prof, SONT_SBC_PARAMS
     sbc->max_bitpool = (uint8_t)prof->SbcMaxBitpool;
 }
 
-static BOOLEAN SontDequeuePcmFrame(PSONT_PCM_SOURCE src,
-                                   ULONG target_rate,
-                                   ULONG target_ch,
-                                   size_t samples_per_frame,
-                                   int16_t *pcm_out,
-                                   int16_t *scratch_2x,
-                                   BOOLEAN *stream_running)
+/* ------------------------------------------------------------------ media engine
+ *
+ * Encoding is paced by SONT_MEDIA_CLOCK (QPC based), not by the arrival of PCM:
+ * when the audio engine is idle or late the headset receives digital silence,
+ * so the A2DP stream is never starved and never needs a Suspend/Start cycle.
+ */
+
+static ULONGLONG SontNowMs(PSONT_DEVICE_EXTENSION ext)
 {
-    KIRQL old_irql;
-    size_t frame_bytes;
-    size_t avail;
-    BOOLEAN got = FALSE;
-
-    if (target_ch == 0 || target_ch > SONT_MEDIA_MAX_PCM_CH ||
-        samples_per_frame == 0 || samples_per_frame > SONT_MEDIA_MAX_SAMPLES) {
-        *stream_running = FALSE;
-        return FALSE;
-    }
-    frame_bytes = samples_per_frame * target_ch * sizeof(int16_t);
-
-    KeAcquireSpinLock(&src->Lock, &old_irql);
-    *stream_running = src->StreamRunning;
-    avail = SontPcmRingAvailable(&src->Ring);
-    if (src->StreamChannels == target_ch && src->StreamSampleRate == target_rate &&
-        avail >= frame_bytes) {
-        got = (SontPcmRingRead(&src->Ring, (uint8_t *)pcm_out, frame_bytes) == frame_bytes);
-    } else if (src->StreamChannels == target_ch &&
-               src->StreamSampleRate == target_rate * 2u &&
-               avail >= frame_bytes * 2u) {
-        if (SontPcmRingRead(&src->Ring, (uint8_t *)scratch_2x, frame_bytes * 2u) ==
-            frame_bytes * 2u) {
-            size_t i;
-            for (i = 0; i < samples_per_frame; i++) {
-                size_t c;
-                for (c = 0; c < target_ch; c++) {
-                    pcm_out[i * target_ch + c] = scratch_2x[(i * 2u) * target_ch + c];
-                }
-            }
-            got = TRUE;
-        }
-    }
-    if (SontPcmRingAvailable(&src->Ring) < frame_bytes) {
-        KeClearEvent(&src->DataEvent);
-    }
-    KeReleaseSpinLock(&src->Lock, old_irql);
-    return got;
+    return SontQueryTimestampUs(ext) / 1000ULL;
 }
 
-static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
-                                    L2CAP_CHANNEL_HANDLE media_ch,
-                                    const SONT_SBC_PARAMS *sbc,
-                                    PSONT_SIGNALING_SCRATCH scratch,
-                                    size_t rtp_len)
+static USHORT SontClampMtu(USHORT mtu, size_t cap)
 {
+    if (mtu < 48u) {
+        mtu = 672u;
+    }
+    if ((size_t)mtu > cap) {
+        mtu = (USHORT)cap;
+    }
+    return mtu;
+}
+
+static VOID SontMediaStop(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
+{
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    KIRQL old_irql;
+
+    if (!e->Active) {
+        return;
+    }
+    if (e->Codec == SONT_AVDTP_CODEC_SBC) {
+        SontMediaDestroy(&scratch->media);
+    }
+    if (e->Ldac != NULL) {
+        SontLdacEncoderDestroy(e->Ldac);
+        e->Ldac = NULL;
+    }
+    if (e->TimerResolutionSet) {
+        (void)ExSetTimerResolution(0, FALSE);
+    }
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    ext->State.Opened = FALSE;
+    SontTraceLogLocked(ext, SonatinaEventMediaStop, (ULONG)e->Codec, e->Pull.underruns);
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+    RtlZeroMemory(e, sizeof(*e));
+}
+
+static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch,
+                               USHORT mtu)
+{
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    const SONT_CAPABILITIES *cfg = &scratch->session.negotiated;
+    KIRQL old_irql;
+
+    SontMediaStop(ext, scratch);
+    mtu = SontClampMtu(mtu, sizeof(scratch->rtp));
+
+    if (cfg->codec == SONT_AVDTP_CODEC_SBC) {
+        const SONT_SBC_PARAMS *sbc = &cfg->sbc;
+        e->Rate = sbc->sampling;
+        e->Channels = SontSbcChannels(sbc);
+        e->SamplesPerPush = SontSbcSamplesPerFrame(sbc);
+        if (e->SamplesPerPush == 0 || e->SamplesPerPush > SONT_MEDIA_MAX_SAMPLES ||
+            !SontMediaInit(&scratch->media, sbc, sbc->max_bitpool, mtu, 0x534F4E54u)) {
+            RtlZeroMemory(e, sizeof(*e));
+            return STATUS_UNSUCCESSFUL;
+        }
+        SontAbrInit(&scratch->abr, sbc->min_bitpool, sbc->max_bitpool);
+    } else if (cfg->codec == SONT_AVDTP_CODEC_LDAC) {
+        USHORT ldac_mtu = (USHORT)((mtu > SONT_RTP_HEADER_LEN + 1u) ? mtu - SONT_RTP_HEADER_LEN - 1u : 0u);
+        if (ldac_mtu < 679u) {
+            DbgPrint("Sonatina: headset MTU %u is small for LDAC\n", (unsigned)mtu);
+            ldac_mtu = 679u;
+        }
+        if (ldac_mtu > 1023u) {
+            ldac_mtu = 1023u;
+        }
+        e->Rate = cfg->ldac.sampling;
+        e->Channels = SontLdacChannels(&cfg->ldac);
+        e->SamplesPerPush = SONT_LDAC_PCM_SAMPLES_PER_PUSH;
+        e->FrameSamples = (cfg->ldac.sampling >= 88200u) ? 256u : 128u;
+        e->Ldac = SontLdacEncoderCreate(&cfg->ldac, ldac_mtu);
+        if (e->Ldac == NULL) {
+            RtlZeroMemory(e, sizeof(*e));
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        e->LdacEqmid = cfg->ldac.eqmid;
+    } else {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (e->Channels == 0 || e->Channels > SONT_MEDIA_MAX_PCM_CH) {
+        SontMediaStop(ext, scratch);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    e->Codec = cfg->codec;
+    e->Mtu = mtu;
+    e->PullInRate = 0;  /* forces SontPcmPullInit on the first pull */
+    SontMediaClockStart(&e->Clock, SontQueryTimestampUs(ext), e->Rate, SONT_MEDIA_LEAD_US);
+    (void)ExSetTimerResolution(SONT_TIMER_RESOLUTION_100NS, TRUE);
+    e->TimerResolutionSet = TRUE;
+    e->Active = TRUE;
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    ext->State.Opened = TRUE;
+    ext->State.TxFlushTO = SONT_MEDIA_FLUSH_TO_MS;
+    ext->State.NegotiatedSampling = e->Rate;
+    ext->State.NegotiatedChannels = e->Channels;
+    if (e->Codec == SONT_AVDTP_CODEC_LDAC) {
+        ext->State.Codec = SonatinaCodecLdac;
+        ext->State.CurrentBitpool = 0;
+        ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(e->Rate, e->LdacEqmid);
+    } else {
+        ext->State.Codec = SonatinaCodecSbc;
+        ext->State.CurrentBitpool = cfg->sbc.max_bitpool;
+        ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(&cfg->sbc, cfg->sbc.max_bitpool);
+    }
+    SontTraceLogLocked(ext, SonatinaEventMediaStart, e->Rate, (ULONG)mtu);
+    KeReleaseSpinLock(&ext->Lock, old_irql);
+
+    DbgPrint("Sonatina: streaming %s %lu Hz, %lu ch, MTU %u\n",
+             (e->Codec == SONT_AVDTP_CODEC_LDAC) ? "LDAC" : "SBC",
+             e->Rate, e->Channels, (unsigned)mtu);
+    return STATUS_SUCCESS;
+}
+
+/* One codec push worth of PCM from the WaveRT tap (or silence). */
+static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
+{
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    PSONT_PCM_SOURCE src = &ext->PcmSource;
+    size_t frames = e->SamplesPerPush;
+    KIRQL old_irql;
+
+    KeAcquireSpinLock(&src->Lock, &old_irql);
+    if (src->BackingBuffer != NULL && src->StreamRunning &&
+        src->StreamSampleRate != 0 && src->StreamChannels != 0) {
+        if (src->StreamSampleRate != e->PullInRate || src->StreamChannels != e->PullInChannels) {
+            SontPcmPullInit(&e->Pull, src->StreamSampleRate, src->StreamChannels,
+                            e->Rate, e->Channels,
+                            SONT_MEDIA_PREFILL_MS, SONT_MEDIA_MAX_BUFFER_MS);
+            e->PullInRate = src->StreamSampleRate;
+            e->PullInChannels = src->StreamChannels;
+        }
+        (void)SontPcmPull(&e->Pull, &src->Ring, scratch->pcm_frame, frames);
+        if (SontPcmRingAvailable(&src->Ring) == 0) {
+            KeClearEvent(&src->DataEvent);
+        }
+    } else {
+        RtlZeroMemory(scratch->pcm_frame, frames * e->Channels * sizeof(int16_t));
+        e->Pull.playing = false;  /* refill the jitter buffer when audio resumes */
+    }
+    KeReleaseSpinLock(&src->Lock, old_irql);
+}
+
+static NTSTATUS SontSendSbcPacket(PSONT_DEVICE_EXTENSION ext,
+                                  PSONT_SIGNALING_SCRATCH scratch,
+                                  size_t rtp_len)
+{
+    const SONT_SBC_PARAMS *sbc = &scratch->session.negotiated.sbc;
     LARGE_INTEGER freq;
     LARGE_INTEGER t0;
     LARGE_INTEGER t1;
@@ -594,22 +812,18 @@ static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
     KIRQL old_irql;
 
     t0 = KeQueryPerformanceCounter(&freq);
-    status = SontTransportSend(&ext->Transport, media_ch, scratch->rtp, (ULONG)rtp_len);
+    status = SontTransportSend(&ext->Transport, ext->Transport.MediaChannel,
+                               scratch->rtp, (ULONG)rtp_len);
     t1 = KeQueryPerformanceCounter(NULL);
-
     if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
         tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
     }
 
     old_bp = scratch->abr.current_bitpool;
-    abr_changed = SontAbrOnPacketSent(&scratch->abr,
-                                      (uint32_t)tx_us,
-                                      NT_SUCCESS(status),
-                                      &new_bp);
-    if (abr_changed) {
-        if (!SontMediaSetBitpool(&scratch->media, new_bp)) {
-            abr_changed = 0;
-        }
+    abr_changed = SontAbrOnPacketSent(&scratch->abr, (uint32_t)tx_us,
+                                      NT_SUCCESS(status), &new_bp);
+    if (abr_changed && !SontMediaSetBitpool(&scratch->media, new_bp)) {
+        abr_changed = 0;
     }
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
@@ -626,8 +840,7 @@ static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
     ext->State.AbrAdjustments = scratch->abr.abr_adjustments;
     ext->State.CurrentBitpool = scratch->media.bitpool;
     ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(sbc, scratch->media.bitpool);
-    ext->State.DelayMs = (scratch->abr.tx_avg_us + 500u) / 1000u;
-
+    ext->State.LostPackets = scratch->engine.Pull.underruns;
     if (!NT_SUCCESS(status) || tx_us >= scratch->abr.tx_critical_us) {
         SontTraceLogLocked(ext, SonatinaEventTxCritical, tx_us, (ULONG)status);
     }
@@ -638,418 +851,585 @@ static NTSTATUS SontSendMediaPacket(PSONT_DEVICE_EXTENSION ext,
     return status;
 }
 
-static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
-                                    L2CAP_CHANNEL_HANDLE media_ch,
-                                    const SONT_SBC_PARAMS *sbc,
-                                    PSONT_SIGNALING_SCRATCH scratch)
+static NTSTATUS SontPushLdac(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
 {
-    unsigned samples_per_frame = SontSbcSamplesPerFrame(sbc);
-    unsigned channels = SontSbcChannels(sbc);
-    PVOID wait_objs[2];
-    LARGE_INTEGER wait_due;
-    NTSTATUS status = STATUS_SUCCESS;
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    SONT_RTP_HEADER hdr;
+    size_t ldac_len = 0;
+    size_t payload_len;
+    uint8_t frame_num = 0;
+    LARGE_INTEGER freq;
+    LARGE_INTEGER t0;
+    LARGE_INTEGER t1;
+    ULONG tx_us = 0;
+    NTSTATUS status;
+    KIRQL old_irql;
 
-    if (!SontMediaInit(&scratch->media, sbc, sbc->max_bitpool,
-                       SONT_MEDIA_L2CAP_MTU, 0x534F4E54u)) {
-        SontRecordSignalingError(ext);
+    if (SontLdacEncode(e->Ldac, scratch->pcm_frame, SONT_LDAC_PCM_SAMPLES_PER_PUSH,
+                       scratch->ldac_frames, sizeof(scratch->ldac_frames),
+                       &ldac_len, &frame_num) != 0) {
         return STATUS_UNSUCCESSFUL;
     }
-    SontAbrInit(&scratch->abr, sbc->min_bitpool, sbc->max_bitpool);
-    SontTraceLog(ext, SonatinaEventMediaStart, (ULONG)sbc->sampling, (ULONG)sbc->max_bitpool);
-
-    wait_objs[0] = &ext->PcmSource.DataEvent;
-    wait_objs[1] = &ext->StopEvent;
-    wait_due.QuadPart = -(LONGLONG)SONT_MEDIA_WAIT_MS * 10000LL;
-
-    while (KeReadStateEvent(&ext->StopEvent) == 0 &&
-           ext->Transport.MediaChannel != NULL) {
-        BOOLEAN stream_running = FALSE;
-
-        if (SontDequeuePcmFrame(&ext->PcmSource,
-                                (ULONG)sbc->sampling,
-                                (ULONG)channels,
-                                (size_t)samples_per_frame,
-                                scratch->pcm_frame,
-                                scratch->pcm_2x,
-                                &stream_running)) {
-            size_t rtp_len = 0;
-            int step = SontMediaPushPcmFrame(&scratch->media,
-                                             scratch->pcm_frame,
-                                             (size_t)samples_per_frame,
-                                             scratch->rtp,
-                                             sizeof(scratch->rtp),
-                                             &rtp_len);
-            if (step == 1) {
-                status = SontSendMediaPacket(ext, media_ch, sbc, scratch, rtp_len);
-                if (!NT_SUCCESS(status)) {
-                    break;
-                }
-            } else if (step < 0) {
-                SontRecordSignalingError(ext);
-                status = STATUS_UNSUCCESSFUL;
-                break;
-            }
-            continue;
-        }
-
-        if (!stream_running && scratch->media.frames_pending > 0) {
-            size_t rtp_len = 0;
-            if (SontMediaFlush(&scratch->media, scratch->rtp, sizeof(scratch->rtp), &rtp_len) == 1) {
-                status = SontSendMediaPacket(ext, media_ch, sbc, scratch, rtp_len);
-                if (!NT_SUCCESS(status)) {
-                    break;
-                }
-            }
-        }
-
-        if (KeWaitForMultipleObjects(2, wait_objs, WaitAny, Executive,
-                                     KernelMode, FALSE, &wait_due, NULL) == STATUS_WAIT_1) {
-            status = STATUS_CANCELLED;
-            break;
-        }
+    if (ldac_len == 0 || frame_num == 0) {
+        return STATUS_SUCCESS;  /* libldac is buffering */
     }
 
-    SontTraceLog(ext, SonatinaEventMediaStop, (ULONG)status, (ULONG)scratch->abr.current_bitpool);
-    SontMediaDestroy(&scratch->media);
+    SONT_MEMSET(&hdr, 0, sizeof(hdr));
+    hdr.version = 2;
+    hdr.marker = !e->SentFirst;
+    hdr.payload_type = SONT_RTP_PAYLOAD_TYPE;
+    hdr.sequence = e->Seq;
+    hdr.timestamp = e->Timestamp;   /* in samples, like SBC */
+    hdr.ssrc = 0x534F4E54u;
+    if (SontRtpEncodeHeader(&hdr, scratch->rtp) != SONT_RTP_HEADER_LEN) {
+        return STATUS_UNSUCCESSFUL;
+    }
+    payload_len = SontRtpLdacPayload(scratch->ldac_frames, ldac_len, frame_num,
+                                     scratch->rtp + SONT_RTP_HEADER_LEN,
+                                     sizeof(scratch->rtp) - SONT_RTP_HEADER_LEN);
+    if (payload_len == 0) {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    t0 = KeQueryPerformanceCounter(&freq);
+    status = SontTransportSend(&ext->Transport, ext->Transport.MediaChannel, scratch->rtp,
+                               (ULONG)(SONT_RTP_HEADER_LEN + payload_len));
+    t1 = KeQueryPerformanceCounter(NULL);
+    if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
+        tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
+    }
+    if (tx_us > e->TxMaxUs) {
+        e->TxMaxUs = tx_us;
+    }
+    e->TxAvgUs = (e->TxAvgUs == 0u) ? tx_us : ((e->TxAvgUs * 7u + tx_us) / 8u);
+    e->Seq = (uint16_t)(e->Seq + 1u);
+    e->Timestamp += (uint32_t)frame_num * e->FrameSamples;
+    e->SentFirst = TRUE;
+
+    /* Simple LDAC ABR: step quality down on a failed or very slow send. */
+    if ((!NT_SUCCESS(status) || tx_us >= SONT_ABR_DEFAULT_CRITICAL_US) &&
+        e->LdacEqmid < SONT_LDAC_EQMID_MQ &&
+        SontLdacSetEqmid(e->Ldac, (uint8_t)(e->LdacEqmid + 1u)) == 0) {
+        SontTraceLog(ext, SonatinaEventAbrStep, e->LdacEqmid, (ULONG)e->LdacEqmid + 1u);
+        e->LdacEqmid++;
+    }
+
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    if (NT_SUCCESS(status)) {
+        ext->State.Packets++;
+        ext->State.TxTimeUs = tx_us;
+    } else {
+        ext->State.Errors++;
+    }
+    ext->State.TxTimeMaxUs = e->TxMaxUs;
+    ext->State.TxTimeAvgUs = e->TxAvgUs;
+    ext->State.LostPackets = e->Pull.underruns;
+    ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(e->Rate, e->LdacEqmid);
+    KeReleaseSpinLock(&ext->Lock, old_irql);
     return status;
 }
 
-static NTSTATUS SontRunLdacMediaLoop(PSONT_DEVICE_EXTENSION ext,
-                                      L2CAP_CHANNEL_HANDLE media_ch,
-                                      const SONT_LDAC_PARAMS *ldac,
-                                      PSONT_SIGNALING_SCRATCH scratch)
+/* Encodes and sends every codec frame that is due now. */
+static NTSTATUS SontMediaTick(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
 {
-    SONT_LDAC_ENCODER *encoder;
-    unsigned channels = SontLdacChannels(ldac);
-    unsigned spf = (ldac->sampling >= 88200u) ? 256u : 128u;
-    PVOID wait_objs[2];
-    LARGE_INTEGER wait_due;
-    uint16_t seq = 0;
-    uint32_t ts = 0;
-    BOOLEAN sent_first = FALSE;
-    uint32_t tx_avg_us = 0;
-    uint32_t tx_max_us = 0;
-    uint8_t cur_eqmid = ldac->eqmid;
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    uint32_t due;
+    uint32_t i;
     NTSTATUS status = STATUS_SUCCESS;
 
-    encoder = SontLdacEncoderCreate(ldac, SONT_MEDIA_L2CAP_MTU);
-    if (encoder == NULL) {
-        SontRecordSignalingError(ext);
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (!e->Active || ext->Transport.MediaChannel == NULL) {
+        return STATUS_SUCCESS;
     }
-    SontTraceLog(ext, SonatinaEventMediaStart, (ULONG)ldac->sampling, (ULONG)cur_eqmid);
-
-    wait_objs[0] = &ext->PcmSource.DataEvent;
-    wait_objs[1] = &ext->StopEvent;
-    wait_due.QuadPart = -(LONGLONG)SONT_MEDIA_WAIT_MS * 10000LL;
-
-    while (KeReadStateEvent(&ext->StopEvent) == 0 &&
-           ext->Transport.MediaChannel != NULL) {
-        BOOLEAN stream_running = FALSE;
-
-        if (SontDequeuePcmFrame(&ext->PcmSource,
-                                (ULONG)ldac->sampling,
-                                (ULONG)channels,
-                                SONT_LDAC_PCM_SAMPLES_PER_PUSH,
-                                scratch->pcm_frame,
-                                scratch->pcm_2x,
-                                &stream_running)) {
-            size_t ldac_len = 0;
-            uint8_t frame_num = 0;
-            if (SontLdacEncode(encoder,
-                               scratch->pcm_frame,
-                               SONT_LDAC_PCM_SAMPLES_PER_PUSH,
-                               scratch->ldac_frames,
-                               sizeof(scratch->ldac_frames),
-                               &ldac_len,
-                               &frame_num) != 0) {
-                SontRecordSignalingError(ext);
-                status = STATUS_UNSUCCESSFUL;
-                break;
+    due = SontMediaClockFramesDue(&e->Clock, SontQueryTimestampUs(ext),
+                                  e->SamplesPerPush, SONT_MEDIA_MAX_BURST);
+    for (i = 0; i < due; i++) {
+        SontMediaPullPcm(ext, scratch);
+        if (e->Codec == SONT_AVDTP_CODEC_SBC) {
+            size_t rtp_len = 0;
+            int step = SontMediaPushPcmFrame(&scratch->media, scratch->pcm_frame,
+                                             e->SamplesPerPush, scratch->rtp,
+                                             sizeof(scratch->rtp), &rtp_len);
+            if (step < 0) {
+                return STATUS_UNSUCCESSFUL;
             }
-            if (ldac_len > 0 && frame_num > 0) {
-                SONT_RTP_HEADER hdr;
-                size_t payload_len;
-                LARGE_INTEGER freq;
-                LARGE_INTEGER t0;
-                LARGE_INTEGER t1;
-                ULONG tx_us = 0;
-                KIRQL old_irql;
+            status = (step == 1) ? SontSendSbcPacket(ext, scratch, rtp_len) : STATUS_SUCCESS;
+        } else {
+            status = SontPushLdac(ext, scratch);
+        }
+        SontMediaClockConsume(&e->Clock, e->SamplesPerPush);
+        if (NT_SUCCESS(status)) {
+            e->TxFailures = 0;
+        } else if (++e->TxFailures >= SONT_MEDIA_MAX_TX_FAILURES) {
+            return status;  /* the link is gone */
+        }
+    }
+    return STATUS_SUCCESS;
+}
 
-                SONT_MEMSET(&hdr, 0, sizeof(hdr));
-                hdr.version = 2;
-                hdr.marker = !sent_first;
-                hdr.payload_type = SONT_RTP_PAYLOAD_TYPE;
-                hdr.sequence = seq;
-                hdr.timestamp = ts;
-                hdr.ssrc = 0x534F4E54u;
+/* ------------------------------------------------------------------ signalling */
 
-                if (SontRtpEncodeHeader(&hdr, scratch->rtp) != SONT_RTP_HEADER_LEN) {
-                    status = STATUS_UNSUCCESSFUL;
-                    break;
+/* Sends what the session produced and runs any follow-up action. */
+static NTSTATUS SontHandleStep(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch,
+                               SONT_AVDTP_STEP_RESULT step, size_t tx_len,
+                               ULONGLONG *cmd_deadline)
+{
+    PSONT_TRANSPORT t = &ext->Transport;
+    PSONT_AVDTP_SESSION s = &scratch->session;
+    NTSTATUS status;
+
+    for (;;) {
+        switch (step) {
+        case SONT_AVDTP_STEP_SEND:
+        case SONT_AVDTP_STEP_REPLY:
+            if (tx_len != 0) {
+                status = SontTransportSend(t, t->SignalingChannel, scratch->tx, (ULONG)tx_len);
+                if (!NT_SUCCESS(status)) {
+                    return status;
                 }
-                payload_len = SontRtpLdacPayload(scratch->ldac_frames,
-                                                 ldac_len,
-                                                 frame_num,
-                                                 scratch->rtp + SONT_RTP_HEADER_LEN,
-                                                 sizeof(scratch->rtp) - SONT_RTP_HEADER_LEN);
-                if (payload_len == 0) {
-                    status = STATUS_UNSUCCESSFUL;
-                    break;
-                }
+            }
+            if (step == SONT_AVDTP_STEP_SEND) {
+                *cmd_deadline = SontNowMs(ext) + SONT_CMD_TIMEOUT_MS;
+            }
+            SontTraceLog(ext, SonatinaEventAvdtpState, (ULONG)s->state, (ULONG)s->selected_acp_seid);
+            return STATUS_SUCCESS;
 
-                t0 = KeQueryPerformanceCounter(&freq);
-                status = SontTransportSend(&ext->Transport,
-                                           media_ch,
-                                           scratch->rtp,
-                                           (ULONG)(SONT_RTP_HEADER_LEN + payload_len));
-                t1 = KeQueryPerformanceCounter(NULL);
+        case SONT_AVDTP_STEP_OPEN_MEDIA: {
+            USHORT mtu = 0;
+            /* AVDTP transport channel: same PSM as signalling, opened before Start. */
+            status = SontTransportOpen(t, SONT_L2CAP_PSM_AVDTP, SONT_MEDIA_FLUSH_TO_MS,
+                                       &ext->StopEvent, SONT_CONNECT_TIMEOUT_MS,
+                                       &t->MediaChannel, &mtu);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            t->MediaMtu = mtu;
+            step = SontAvdtpSessionMediaReady(s, scratch->tx, sizeof(scratch->tx), &tx_len);
+            continue;
+        }
 
-                if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
-                    tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
-                }
-                if (tx_us > tx_max_us) {
-                    tx_max_us = tx_us;
-                }
-                tx_avg_us = (tx_avg_us == 0u) ? tx_us : ((tx_avg_us * 7u + tx_us) / 8u);
+        case SONT_AVDTP_STEP_ERROR:
+            SontRecordSignalingError(ext);
+            if (s->state == SONT_AVDTP_STATE_FAILED) {
+                DbgPrint("Sonatina: AVDTP procedure failed (err=0x%02X)\n", s->last_error);
+                return STATUS_UNSUCCESSFUL;
+            }
+            scratch->StartRejected = TRUE;  /* stream stays open; retried later */
+            return STATUS_SUCCESS;
 
-                seq = (uint16_t)(seq + 1u);
-                ts += (uint32_t)(((uint64_t)frame_num * (uint64_t)spf * (uint64_t)SONT_RTP_CLOCK) /
-                                 (uint64_t)ldac->sampling);
-                sent_first = TRUE;
+        default:
+            return STATUS_SUCCESS;
+        }
+    }
+}
 
-                if ((!NT_SUCCESS(status) || tx_us >= SONT_ABR_DEFAULT_CRITICAL_US) &&
-                    cur_eqmid < SONT_LDAC_EQMID_MQ) {
-                    uint8_t next_eqmid = (uint8_t)(cur_eqmid + 1u);
-                    if (SontLdacSetEqmid(encoder, next_eqmid) == 0) {
-                        SontTraceLog(ext, SonatinaEventAbrStep, cur_eqmid, next_eqmid);
-                        cur_eqmid = next_eqmid;
-                    }
-                }
+static VOID SontInitSessionFromProfile(PSONT_DEVICE_EXTENSION ext, PSONT_AVDTP_SESSION s)
+{
+    SONATINA_PROFILE prof;
+    SONT_SBC_PARAMS pref_sbc;
+    uint8_t pref_codec;
+    KIRQL old_irql;
 
-                KeAcquireSpinLock(&ext->Lock, &old_irql);
-                if (NT_SUCCESS(status)) {
-                    ext->State.Packets++;
-                    ext->State.TxTimeUs = tx_us;
-                } else {
-                    ext->State.Errors++;
-                }
-                ext->State.TxTimeMaxUs = tx_max_us;
-                ext->State.TxTimeAvgUs = tx_avg_us;
-                ext->State.DelayMs = (tx_avg_us + 500u) / 1000u;
-                ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(ldac->sampling, cur_eqmid);
-                KeReleaseSpinLock(&ext->Lock, old_irql);
+    KeAcquireSpinLock(&ext->Lock, &old_irql);
+    prof = ext->Profile;
+    KeReleaseSpinLock(&ext->Lock, old_irql);
 
+    SontBuildSbcPreference(&prof, &pref_sbc);
+    /* Raw PCM is not an A2DP codec on a real link: SBC is the mandatory one. */
+    pref_codec = (prof.Codec == SonatinaCodecLdac) ? SONT_AVDTP_CODEC_LDAC : SONT_AVDTP_CODEC_SBC;
+    SontAvdtpSessionInit(s, 1, pref_codec, &pref_sbc);
+    if (pref_codec == SONT_AVDTP_CODEC_LDAC) {
+        SONT_LDAC_PARAMS pref_ldac;
+        pref_ldac.sampling = prof.LdacSampling;
+        pref_ldac.channel_mode = (uint8_t)prof.LdacChannelMode;
+        pref_ldac.eqmid = (uint8_t)prof.LdacEqmid;
+        SontAvdtpSessionSetLdacPreference(s, &pref_ldac);
+    }
+    SontAvdtpSessionSetLocalCaps(s, (uint8_t)prof.SbcMaxBitpool,
+                                 (pref_codec == SONT_AVDTP_CODEC_LDAC) ? 0x3Cu : 0u);
+}
+
+/* An open WaveRT stream is not enough (browsers and chat apps keep a silent
+ * stream running): look for actual signal in the newest ~20 ms of the tap. */
+static BOOLEAN SontPcmHasRealAudio(PSONT_DEVICE_EXTENSION ext)
+{
+    PSONT_PCM_SOURCE src = &ext->PcmSource;
+    BOOLEAN active = FALSE;
+    KIRQL old_irql;
+
+    KeAcquireSpinLock(&src->Lock, &old_irql);
+    if (src->StreamRunning) {
+        active = SontPcmRingHasSignal(&src->Ring, SONT_SIGNAL_SCAN_BYTES, SONT_SIGNAL_THRESHOLD)
+                     ? TRUE : FALSE;
+    }
+    KeReleaseSpinLock(&src->Lock, old_irql);
+    return active;
+}
+
+static ULONGLONG SontMinDeadline(ULONGLONG wait_ms, ULONGLONG now, ULONGLONG at)
+{
+    ULONGLONG left;
+    if (at == 0) {
+        return wait_ms;
+    }
+    left = (at > now) ? (at - now) : 0;
+    return (left < wait_ms) ? left : wait_ms;
+}
+
+/* Runs one signalling connection until it drops, fails or the worker stops.
+ * The signalling channel is already open in ext->Transport.SignalingChannel. */
+static NTSTATUS SontRunConnection(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch,
+                                  BOOLEAN remote_first, BOOLEAN *streamed)
+{
+    PSONT_TRANSPORT t = &ext->Transport;
+    PSONT_AVDTP_SESSION s = &scratch->session;
+    PVOID objs[4];
+    ULONGLONG now;
+    ULONGLONG hs_at;
+    ULONGLONG cmd_deadline = 0;
+    ULONGLONG resume_at = 0;
+    ULONGLONG media_wait_at = 0;
+    ULONGLONG resume_backoff = SONT_RESUME_MIN_MS;
+    SONT_AVDTP_STEP_RESULT step;
+    size_t tx_len = 0;
+    NTSTATUS status;
+
+    *streamed = FALSE;
+    scratch->StartRejected = FALSE;
+    SontInitSessionFromProfile(ext, s);
+    (void)SontTransportTakeLost(t);
+
+    status = SontAsyncRxStart(&scratch->rx, t->SignalingChannel);
+    if (status != STATUS_PENDING) {
+        SontTransportClose(t, &t->SignalingChannel);
+        return NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
+    }
+    status = STATUS_SUCCESS;
+
+    /* After an incoming connection the headset usually drives the setup:
+     * give it a moment before starting our own Discover. */
+    now = SontNowMs(ext);
+    hs_at = remote_first ? now + SONT_REMOTE_FIRST_MS : now;
+
+    objs[0] = &ext->StopEvent;
+    objs[1] = &scratch->rx.Done;
+    objs[2] = &t->IncomingEvent;
+    objs[3] = &t->LinkEvent;
+
+    for (;;) {
+        ULONGLONG wait_ms = SONT_IDLE_POLL_MS;
+        LARGE_INTEGER due;
+        NTSTATUS ws;
+        uint32_t ev;
+
+        /* ---- timers */
+        now = SontNowMs(ext);
+        if (hs_at != 0 && now >= hs_at) {
+            hs_at = 0;
+            if (!SontAvdtpSessionHasStream(s) && !SontAvdtpSessionIsWaiting(s)) {
+                step = SontAvdtpSessionStartHandshake(s, scratch->tx, sizeof(scratch->tx), &tx_len);
+                status = SontHandleStep(ext, scratch, step, tx_len, &cmd_deadline);
                 if (!NT_SUCCESS(status)) {
                     break;
                 }
             }
-            continue;
+        }
+        if (SontAvdtpSessionIsWaiting(s) && cmd_deadline != 0 && now >= cmd_deadline) {
+            DbgPrint("Sonatina: AVDTP signal 0x%02X timed out\n", s->pending_signal);
+            SontAvdtpSessionOnTimeout(s);
+            status = STATUS_IO_TIMEOUT;
+            break;
+        }
+        if (media_wait_at != 0 && now >= media_wait_at) {
+            media_wait_at = 0;
+            if (s->state == SONT_AVDTP_STATE_OPEN_WAIT_MEDIA && t->MediaChannel == NULL) {
+                /* The headset sent Open but never opened the transport: do it ourselves. */
+                status = SontHandleStep(ext, scratch, SONT_AVDTP_STEP_OPEN_MEDIA, 0, &cmd_deadline);
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+            }
+        }
+        if (scratch->StartRejected) {
+            scratch->StartRejected = FALSE;
+            resume_at = now + resume_backoff;
+            resume_backoff = (resume_backoff * 2 < SONT_RESUME_MAX_MS) ? resume_backoff * 2
+                                                                      : SONT_RESUME_MAX_MS;
+        }
+        if (resume_at != 0 && now >= resume_at) {
+            resume_at = 0;
+            if (s->state == SONT_AVDTP_STATE_OPEN_PAUSED && s->media_open &&
+                !SontAvdtpSessionIsWaiting(s)) {
+                if (SontPcmHasRealAudio(ext)) {
+                    /* Windows is really playing again: take the headset back. */
+                    step = SontAvdtpSessionResume(s, scratch->tx, sizeof(scratch->tx), &tx_len);
+                    status = SontHandleStep(ext, scratch, step, tx_len, &cmd_deadline);
+                    if (!NT_SUCCESS(status)) {
+                        break;
+                    }
+                } else {
+                    resume_at = now + SONT_IDLE_POLL_MS;
+                }
+            }
         }
 
-        if (KeWaitForMultipleObjects(2, wait_objs, WaitAny, Executive,
-                                     KernelMode, FALSE, &wait_due, NULL) == STATUS_WAIT_1) {
+        /* ---- media */
+        if (scratch->engine.Active && s->state == SONT_AVDTP_STATE_STREAMING) {
+            status = SontMediaTick(ext, scratch);
+            if (!NT_SUCCESS(status)) {
+                DbgPrint("Sonatina: media send failing (0x%08X), reconnecting\n", status);
+                break;
+            }
+            now = SontNowMs(ext);
+            wait_ms = SontMediaClockUsUntilNext(&scratch->engine.Clock, SontQueryTimestampUs(ext),
+                                                scratch->engine.SamplesPerPush) / 1000u;
+            if (wait_ms > SONT_MEDIA_MAX_WAIT_MS) {
+                wait_ms = SONT_MEDIA_MAX_WAIT_MS;
+            }
+        }
+        wait_ms = SontMinDeadline(wait_ms, now, hs_at);
+        wait_ms = SontMinDeadline(wait_ms, now, SontAvdtpSessionIsWaiting(s) ? cmd_deadline : 0);
+        wait_ms = SontMinDeadline(wait_ms, now, resume_at);
+        wait_ms = SontMinDeadline(wait_ms, now, media_wait_at);
+
+        /* ---- wait */
+        due.QuadPart = -(LONGLONG)wait_ms * 10000LL;
+        ws = KeWaitForMultipleObjects(4, objs, WaitAny, Executive, KernelMode, FALSE,
+                                      &due, scratch->wait_blocks);
+        if (ws == STATUS_WAIT_0) {
             status = STATUS_CANCELLED;
+            break;
+        }
+
+        /* ---- a channel dropped */
+        if (KeReadStateEvent(&t->LinkEvent) != 0) {
+            LONG lost = SontTransportTakeLost(t);
+            if ((lost & SONT_LOST_SIGNALING) != 0) {
+                status = STATUS_CONNECTION_DISCONNECTED;
+                break;
+            }
+            if ((lost & SONT_LOST_MEDIA) != 0) {
+                SontMediaStop(ext, scratch);
+                SontTransportClose(t, &t->MediaChannel);
+                if (SontAvdtpSessionHasStream(s)) {
+                    status = STATUS_CONNECTION_DISCONNECTED;
+                    break;
+                }
+            }
+        }
+
+        /* ---- incoming channel: the headset's transport channel after its Open */
+        if (KeReadStateEvent(&t->IncomingEvent) != 0) {
+            SONT_INCOMING inc;
+            while (SontTransportTakeIncoming(t, &inc)) {
+                if (inc.Psm == SONT_L2CAP_PSM_AVDTP && t->MediaChannel == NULL &&
+                    s->state == SONT_AVDTP_STATE_OPEN_WAIT_MEDIA) {
+                    USHORT mtu = 0;
+                    status = SontTransportAccept(t, &inc, SONT_MEDIA_FLUSH_TO_MS,
+                                                 &t->MediaChannel, &mtu);
+                    if (!NT_SUCCESS(status)) {
+                        break;
+                    }
+                    t->MediaMtu = mtu;
+                    media_wait_at = 0;
+                    step = SontAvdtpSessionMediaReady(s, scratch->tx, sizeof(scratch->tx), &tx_len);
+                    status = SontHandleStep(ext, scratch, step, tx_len, &cmd_deadline);
+                    if (!NT_SUCCESS(status)) {
+                        break;
+                    }
+                } else {
+                    SontTransportRefuse(t, &inc);
+                }
+            }
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+        }
+
+        /* ---- signalling PDU */
+        if (KeReadStateEvent(&scratch->rx.Done) != 0) {
+            SontAsyncRxComplete(&scratch->rx);
+            if (!NT_SUCCESS(scratch->rx.Status)) {
+                status = scratch->rx.Status;
+                break;
+            }
+            if (scratch->rx.Length > 0) {
+                step = SontAvdtpSessionOnRx(s, scratch->rx.Buffer, scratch->rx.Length,
+                                            scratch->tx, sizeof(scratch->tx), &tx_len);
+                status = SontHandleStep(ext, scratch, step, tx_len, &cmd_deadline);
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+            }
+            if (SontAsyncRxStart(&scratch->rx, t->SignalingChannel) != STATUS_PENDING) {
+                status = STATUS_UNSUCCESSFUL;
+                break;
+            }
+        }
+
+        /* ---- session events */
+        now = SontNowMs(ext);
+        ev = SontAvdtpSessionTakeEvents(s);
+        if ((ev & SONT_AVDTP_EV_REMOTE_OPENED) != 0) {
+            media_wait_at = now + SONT_MEDIA_OPEN_WAIT_MS;
+        }
+        if ((ev & SONT_AVDTP_EV_STARTED) != 0 && !scratch->engine.Active) {
+            status = SontMediaStart(ext, scratch, t->MediaMtu);
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+            *streamed = TRUE;
+            resume_backoff = SONT_RESUME_MIN_MS;
+        }
+        if ((ev & SONT_AVDTP_EV_SUSPENDED) != 0) {
+            /* e.g. the phone took the headset over (multipoint). */
+            SontMediaStop(ext, scratch);
+            resume_at = now + resume_backoff;
+        }
+        if ((ev & (SONT_AVDTP_EV_CLOSED | SONT_AVDTP_EV_ABORTED)) != 0) {
+            SontMediaStop(ext, scratch);
+            SontTransportClose(t, &t->MediaChannel);
+            resume_at = 0;
+            hs_at = now + SONT_REHANDSHAKE_MS;  /* unless the headset reconfigures first */
+        }
+        if ((ev & SONT_AVDTP_EV_DELAY_REPORT) != 0) {
+            KIRQL old_irql;
+            KeAcquireSpinLock(&ext->Lock, &old_irql);
+            ext->State.DelayMs = (ULONG)s->remote_delay_100us / 10u;
+            KeReleaseSpinLock(&ext->Lock, old_irql);
+        }
+        if (s->state == SONT_AVDTP_STATE_FAILED) {
+            status = STATUS_UNSUCCESSFUL;
             break;
         }
     }
 
-    SontTraceLog(ext, SonatinaEventMediaStop, (ULONG)status, (ULONG)cur_eqmid);
-    SontLdacEncoderDestroy(encoder);
+    SontMediaStop(ext, scratch);
+    if (ext->ReconnectRequested && SontAvdtpSessionHasStream(s) &&
+        t->SignalingChannel != NULL && (t->LostMask & SONT_LOST_SIGNALING) == 0) {
+        if (SontAvdtpSessionClose(s, scratch->tx, sizeof(scratch->tx), &tx_len) ==
+            SONT_AVDTP_STEP_SEND) {
+            (void)SontTransportSend(t, t->SignalingChannel, scratch->tx, (ULONG)tx_len);
+        }
+    }
+    SontAsyncRxCancel(&scratch->rx);
+    SontTransportClose(t, &t->MediaChannel);
+    SontTransportClose(t, &t->SignalingChannel);
+    (void)SontTransportTakeLost(t);
     return status;
 }
 
+static ULONGLONG SontRetryDelayMs(ULONG attempts)
+{
+    switch (attempts) {
+    case 0:
+    case 1:  return 2000;
+    case 2:  return 5000;
+    case 3:  return 10000;
+    default: return 15000;
+    }
+}
+
+/* Connection supervisor: accepts the headset's own reconnection, or connects
+ * out (a few times after start, then only while Windows is playing audio),
+ * and runs each connection until it drops. */
 static VOID SontSignalingWorker(PVOID context)
 {
     PSONT_DEVICE_EXTENSION ext = (PSONT_DEVICE_EXTENSION)context;
-    PSONT_SIGNALING_SCRATCH scratch = NULL;
-    SONATINA_PROFILE prof;
-    SONT_SBC_PARAMS pref_sbc;
-    L2CAP_CHANNEL_HANDLE sig_ch = NULL;
-    L2CAP_CHANNEL_HANDLE media_ch = NULL;
-    size_t tx_len = 0;
-    ULONG step_count;
-    SONT_AVDTP_STEP_RESULT step;
-    KIRQL old_irql;
-    NTSTATUS status = STATUS_SUCCESS;
+    PSONT_TRANSPORT t = &ext->Transport;
+    PSONT_SIGNALING_SCRATCH scratch;
+    PVOID objs[2];
+    ULONG attempts = 0;
+    ULONGLONG next_try;
+    NTSTATUS status;
 
-    scratch = (PSONT_SIGNALING_SCRATCH)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED, sizeof(*scratch), SONT_POOL_TAG);
+    scratch = (PSONT_SIGNALING_SCRATCH)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*scratch),
+                                                       SONT_POOL_TAG);
     if (scratch == NULL) {
         SontRecordSignalingError(ext);
         PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
         return;
     }
-
-    status = SontTransportOpen(&ext->Transport, SONT_L2CAP_PSM_AVDTP, &sig_ch);
+    status = SontAsyncRxInit(&scratch->rx, t);
     if (!NT_SUCCESS(status)) {
-        SontRecordSignalingError(ext);
-        goto cleanup;
-    }
-    ext->Transport.SignalingChannel = sig_ch;
-
-    KeAcquireSpinLock(&ext->Lock, &old_irql);
-    prof = ext->Profile;
-    KeReleaseSpinLock(&ext->Lock, old_irql);
-    SontBuildSbcPreference(&prof, &pref_sbc);
-
-    {
-        uint8_t pref_codec = SONT_AVDTP_CODEC_SBC;
-        if (prof.Codec == SonatinaCodecPcm) {
-            pref_codec = SONT_AVDTP_CODEC_RAW;
-        } else if (prof.Codec == SonatinaCodecLdac) {
-            pref_codec = SONT_AVDTP_CODEC_LDAC;
-        }
-        SontAvdtpSessionInit(&scratch->session, 1, pref_codec, &pref_sbc);
-        if (pref_codec == SONT_AVDTP_CODEC_LDAC) {
-            SONT_LDAC_PARAMS pref_ldac;
-            pref_ldac.sampling = prof.LdacSampling;
-            pref_ldac.channel_mode = (uint8_t)prof.LdacChannelMode;
-            pref_ldac.eqmid = (uint8_t)prof.LdacEqmid;
-            SontAvdtpSessionSetLdacPreference(&scratch->session, &pref_ldac);
-        }
-    }
-
-    step = SontAvdtpSessionStartHandshake(&scratch->session,
-                                         scratch->tx,
-                                         sizeof(scratch->tx),
-                                         &tx_len);
-    for (step_count = 0;
-         step == SONT_AVDTP_STEP_SEND && step_count < SONT_AVDTP_MAX_STEPS;
-         step_count++) {
-        ULONG rx_tries;
-
-        if (KeReadStateEvent(&ext->StopEvent) != 0) {
-            status = STATUS_CANCELLED;
-            break;
-        }
-
-        status = SontTransportSend(&ext->Transport, sig_ch,
-                                   scratch->tx, (ULONG)tx_len);
-        if (!NT_SUCCESS(status)) {
-            SontRecordSignalingError(ext);
-            break;
-        }
-
-        step = SONT_AVDTP_STEP_IGNORE;
-        for (rx_tries = 0; rx_tries < SONT_AVDTP_MAX_IGNORED; rx_tries++) {
-            ULONG rx_len = 0;
-
-            status = SontTransportReceive(&ext->Transport, sig_ch,
-                                          scratch->rx, sizeof(scratch->rx),
-                                          &rx_len, &ext->StopEvent,
-                                          SONT_AVDTP_RX_TIMEOUT_MS);
-            if (!NT_SUCCESS(status)) {
-                SontRecordSignalingError(ext);
-                break;
-            }
-
-            step = SontAvdtpSessionOnRx(&scratch->session,
-                                        scratch->rx, (size_t)rx_len,
-                                        scratch->tx, sizeof(scratch->tx),
-                                        &tx_len);
-            if (step != SONT_AVDTP_STEP_IGNORE) {
-                break;
-            }
-        }
-        if (!NT_SUCCESS(status) || step == SONT_AVDTP_STEP_IGNORE) {
-            if (step == SONT_AVDTP_STEP_IGNORE) {
-                status = STATUS_IO_TIMEOUT;
-                SontRecordSignalingError(ext);
-            }
-            break;
-        }
-    }
-
-    if (step == SONT_AVDTP_STEP_ERROR) {
-        DbgPrint("Sonatina: D3 AVDTP handshake rejected (err=0x%02X)\n",
-                 scratch->session.last_error);
-        SontRecordSignalingError(ext);
-        status = STATUS_UNSUCCESSFUL;
-        goto cleanup;
-    }
-
-    if (scratch->session.state == SONT_AVDTP_STATE_STREAMING &&
-        KeReadStateEvent(&ext->StopEvent) == 0) {
-        status = SontTransportOpenWithFlushTo(&ext->Transport,
-                                              SONT_L2CAP_PSM_MEDIA,
-                                              SONT_MEDIA_FLUSH_TO_MS,
-                                              &media_ch);
-        if (!NT_SUCCESS(status)) {
-            SontRecordSignalingError(ext);
-            goto cleanup;
-        }
-        ext->Transport.MediaChannel = media_ch;
-
-        KeAcquireSpinLock(&ext->Lock, &old_irql);
-        ext->State.Opened = TRUE;
-        ext->State.TxFlushTO = SONT_MEDIA_FLUSH_TO_MS;
-        if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_RAW) {
-            ext->State.Codec = SonatinaCodecPcm;
-            ext->State.NegotiatedSampling = 48000;
-            ext->State.NegotiatedChannels = 2;
-            ext->State.BitrateKbps = 1536;
-            ext->State.CurrentBitpool = 0;
-        } else if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_LDAC) {
-            ext->State.Codec = SonatinaCodecLdac;
-            ext->State.NegotiatedSampling = scratch->session.negotiated.ldac.sampling;
-            ext->State.NegotiatedChannels = (ULONG)SontLdacChannels(&scratch->session.negotiated.ldac);
-            ext->State.CurrentBitpool = 0;
-            ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(
-                scratch->session.negotiated.ldac.sampling,
-                scratch->session.negotiated.ldac.eqmid);
-        } else {
-            ext->State.Codec = SonatinaCodecSbc;
-            ext->State.NegotiatedSampling = scratch->session.negotiated.sbc.sampling;
-            ext->State.NegotiatedChannels = (ULONG)SontSbcChannels(&scratch->session.negotiated.sbc);
-            ext->State.CurrentBitpool = scratch->session.negotiated.sbc.max_bitpool;
-            ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(
-                &scratch->session.negotiated.sbc,
-                scratch->session.negotiated.sbc.max_bitpool);
-        }
-        SontTraceLogLocked(ext,
-                           SonatinaEventAvdtpState,
-                           (ULONG)scratch->session.state,
-                           (ULONG)scratch->session.selected_acp_seid);
-        KeReleaseSpinLock(&ext->Lock, old_irql);
-
-        DbgPrint("Sonatina: D3 AVDTP streaming open (SEID=%u, %lu Hz, %lu kbps)\n",
-                 (unsigned)scratch->session.selected_acp_seid,
-                 ext->State.NegotiatedSampling,
-                 ext->State.BitrateKbps);
-
-        if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_SBC) {
-            status = SontRunSbcMediaLoop(ext, media_ch,
-                                         &scratch->session.negotiated.sbc,
-                                         scratch);
-        } else if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_LDAC) {
-            status = SontRunLdacMediaLoop(ext, media_ch,
-                                          &scratch->session.negotiated.ldac,
-                                          scratch);
-        }
-    }
-
-cleanup:
-    KeAcquireSpinLock(&ext->Lock, &old_irql);
-    ext->State.Opened = FALSE;
-    KeReleaseSpinLock(&ext->Lock, old_irql);
-
-    if (scratch != NULL) {
-        if (ext->ReconnectRequested &&
-            scratch->session.state == SONT_AVDTP_STATE_STREAMING &&
-            ext->Transport.SignalingChannel != NULL) {
-            size_t close_len = 0;
-            if (SontAvdtpSessionClose(&scratch->session, scratch->tx,
-                                      sizeof(scratch->tx), &close_len) == SONT_AVDTP_STEP_SEND) {
-                (void)SontTransportSend(&ext->Transport, ext->Transport.SignalingChannel,
-                                        scratch->tx, (ULONG)close_len);
-            }
-        }
         ExFreePoolWithTag(scratch, SONT_POOL_TAG);
+        SontRecordSignalingError(ext);
+        PsTerminateSystemThread(status);
+        return;
     }
-    SontTransportClose(&ext->Transport, &ext->Transport.MediaChannel);
-    SontTransportClose(&ext->Transport, &ext->Transport.SignalingChannel);
-    PsTerminateSystemThread(status);
+    (void)SontTransportRegisterServer(t);
+
+    objs[0] = &ext->StopEvent;
+    objs[1] = &t->IncomingEvent;
+    next_try = SontNowMs(ext);
+
+    while (KeReadStateEvent(&ext->StopEvent) == 0) {
+        SONT_INCOMING inc;
+        BOOLEAN connected = FALSE;
+        BOOLEAN remote_first = FALSE;
+        BOOLEAN streamed = FALSE;
+        ULONGLONG now = SontNowMs(ext);
+        ULONGLONG wait_ms;
+        LARGE_INTEGER due;
+
+        if (SontTransportTakeIncoming(t, &inc)) {
+            if (inc.Psm == SONT_L2CAP_PSM_AVDTP) {
+                status = SontTransportAccept(t, &inc, 0xFFFF, &t->SignalingChannel, &t->SignalingMtu);
+                connected = NT_SUCCESS(status);
+                remote_first = TRUE;
+            } else {
+                SontTransportRefuse(t, &inc);
+            }
+        } else if (now >= next_try) {
+            if (attempts >= SONT_EAGER_ATTEMPTS && !SontPcmHasRealAudio(ext)) {
+                /* Headset probably off: wait for it to connect, or for audio. */
+                next_try = now + SONT_IDLE_POLL_MS;
+            } else {
+                status = SontTransportOpen(t, SONT_L2CAP_PSM_AVDTP, 0xFFFF, &ext->StopEvent,
+                                           SONT_CONNECT_TIMEOUT_MS, &t->SignalingChannel,
+                                           &t->SignalingMtu);
+                connected = NT_SUCCESS(status);
+                attempts++;
+                if (!connected) {
+                    next_try = SontNowMs(ext) + SontRetryDelayMs(attempts);
+                }
+            }
+        }
+
+        if (connected) {
+            SontTraceLog(ext, SonatinaEventReconnect, remote_first ? 1u : 0u, attempts);
+            status = SontRunConnection(ext, scratch, remote_first, &streamed);
+            DbgPrint("Sonatina: connection ended 0x%08X (streamed=%u)\n", status, (unsigned)streamed);
+            if (status != STATUS_CANCELLED && status != STATUS_CONNECTION_DISCONNECTED) {
+                SontRecordSignalingError(ext);
+            }
+            attempts = streamed ? 0u : attempts + 1u;
+            next_try = SontNowMs(ext) + (streamed ? SONT_RECONNECT_AFTER_DROP_MS
+                                                  : SontRetryDelayMs(attempts));
+            continue;
+        }
+
+        now = SontNowMs(ext);
+        wait_ms = (next_try > now) ? next_try - now : 0;
+        if (wait_ms > SONT_IDLE_POLL_MS) {
+            wait_ms = SONT_IDLE_POLL_MS;
+        }
+        due.QuadPart = -(LONGLONG)wait_ms * 10000LL;
+        if (KeWaitForMultipleObjects(2, objs, WaitAny, Executive, KernelMode, FALSE,
+                                     &due, NULL) == STATUS_WAIT_0) {
+            break;
+        }
+    }
+
+    SontAsyncRxFree(&scratch->rx);
+    SontTransportUnregisterServer(t);
+    {
+        SONT_INCOMING leftover;
+        while (SontTransportTakeIncoming(t, &leftover)) {
+            SontTransportRefuse(t, &leftover);
+        }
+    }
+    ExFreePoolWithTag(scratch, SONT_POOL_TAG);
+    PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 static NTSTATUS SontStartSignalingWorkerLocked(PSONT_DEVICE_EXTENSION ext)

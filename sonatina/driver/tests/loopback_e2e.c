@@ -51,7 +51,7 @@ static int udp_recv_timeout(SOCKET s, uint8_t *buf, int cap, int timeout_ms)
     FD_SET(s, &rfds);
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
-    ready = select(0, &rfds, NULL, NULL, &tv);
+    ready = select((int)s + 1, &rfds, NULL, NULL, &tv); /* nfds is ignored on Windows */
     if (ready <= 0) {
         return 0;
     }
@@ -233,6 +233,11 @@ int main(int argc, char **argv)
                     break;
                 }
             }
+        }
+        if (step == SONT_AVDTP_STEP_OPEN_MEDIA) {
+            /* The UDP media socket stands in for the AVDTP transport channel,
+             * which the initiator must open before sending Start. */
+            step = SontAvdtpSessionMediaReady(&session, tx, sizeof(tx), &tx_len);
         }
         if (rx_n <= 0) {
             fprintf(stderr, "AVDTP handshake timeout waiting for sink\n");

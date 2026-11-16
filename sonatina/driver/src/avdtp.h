@@ -26,11 +26,16 @@
 #define SONT_AVDTP_SIG_DISCOVER           0x01
 #define SONT_AVDTP_SIG_GET_CAPABILITIES   0x02
 #define SONT_AVDTP_SIG_SET_CONFIGURATION  0x03
+#define SONT_AVDTP_SIG_GET_CONFIGURATION  0x04
+#define SONT_AVDTP_SIG_RECONFIGURE        0x05
 #define SONT_AVDTP_SIG_OPEN               0x06
 #define SONT_AVDTP_SIG_START              0x07
 #define SONT_AVDTP_SIG_CLOSE              0x08
 #define SONT_AVDTP_SIG_SUSPEND            0x09
 #define SONT_AVDTP_SIG_ABORT              0x0A
+#define SONT_AVDTP_SIG_SECURITY_CONTROL   0x0B
+#define SONT_AVDTP_SIG_GET_ALL_CAPABILITIES 0x0C
+#define SONT_AVDTP_SIG_DELAY_REPORT       0x0D
 
 /* Error codes returned in Reject responses. */
 #define SONT_AVDTP_ERR_BAD_HEADER_FORMAT    0x01
@@ -38,8 +43,12 @@
 #define SONT_AVDTP_ERR_BAD_ACP_SEID         0x12
 #define SONT_AVDTP_ERR_SEP_IN_USE           0x13
 #define SONT_AVDTP_ERR_SEP_NOT_IN_USE       0x14
-#define SONT_AVDTP_ERR_BAD_SERVICE_CATEGORY 0x19
+#define SONT_AVDTP_ERR_BAD_SERVICE_CATEGORY 0x17
+#define SONT_AVDTP_ERR_BAD_PAYLOAD_FORMAT   0x18
+#define SONT_AVDTP_ERR_NOT_SUPPORTED_COMMAND 0x19
 #define SONT_AVDTP_ERR_INVALID_CAPABILITIES 0x1A
+#define SONT_AVDTP_ERR_UNSUPPORTED_CONFIGURATION 0x29
+#define SONT_AVDTP_ERR_BAD_STATE            0x31
 
 /* Stream End Point discovery constants. */
 #define SONT_AVDTP_MEDIA_AUDIO 0
@@ -49,6 +58,7 @@
 /* Service categories. */
 #define SONT_AVDTP_CAT_MEDIA_TRANSPORT 1
 #define SONT_AVDTP_CAT_MEDIA_CODEC     7
+#define SONT_AVDTP_CAT_DELAY_REPORTING 8
 
 /* Codec types inside the Media Codec capability. */
 #define SONT_AVDTP_CODEC_SBC  0x00
@@ -111,6 +121,19 @@ size_t SontAvdtpEncodeCapabilities(const SONT_CAPABILITIES *caps,
 
 bool SontAvdtpParseCapabilities(const uint8_t *data, size_t length,
                                 SONT_CAPABILITIES *caps);
+
+/* Capability octets advertised by a local source SEP (bit masks, not a single
+ * configuration). `max_bitpool` caps the SBC range; `ldac_sampling_mask` uses the
+ * LDAC sampling bits (0x20 44.1k, 0x10 48k, 0x08 88.2k, 0x04 96k). */
+size_t SontAvdtpEncodeSourceSbcCapabilities(uint8_t max_bitpool,
+                                            uint8_t *out, size_t capacity);
+size_t SontAvdtpEncodeSourceLdacCapabilities(uint8_t ldac_sampling_mask,
+                                             uint8_t *out, size_t capacity);
+
+/* True when `cfg` (a single configuration, e.g. from a remote SetConfiguration)
+ * is something the local source can encode. */
+bool SontAvdtpSourceAcceptsConfig(const SONT_CAPABILITIES *cfg, uint8_t max_bitpool,
+                                  uint8_t ldac_sampling_mask);
 
 size_t SontAvdtpEncodeSetConfiguration(uint8_t acp_seid, uint8_t int_seid,
                                        const SONT_CAPABILITIES *caps,
