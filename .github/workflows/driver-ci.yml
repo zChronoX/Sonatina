@@ -72,7 +72,9 @@ jobs:
 
       - name: Run InfVerif /w
         run: |
-          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse | Select-Object -First 1
+          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse |
+            Where-Object { $_.FullName -match '\\(x64|x86)\\' } |
+            Select-Object -First 1
           if (-not $infVerif) { throw 'InfVerif.exe not found in restored WDK packages' }
           & $infVerif.FullName /w sonatina\driver\inf\SonatinaAudio.inf
 
@@ -106,11 +108,16 @@ jobs:
         run: |
           msbuild sonatina\driver\SonatinaAudio.vcxproj /m /p:Configuration=${{ matrix.configuration }} /p:Platform=ARM64 /p:SignMode=Off
 
-      - name: Run InfVerif /w
+      - name: Run InfVerif /w (ARM64)
         run: |
-          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse | Select-Object -First 1
-          if (-not $infVerif) { throw 'InfVerif.exe not found in restored WDK packages' }
-          & $infVerif.FullName /w sonatina\driver\inf\SonatinaAudio.inf
+          $infVerif = Get-ChildItem -Path sonatina\driver\packages -Filter InfVerif.exe -Recurse |
+            Where-Object { $_.FullName -match '\\(x64|x86)\\' } |
+            Select-Object -First 1
+          if ($infVerif) {
+            & $infVerif.FullName /w sonatina\driver\inf\SonatinaAudio.inf
+          } else {
+            Write-Host 'Host-arch InfVerif.exe not present in ARM64 WDK package (validated in driver-compile-x64).'
+          }
 
       - name: Upload ARM64 driver build artifacts
         uses: actions/upload-artifact@v4
