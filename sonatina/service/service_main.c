@@ -170,6 +170,25 @@ static void sont_apply_profiles(void)
     (void)SontSvcPollDriverStates(g_cfg.hive, g_cfg.root, &updated);
 }
 
+static uint64_t sont_monotonic_ms(void)
+{
+    static LARGE_INTEGER freq = {{0}};
+    LARGE_INTEGER now;
+    uint64_t q;
+    uint64_t f;
+
+    if (freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+    }
+    if (freq.QuadPart <= 0) {
+        return GetTickCount64();
+    }
+    QueryPerformanceCounter(&now);
+    q = (uint64_t)now.QuadPart;
+    f = (uint64_t)freq.QuadPart;
+    return (q / f) * 1000ULL + ((q % f) * 1000ULL) / f;
+}
+
 static LONG sont_arm_watch(HKEY key, HANDLE reg_event)
 {
     return RegNotifyChangeKeyValue(
@@ -236,7 +255,7 @@ static DWORD sont_run_watcher_loop(void)
     handles[0] = g_stop_event;
     handles[1] = reg_event;
     handles[2] = timer;
-    start_ms = GetTickCount64();
+    start_ms = sont_monotonic_ms();
 
     {
         char msg[200];
@@ -253,7 +272,7 @@ static DWORD sont_run_watcher_loop(void)
         DWORD wait_rc;
 
         if (g_cfg.duration_ms > 0) {
-            uint64_t elapsed = GetTickCount64() - start_ms;
+            uint64_t elapsed = sont_monotonic_ms() - start_ms;
             if (elapsed >= g_cfg.duration_ms) {
                 break;
             }
@@ -275,26 +294,32 @@ static DWORD sont_run_watcher_loop(void)
             if (rc != ERROR_SUCCESS) {
                 break;
             }
-            SontPolicyNotify(&policy, GetTickCount64());
+            SontPolicyNotify(&policy, sont_monotonic_ms());
             sont_log("registry changed, debounce armed");
             due.QuadPart = -(LONGLONG)(delay_ms * 10000ULL);
             SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
             continue;
         }
         if (wait_rc == WAIT_OBJECT_0 + 2) {
-            SONT_POLICY_OUTCOME outcome = SontPolicyPoll(&policy, GetTickCount64());
+            uint64_t now_ms = sont_monotonic_ms();
+            SONT_POLICY_OUTCOME outcome = SontPolicyPoll(&policy, now_ms);
             if (outcome == SONT_POLICY_APPLY) {
                 sont_apply_profiles();
             } else if (outcome == SONT_POLICY_COOLDOWN) {
                 uint64_t elapsed_ms = 0;
                 char msg[160];
-                (void)SontPolicyElapsedSinceApplyMs(&policy, GetTickCount64(), &elapsed_ms);
+                (void)SontPolicyElapsedSinceApplyMs(&policy, now_ms, &elapsed_ms);
                 _snprintf(msg, sizeof(msg),
                           "cooldown, skip (last apply %llu ms ago, cooldown %llu ms)",
                           (unsigned long long)elapsed_ms,
                           (unsigned long long)g_cfg.cooldown_ms);
                 msg[sizeof(msg) - 1] = '\0';
                 sont_log(msg);
+            } else if (policy.pending) {
+                LARGE_INTEGER due;
+                uint64_t rem_ms = (policy.due_ms > now_ms) ? (policy.due_ms - now_ms) : 1ULL;
+                due.QuadPart = -(LONGLONG)(rem_ms * 10000ULL);
+                SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
             }
             continue;
         }
