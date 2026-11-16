@@ -16,14 +16,14 @@ deliverable, **Done** = verifiable acceptance.
 
 | Area | State |
 |---|---|
-| Bluetooth audio reference stack (Python) | `[x]` 77 tests green (8 test files non-registry + 9 `test_reg`), loopback demo exits 0 |
-| SBC/RTP/AVDTP logic | `[x]` in Python, `[x]` ported to portable C (`google/libsbc` Apache-2.0 vendored) |
+| Bluetooth audio reference stack (Python) | `[x]` 81+ unit tests green (incl. `test_reg` + LDAC AVDTP/RTP/codec), loopback demo exits 0 |
+| SBC / LDAC / RTP / AVDTP logic | `[x]` in Python & portable C (`google/libsbc` + AOSP `libldac` fixed-point Apache-2.0 vendored) |
 | Kernel driver design | `[x]` `sonatina/driver/DESIGN.md` |
-| Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles Debug/Release x64 + `InfVerif /w` green in CI (`e679e4c`); VM load pending |
-| Audio endpoints (WaveRT/topology) | `[~]` implemented from MS-PL SysVAD, compiles x64 in CI; VM runtime pending |
-| Real L2CAP / SBC media path | `[~]` AVDTP + `google/libsbc` + RTP media loop compiled in CI (`e679e4c`); headset/VM runtime pending |
-| Service (native) | `[~]` `sonatina/service/SonatinaSvc.exe` implemented & compiled; VM runtime pending |
-| Signing / installer | `[ ]` |
+| Driver scaffold (INF, contracts, BRB layer) | `[~]` compiles Debug/Release x64 & ARM64 + `InfVerif /w` green in CI (`#22`); VM load pending |
+| Audio endpoints (WaveRT/topology) | `[~]` implemented from MS-PL SysVAD, compiles x64/ARM64 in CI; VM runtime pending |
+| Real L2CAP / SBC + LDAC media + ABR | `[~]` AVDTP + `google/libsbc` + `libldac` + ABR/FlushTO compiled; T2/T4 UDP loopback verified; VM headset runtime pending |
+| Service (native) & GUI (`SonatinaConfig.exe`) | `[~]` `SonatinaSvc.exe` + PyInstaller `SonatinaConfig.exe` built & smoke-tested; VM service start pending |
+| Signing / installer | `[~]` `install-driver.ps1` (rollback), `uninstall-driver.ps1`, WiX v4 `Sonatina.wxs` verified; EV signing & VM matrix pending |
 
 Definition of done for the whole programme: on a clean Windows 10/11 machine, a
 signed `SonatinaAudio.sys` binds to a paired headset's AudioSink devnode, exposes
@@ -159,19 +159,17 @@ reconnects the headset with the new parameters.
   and registry telemetry sync implemented and host-tested; WDK CI + degraded-radio
   VM test pending.
 
-### D7. Additional codecs `[ ]`
+### D7. Additional codecs `[~]`
 - **Why**: parity beyond SBC. Technical work only; licensing decides the rest.
-- **Do**: LDAC from AOSP (`[ ]`), AAC (needs a Fraunhofer FDK licence `[ ]`),
+- **Do**: LDAC from AOSP Apache-2.0 (`[x]` vendored in fixed-point mode `_32BIT_FIXED_POINT` + AVDTP vendor ID `2D 01 00 00 / AA 00` + RTP framing + Python stack + T2 UDP loopback), AAC (needs a Fraunhofer FDK licence `[ ]`),
   aptX/HD/LL (needs a Qualcomm licence `[ ]`).
-- **Done**: selectable codec, negotiated, audible, measured. Only for licensed
-  codecs.
+- **Done**: LDAC selectable, negotiated, host-encoded, and verified over T2 UDP loopback (`375 pkts, lost=0, errors=0, rms=0.573`); real headset runtime pending VM tests. AAC/aptX remain unimplemented due to commercial licensing.
 
-### D8. Signing, installer and QA `[ ]`
+### D8. Signing, installer and QA `[~]`
 - **Why**: an unsigned kernel driver does not load with Secure Boot.
 - **Do**: EV certificate, Partner Center attestation (or WHQL), MSI/WiX
-  installer, rollback, uninstall, upgrade.
-- **Done**: installs and uninstalls on clean Win10 22H2 and Win11 x64; ARM64
-  build produced and smoke-tested.
+  installer (`sonatina/installer/Sonatina.wxs`), rollback scripts (`install-driver.ps1` / `uninstall-driver.ps1`), ARM64 build.
+- **Done**: ARM64 + x64 Debug/Release CI builds + `InfVerif /w` + `-DryRun` script checks passing; EV signing and VM install matrix (T5) pending.
 
 ---
 
@@ -224,12 +222,13 @@ reconnects the headset with the new parameters.
   D6 ABR/latency fields in `gui.py`) for telemetry, write profiles.
 - **Done**: device list, codec matrix, live bitrate/packets/ABR telemetry, Apply.
 
-### G2. Package the GUI `[~]`
+### G2. Package the GUI `[x]`
 - **Why**: shipping a Python GUI is fine only if the runtime is packaged.
 - **Do**: `sonatina/scripts/gui_entry.py` + `sonatina/scripts/build-gui.ps1`
   (PyInstaller one-file `SonatinaConfig.exe` + `-CheckOnly` selftest).
-- **Done**: `-CheckOnly` selftest green locally and in CI; standalone `.exe`
-  smoke-test on clean machine pending PyInstaller build.
+- **Done**: `-CheckOnly` selftest green locally and in CI; standalone
+  `sonatina/dist/SonatinaConfig.exe` built with PyInstaller and `--selftest`
+  smoke-test verified locally (exit 0).
 
 ---
 
@@ -238,15 +237,16 @@ reconnects the headset with the new parameters.
 ### T1. Byte-equality oracle `[x]`
 - **Why**: the Python stack is the executable specification.
 - **Do**: generate vectors from `sonatina/`, assert equality in the C host test.
-- **Done**: identical bytes for all AVDTP/RTP/SBC cases (`28 vectors + 5 math cases, 0 failures`).
+- **Done**: identical bytes for all AVDTP/RTP/SBC/LDAC cases (`39 vectors + 5 math cases, 0 failures`).
 
 ### T2. Loopback before hardware `[x]`
 - **Why**: debug the driver state machine and media/ABR stack without a headset.
 - **Do**: `sonatina/driver/tests/loopback_e2e.c` + `run_loopback_e2e.ps1`
-  driving `avdtp_session.c`, `codec_sbc.c` (`google/libsbc`), `media_stream.c`,
-  `abr.c`, and `trace_ring.c` over UDP directly against `python -m sonatina sink`.
-- **Done**: handshake + SBC media + `-SimulateCongestion` ABR step-down succeed
-  with `lost=0`, `errors=0`, and real `libsbc` decode `RMS > 0.3`.
+  driving `avdtp_session.c`, `codec_sbc.c` (`google/libsbc`), `codec_ldac.c`
+  (AOSP `libldac`), `media_stream.c`, `abr.c`, and `trace_ring.c` over UDP
+  directly against `python -m sonatina sink`.
+- **Done**: handshake + SBC media + `-SimulateCongestion` ABR step-down + LDAC
+  media (`990 kbps`) succeed with `lost=0`, `errors=0`, and `RMS > 0.3`.
 
 ### T3. Driver Verifier + soak `[ ]`
 - **Why**: catch pool, IRQL and lifetime bugs before users do.

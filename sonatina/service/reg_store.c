@@ -18,6 +18,9 @@ static void sont_init_default_profile(SONATINA_PROFILE *prof)
     prof->AacSampling = 48000;
     prof->AacChannels = 2;
     prof->AacBitrate = 256;
+    prof->LdacSampling = 48000;
+    prof->LdacChannelMode = 2;
+    prof->LdacEqmid = 0;
 }
 
 static LONG sont_build_subpath(const wchar_t *root,
@@ -230,6 +233,9 @@ int SontSvcReadProfile(HKEY hive,
     sont_read_dword(key, L"AacChannelMode", &aac_mode);
     prof.AacChannels = (aac_mode == 0) ? 1u : 2u;
     sont_read_dword(key, L"AacBitrate", &prof.AacBitrate);
+    sont_read_dword(key, L"LdacSamplingFrequency", &prof.LdacSampling);
+    sont_read_dword(key, L"LdacChannelMode", &prof.LdacChannelMode);
+    sont_read_dword(key, L"LdacEqmid", &prof.LdacEqmid);
     RegCloseKey(key);
 
     if (!SontProfileValidateFields(prof.Codec,
@@ -243,6 +249,12 @@ int SontSvcReadProfile(HKEY hive,
                                    prof.AacSampling,
                                    prof.AacChannels,
                                    prof.AacBitrate)) {
+        return 0;
+    }
+    if (prof.Codec == SonatinaCodecLdac &&
+        !SontProfileValidateLdacFields(prof.LdacSampling,
+                                       prof.LdacChannelMode,
+                                       prof.LdacEqmid)) {
         return 0;
     }
 

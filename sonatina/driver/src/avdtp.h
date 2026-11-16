@@ -9,6 +9,7 @@
 #include "portable.h"
 
 #include "codec_sbc.h"
+#include "codec_ldac.h"
 
 #define SONT_AVDTP_HEADER_LEN 2
 
@@ -52,6 +53,7 @@
 /* Codec types inside the Media Codec capability. */
 #define SONT_AVDTP_CODEC_SBC  0x00
 #define SONT_AVDTP_CODEC_AAC  0x02
+#define SONT_AVDTP_CODEC_LDAC 0xFE  /* vendor 0xFF + Sony 0x0000012D / 0x00AA */
 #define SONT_AVDTP_CODEC_RAW  0xFF  /* non-Bluetooth audio: raw PCM or aptX */
 
 typedef struct _SONT_SEP_INFO {
@@ -77,6 +79,9 @@ typedef struct _SONT_CAPABILITIES {
     SONT_SBC_PARAMS sbc;
     uint8_t raw_sbc[4];         /* raw SBC bitmask octets when parsed */
     bool    has_raw_sbc;
+    SONT_LDAC_PARAMS ldac;
+    uint8_t raw_ldac[8];        /* vendor ID + codec ID + sf + cm */
+    bool    has_raw_ldac;
 } SONT_CAPABILITIES;
 
 size_t SontAvdtpEncode(uint8_t transaction, uint8_t packet_type, uint8_t message_type,
@@ -96,6 +101,10 @@ bool SontAvdtpParseSepList(const uint8_t *data, size_t length,
 bool SontAvdtpSelectSbcConfig(const uint8_t peer_sbc[4],
                               const SONT_SBC_PARAMS *preferred,
                               SONT_SBC_PARAMS *selected);
+
+bool SontAvdtpSelectLdacConfig(const uint8_t peer_ldac[8],
+                               const SONT_LDAC_PARAMS *preferred,
+                               SONT_LDAC_PARAMS *selected);
 
 size_t SontAvdtpEncodeCapabilities(const SONT_CAPABILITIES *caps,
                                    uint8_t *out, size_t capacity);

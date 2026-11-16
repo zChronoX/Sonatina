@@ -116,6 +116,18 @@ void SontAvdtpSessionInit(SONT_AVDTP_SESSION *session,
         session->preferred_sbc.min_bitpool = 2;
         session->preferred_sbc.max_bitpool = 53;
     }
+    session->preferred_ldac.sampling = 48000u;
+    session->preferred_ldac.channel_mode = SONT_LDAC_CHMODE_STEREO;
+    session->preferred_ldac.eqmid = SONT_LDAC_EQMID_HQ;
+}
+
+void SontAvdtpSessionSetLdacPreference(SONT_AVDTP_SESSION *session,
+                                       const SONT_LDAC_PARAMS *preferred_ldac)
+{
+    if (session == NULL || preferred_ldac == NULL) {
+        return;
+    }
+    session->preferred_ldac = *preferred_ldac;
 }
 
 SONT_AVDTP_STEP_RESULT SontAvdtpSessionStartHandshake(SONT_AVDTP_SESSION *session,
@@ -192,6 +204,13 @@ static SONT_AVDTP_STEP_RESULT SontHandleGetCapsAccept(SONT_AVDTP_SESSION *sessio
                 SontAvdtpSelectSbcConfig(caps.raw_sbc,
                                          &session->preferred_sbc,
                                          &chosen.sbc)) {
+                matched = true;
+            }
+        } else if (caps.codec == SONT_AVDTP_CODEC_LDAC) {
+            if (caps.has_raw_ldac &&
+                SontAvdtpSelectLdacConfig(caps.raw_ldac,
+                                          &session->preferred_ldac,
+                                          &chosen.ldac)) {
                 matched = true;
             }
         } else {

@@ -17,13 +17,14 @@
 #include "miniport_subdevices.h"
 #include "profile_validate.h"
 #include "abr.h"
+#include "codec_ldac.h"
 
 #define SONT_POOL_TAG 'anOS'
 #define SONT_AVDTP_RX_TIMEOUT_MS 5000u
 #define SONT_AVDTP_MAX_STEPS     32u
 #define SONT_AVDTP_MAX_IGNORED   8u
 #define SONT_MEDIA_WAIT_MS       50u
-#define SONT_MEDIA_L2CAP_MTU     672u
+#define SONT_MEDIA_L2CAP_MTU     679u
 #define SONT_MEDIA_FLUSH_TO_MS   40u
 #define SONT_MEDIA_MAX_PCM_CH    2u
 #define SONT_MEDIA_MAX_SAMPLES   128u
@@ -34,7 +35,8 @@ typedef struct _SONT_SIGNALING_SCRATCH {
     SONT_ABR abr;
     uint8_t tx[SONT_AVDTP_MAX_PDU];
     uint8_t rx[SONT_AVDTP_MAX_PDU];
-    uint8_t rtp[1024];
+    uint8_t rtp[1200];
+    uint8_t ldac_frames[1024];
     int16_t pcm_frame[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH];
     int16_t pcm_2x[SONT_MEDIA_MAX_SAMPLES * SONT_MEDIA_MAX_PCM_CH * 2];
 } SONT_SIGNALING_SCRATCH, *PSONT_SIGNALING_SCRATCH;
@@ -63,6 +65,9 @@ static VOID SontInitDefaultProfile(PSONATINA_PROFILE prof)
     prof->AacSampling = 48000;
     prof->AacChannels = 2;
     prof->AacBitrate = 256;
+    prof->LdacSampling = 48000;
+    prof->LdacChannelMode = SONT_LDAC_CHMODE_STEREO;
+    prof->LdacEqmid = SONT_LDAC_EQMID_HQ;
 }
 
 static BOOLEAN SontValidateKernelProfile(const SONATINA_PROFILE *prof)
@@ -70,17 +75,26 @@ static BOOLEAN SontValidateKernelProfile(const SONATINA_PROFILE *prof)
     if (prof == NULL || prof->Size != sizeof(SONATINA_PROFILE)) {
         return FALSE;
     }
-    return SontProfileValidateFields(prof->Codec,
-                                     prof->SbcSampling,
-                                     prof->SbcChannelMode,
-                                     prof->SbcBlocks,
-                                     prof->SbcSubbands,
-                                     prof->SbcAllocation,
-                                     prof->SbcMinBitpool,
-                                     prof->SbcMaxBitpool,
-                                     prof->AacSampling,
-                                     prof->AacChannels,
-                                     prof->AacBitrate) != 0;
+    if (SontProfileValidateFields(prof->Codec,
+                                  prof->SbcSampling,
+                                  prof->SbcChannelMode,
+                                  prof->SbcBlocks,
+                                  prof->SbcSubbands,
+                                  prof->SbcAllocation,
+                                  prof->SbcMinBitpool,
+                                  prof->SbcMaxBitpool,
+                                  prof->AacSampling,
+                                  prof->AacChannels,
+                                  prof->AacBitrate) == 0) {
+        return FALSE;
+    }
+    if (prof->Codec == SonatinaCodecLdac &&
+        SontProfileValidateLdacFields(prof->LdacSampling,
+                                      prof->LdacChannelMode,
+                                      prof->LdacEqmid) == 0) {
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static VOID SontRegReadDword(HANDLE key, PCWSTR name, ULONG *value_out)
@@ -205,10 +219,15 @@ static VOID SontLoadProfileFromRegistry(BTH_ADDR remote_addr, PSONATINA_PROFILE 
         candidate.AacChannels = (aac_mode == 0u) ? 1u : 2u;
     }
     SontRegReadDword(key, L"AacBitrate", &candidate.AacBitrate);
+    SontRegReadDword(key, L"LdacSamplingFrequency", &candidate.LdacSampling);
+    SontRegReadDword(key, L"LdacChannelMode", &candidate.LdacChannelMode);
+    SontRegReadDword(key, L"LdacEqmid", &candidate.LdacEqmid);
     ZwClose(key);
 
     if (SontValidateKernelProfile(&candidate) &&
-        (candidate.Codec == SonatinaCodecPcm || candidate.Codec == SonatinaCodecSbc)) {
+        (candidate.Codec == SonatinaCodecPcm ||
+         candidate.Codec == SonatinaCodecSbc ||
+         candidate.Codec == SonatinaCodecLdac)) {
         *prof = candidate;
         DbgPrint("Sonatina: loaded profile for %s (codec=%lu sbc=%lu Hz bp=%lu..%lu)\n",
                  addr_hex, prof->Codec, prof->SbcSampling,
@@ -370,7 +389,8 @@ static NTSTATUS SontDeviceControl(PDEVICE_OBJECT device, PIRP irp)
                 break;
             }
             if (candidate.Codec != SonatinaCodecPcm &&
-                candidate.Codec != SonatinaCodecSbc) {
+                candidate.Codec != SonatinaCodecSbc &&
+                candidate.Codec != SonatinaCodecLdac) {
                 status = STATUS_NOT_SUPPORTED;
                 break;
             }
@@ -694,6 +714,151 @@ static NTSTATUS SontRunSbcMediaLoop(PSONT_DEVICE_EXTENSION ext,
     return status;
 }
 
+static NTSTATUS SontRunLdacMediaLoop(PSONT_DEVICE_EXTENSION ext,
+                                      L2CAP_CHANNEL_HANDLE media_ch,
+                                      const SONT_LDAC_PARAMS *ldac,
+                                      PSONT_SIGNALING_SCRATCH scratch)
+{
+    SONT_LDAC_ENCODER *encoder;
+    unsigned channels = SontLdacChannels(ldac);
+    unsigned spf = (ldac->sampling >= 88200u) ? 256u : 128u;
+    PVOID wait_objs[2];
+    LARGE_INTEGER wait_due;
+    uint16_t seq = 0;
+    uint32_t ts = 0;
+    BOOLEAN sent_first = FALSE;
+    uint32_t tx_avg_us = 0;
+    uint32_t tx_max_us = 0;
+    uint8_t cur_eqmid = ldac->eqmid;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    encoder = SontLdacEncoderCreate(ldac, SONT_MEDIA_L2CAP_MTU);
+    if (encoder == NULL) {
+        SontRecordSignalingError(ext);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    SontTraceLog(ext, SonatinaEventMediaStart, (ULONG)ldac->sampling, (ULONG)cur_eqmid);
+
+    wait_objs[0] = &ext->PcmSource.DataEvent;
+    wait_objs[1] = &ext->StopEvent;
+    wait_due.QuadPart = -(LONGLONG)SONT_MEDIA_WAIT_MS * 10000LL;
+
+    while (KeReadStateEvent(&ext->StopEvent) == 0 &&
+           ext->Transport.MediaChannel != NULL) {
+        BOOLEAN stream_running = FALSE;
+
+        if (SontDequeuePcmFrame(&ext->PcmSource,
+                                (ULONG)ldac->sampling,
+                                (ULONG)channels,
+                                SONT_LDAC_PCM_SAMPLES_PER_PUSH,
+                                scratch->pcm_frame,
+                                scratch->pcm_2x,
+                                &stream_running)) {
+            size_t ldac_len = 0;
+            uint8_t frame_num = 0;
+            if (SontLdacEncode(encoder,
+                               scratch->pcm_frame,
+                               SONT_LDAC_PCM_SAMPLES_PER_PUSH,
+                               scratch->ldac_frames,
+                               sizeof(scratch->ldac_frames),
+                               &ldac_len,
+                               &frame_num) != 0) {
+                SontRecordSignalingError(ext);
+                status = STATUS_UNSUCCESSFUL;
+                break;
+            }
+            if (ldac_len > 0 && frame_num > 0) {
+                SONT_RTP_HEADER hdr;
+                size_t payload_len;
+                LARGE_INTEGER freq;
+                LARGE_INTEGER t0;
+                LARGE_INTEGER t1;
+                ULONG tx_us = 0;
+                KIRQL old_irql;
+
+                SONT_MEMSET(&hdr, 0, sizeof(hdr));
+                hdr.version = 2;
+                hdr.marker = !sent_first;
+                hdr.payload_type = SONT_RTP_PAYLOAD_TYPE;
+                hdr.sequence = seq;
+                hdr.timestamp = ts;
+                hdr.ssrc = 0x534F4E54u;
+
+                if (SontRtpEncodeHeader(&hdr, scratch->rtp) != SONT_RTP_HEADER_LEN) {
+                    status = STATUS_UNSUCCESSFUL;
+                    break;
+                }
+                payload_len = SontRtpLdacPayload(scratch->ldac_frames,
+                                                 ldac_len,
+                                                 frame_num,
+                                                 scratch->rtp + SONT_RTP_HEADER_LEN,
+                                                 sizeof(scratch->rtp) - SONT_RTP_HEADER_LEN);
+                if (payload_len == 0) {
+                    status = STATUS_UNSUCCESSFUL;
+                    break;
+                }
+
+                t0 = KeQueryPerformanceCounter(&freq);
+                status = SontTransportSend(&ext->Transport,
+                                           media_ch,
+                                           scratch->rtp,
+                                           (ULONG)(SONT_RTP_HEADER_LEN + payload_len));
+                t1 = KeQueryPerformanceCounter(NULL);
+
+                if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
+                    tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
+                }
+                if (tx_us > tx_max_us) {
+                    tx_max_us = tx_us;
+                }
+                tx_avg_us = (tx_avg_us == 0u) ? tx_us : ((tx_avg_us * 7u + tx_us) / 8u);
+
+                seq = (uint16_t)(seq + 1u);
+                ts += (uint32_t)(((uint64_t)frame_num * (uint64_t)spf * (uint64_t)SONT_RTP_CLOCK) /
+                                 (uint64_t)ldac->sampling);
+                sent_first = TRUE;
+
+                if ((!NT_SUCCESS(status) || tx_us >= SONT_ABR_DEFAULT_CRITICAL_US) &&
+                    cur_eqmid < SONT_LDAC_EQMID_MQ) {
+                    uint8_t next_eqmid = (uint8_t)(cur_eqmid + 1u);
+                    if (SontLdacSetEqmid(encoder, next_eqmid) == 0) {
+                        SontTraceLog(ext, SonatinaEventAbrStep, cur_eqmid, next_eqmid);
+                        cur_eqmid = next_eqmid;
+                    }
+                }
+
+                KeAcquireSpinLock(&ext->Lock, &old_irql);
+                if (NT_SUCCESS(status)) {
+                    ext->State.Packets++;
+                    ext->State.TxTimeUs = tx_us;
+                } else {
+                    ext->State.Errors++;
+                }
+                ext->State.TxTimeMaxUs = tx_max_us;
+                ext->State.TxTimeAvgUs = tx_avg_us;
+                ext->State.DelayMs = (tx_avg_us + 500u) / 1000u;
+                ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(ldac->sampling, cur_eqmid);
+                KeReleaseSpinLock(&ext->Lock, old_irql);
+
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if (KeWaitForMultipleObjects(2, wait_objs, WaitAny, Executive,
+                                     KernelMode, FALSE, &wait_due, NULL) == STATUS_WAIT_1) {
+            status = STATUS_CANCELLED;
+            break;
+        }
+    }
+
+    SontTraceLog(ext, SonatinaEventMediaStop, (ULONG)status, (ULONG)cur_eqmid);
+    SontLdacEncoderDestroy(encoder);
+    return status;
+}
+
 static VOID SontSignalingWorker(PVOID context)
 {
     PSONT_DEVICE_EXTENSION ext = (PSONT_DEVICE_EXTENSION)context;
@@ -728,12 +893,22 @@ static VOID SontSignalingWorker(PVOID context)
     KeReleaseSpinLock(&ext->Lock, old_irql);
     SontBuildSbcPreference(&prof, &pref_sbc);
 
-    SontAvdtpSessionInit(&scratch->session,
-                         1,
-                         (prof.Codec == SonatinaCodecPcm)
-                             ? SONT_AVDTP_CODEC_RAW
-                             : SONT_AVDTP_CODEC_SBC,
-                         &pref_sbc);
+    {
+        uint8_t pref_codec = SONT_AVDTP_CODEC_SBC;
+        if (prof.Codec == SonatinaCodecPcm) {
+            pref_codec = SONT_AVDTP_CODEC_RAW;
+        } else if (prof.Codec == SonatinaCodecLdac) {
+            pref_codec = SONT_AVDTP_CODEC_LDAC;
+        }
+        SontAvdtpSessionInit(&scratch->session, 1, pref_codec, &pref_sbc);
+        if (pref_codec == SONT_AVDTP_CODEC_LDAC) {
+            SONT_LDAC_PARAMS pref_ldac;
+            pref_ldac.sampling = prof.LdacSampling;
+            pref_ldac.channel_mode = (uint8_t)prof.LdacChannelMode;
+            pref_ldac.eqmid = (uint8_t)prof.LdacEqmid;
+            SontAvdtpSessionSetLdacPreference(&scratch->session, &pref_ldac);
+        }
+    }
 
     step = SontAvdtpSessionStartHandshake(&scratch->session,
                                          scratch->tx,
@@ -815,6 +990,14 @@ static VOID SontSignalingWorker(PVOID context)
             ext->State.NegotiatedChannels = 2;
             ext->State.BitrateKbps = 1536;
             ext->State.CurrentBitpool = 0;
+        } else if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_LDAC) {
+            ext->State.Codec = SonatinaCodecLdac;
+            ext->State.NegotiatedSampling = scratch->session.negotiated.ldac.sampling;
+            ext->State.NegotiatedChannels = (ULONG)SontLdacChannels(&scratch->session.negotiated.ldac);
+            ext->State.CurrentBitpool = 0;
+            ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(
+                scratch->session.negotiated.ldac.sampling,
+                scratch->session.negotiated.ldac.eqmid);
         } else {
             ext->State.Codec = SonatinaCodecSbc;
             ext->State.NegotiatedSampling = scratch->session.negotiated.sbc.sampling;
@@ -839,6 +1022,10 @@ static VOID SontSignalingWorker(PVOID context)
             status = SontRunSbcMediaLoop(ext, media_ch,
                                          &scratch->session.negotiated.sbc,
                                          scratch);
+        } else if (scratch->session.negotiated.codec == SONT_AVDTP_CODEC_LDAC) {
+            status = SontRunLdacMediaLoop(ext, media_ch,
+                                          &scratch->session.negotiated.ldac,
+                                          scratch);
         }
     }
 

@@ -15,6 +15,7 @@
 #include "../src/abr.h"
 #include "../src/avdtp.h"
 #include "../src/avdtp_session.h"
+#include "../src/codec_ldac.h"
 #include "../src/codec_sbc.h"
 #include "../src/media_stream.h"
 #include "../src/profile_validate.h"
@@ -27,6 +28,7 @@
 
 /* Declared in avdtp.c */
 size_t SontAvdtpEncodeSbcOctets(const SONT_SBC_PARAMS *params, uint8_t out[4]);
+size_t SontAvdtpEncodeLdacOctets(const SONT_LDAC_PARAMS *params, uint8_t out[8]);
 
 static void PrintVector(const char *name, const uint8_t *data, size_t len)
 {
@@ -826,6 +828,69 @@ int main(void)
     PrintMath("sbc_44k_stereo_bp35", &sbc_44k_stereo, 35);
     PrintMath("sbc_16k_mono_bp63", &sbc_16k_mono, 63);
     PrintMath("sbc_32k_dual_bp48", &sbc_32k_dual, 48);
+
+    /* D7 LDAC capability, RTP, validation, and libldac real encode check */
+    {
+        SONT_LDAC_PARAMS ldac = {48000u, SONT_LDAC_CHMODE_STEREO, SONT_LDAC_EQMID_HQ};
+        SONT_LDAC_PARAMS chosen;
+        SONT_CAPABILITIES ldac_caps;
+        uint8_t octets[8];
+        uint8_t ldac_raw[64];
+        SONT_LDAC_ENCODER *enc;
+        int16_t pcm[SONT_LDAC_PCM_SAMPLES_PER_PUSH * 2];
+        uint8_t ldac_frames[1024];
+        size_t written = 0;
+        uint8_t frame_num = 0;
+        unsigned push_idx;
+        unsigned idx;
+        unsigned total_frames = 0;
+        uint8_t first_sync = 0;
+
+        assert(SontAvdtpEncodeLdacOctets(&ldac, octets) == 8u);
+        PrintVector("d7_ldac_cap_48k_stereo", octets, 8u);
+
+        memset(&ldac_caps, 0, sizeof(ldac_caps));
+        ldac_caps.codec = SONT_AVDTP_CODEC_LDAC;
+        ldac_caps.ldac = ldac;
+        len = SontAvdtpEncodeCapabilities(&ldac_caps, buf, sizeof(buf));
+        PrintVector("d7_avdtp_caps_ldac", buf, len);
+        assert(SontAvdtpSelectLdacConfig(octets, &ldac, &chosen));
+        assert(chosen.sampling == 48000u && chosen.channel_mode == SONT_LDAC_CHMODE_STEREO);
+
+        FillPattern(ldac_raw, 64u, 0xAAu);
+        len = SontRtpLdacPayload(ldac_raw, 64u, 2u, buf, sizeof(buf));
+        PrintVector("d7_rtp_ldac_payload_2frames", buf, len);
+
+        assert(SontProfileValidateLdacFields(48000u, SONT_LDAC_CHMODE_STEREO, SONT_LDAC_EQMID_HQ) == 1);
+        assert(SontProfileValidateLdacFields(96000u, SONT_LDAC_CHMODE_DUAL, SONT_LDAC_EQMID_MQ) == 1);
+        assert(SontProfileValidateLdacFields(32000u, SONT_LDAC_CHMODE_STEREO, SONT_LDAC_EQMID_HQ) == 0);
+        assert(SontProfileValidateLdacFields(48000u, 3u, SONT_LDAC_EQMID_HQ) == 0);
+        assert(SontProfileValidateLdacFields(48000u, SONT_LDAC_CHMODE_STEREO, 3u) == 0);
+        assert(SontLdacBitrateKbpsInt(48000u, SONT_LDAC_EQMID_HQ) == 990u);
+        assert(SontLdacBitrateKbpsInt(44100u, SONT_LDAC_EQMID_SQ) == 606u);
+
+        enc = SontLdacEncoderCreate(&ldac, 679u);
+        assert(enc != NULL);
+        for (idx = 0; idx < SONT_LDAC_PCM_SAMPLES_PER_PUSH * 2; idx += 2) {
+            int16_t s = (int16_t)(12000.0 * sin(2.0 * 3.14159265358979 * 1000.0 * (double)(idx / 2) / 48000.0));
+            pcm[idx] = s;
+            pcm[idx + 1] = s;
+        }
+        for (push_idx = 0; push_idx < 12; push_idx++) {
+            assert(SontLdacEncode(enc, pcm, SONT_LDAC_PCM_SAMPLES_PER_PUSH,
+                                  ldac_frames, sizeof(ldac_frames), &written, &frame_num) == 0);
+            if (written > 0) {
+                if (first_sync == 0) {
+                    first_sync = ldac_frames[0];
+                }
+                total_frames += frame_num;
+            }
+        }
+        assert(total_frames > 0 && first_sync == 0xAAu);
+        assert(SontLdacSetEqmid(enc, SONT_LDAC_EQMID_SQ) == 0);
+        assert(SontLdacGetEqmid(enc) == SONT_LDAC_EQMID_SQ);
+        SontLdacEncoderDestroy(enc);
+    }
 
     printf("HOST_TESTS_OK\n");
     return 0;

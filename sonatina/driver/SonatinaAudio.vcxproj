@@ -80,12 +80,13 @@
 
   <PropertyGroup>
     <SonatinaLibsbcDefine Condition="Exists('$(ProjectDir)third_party\sbc\include\sbc.h')">SONATINA_WITH_LIBSBC;</SonatinaLibsbcDefine>
+    <SonatinaLibldacDefine Condition="Exists('$(ProjectDir)third_party\ldac\inc\ldacBT.h')">_32BIT_FIXED_POINT;SONATINA_WITH_LIBLDAC;</SonatinaLibldacDefine>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sysvad;$(ProjectDir)third_party\sbc\include;$(ProjectDir)third_party\sbc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SONATINA_KERNEL;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;$(SonatinaLibsbcDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)third_party\sysvad;$(ProjectDir)third_party\sbc\include;$(ProjectDir)third_party\sbc;$(ProjectDir)third_party\ldac\inc;$(ProjectDir)third_party\ldac\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SONATINA_KERNEL;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;$(SonatinaLibsbcDefine)$(SonatinaLibldacDefine)%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4595;%(DisableSpecificWarnings)</DisableSpecificWarnings>
@@ -113,6 +114,7 @@
     <ClCompile Include="src\avdtp_session.c" />
     <ClCompile Include="src\rtp.c" />
     <ClCompile Include="src\codec_sbc.c" />
+    <ClCompile Include="src\codec_ldac.c" />
     <ClCompile Include="src\media_stream.c" />
     <ClCompile Include="src\profile_validate.c" />
     <ClCompile Include="src\abr.c" />
@@ -121,6 +123,12 @@
       <DisableSpecificWarnings>4090;4100;4127;4146;4189;4201;4204;4214;4221;4242;4244;4245;4267;4296;4310;4334;4389;4456;4457;4459;4701;4702;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <ClCompile Include="third_party\sbc\src\sbc.c">
+      <DisableSpecificWarnings>4090;4100;4127;4146;4189;4201;4204;4214;4221;4242;4244;4245;4267;4296;4310;4334;4389;4456;4457;4459;4701;4702;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="third_party\ldac\src\ldaclib.c">
+      <DisableSpecificWarnings>4090;4100;4127;4146;4189;4201;4204;4214;4221;4242;4244;4245;4267;4296;4310;4334;4389;4456;4457;4459;4701;4702;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="third_party\ldac\src\ldacBT.c">
       <DisableSpecificWarnings>4090;4100;4127;4146;4189;4201;4204;4214;4221;4242;4244;4245;4267;4296;4310;4334;4389;4456;4457;4459;4701;4702;4706;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <ClCompile Include="src\miniport_topology.cpp" />
@@ -136,6 +144,7 @@
     <ClInclude Include="src\avdtp_session.h" />
     <ClInclude Include="src\rtp.h" />
     <ClInclude Include="src\codec_sbc.h" />
+    <ClInclude Include="src\codec_ldac.h" />
     <ClInclude Include="src\media_stream.h" />
     <ClInclude Include="src\profile_validate.h" />
     <ClInclude Include="src\abr.h" />

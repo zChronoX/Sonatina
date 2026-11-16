@@ -30,8 +30,9 @@ jobs:
 
       - name: Run T2 C-driver <-> Python-sink UDP loopback tests
         run: |
-          powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5105 -MediaPort 5104
-          powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5115 -MediaPort 5114 -SimulateCongestion
+          powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5105 -MediaPort 5104 -Codec sbc
+          powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5115 -MediaPort 5114 -Codec sbc -SimulateCongestion
+          powershell -ExecutionPolicy Bypass -File sonatina\driver\tests\run_loopback_e2e.ps1 -Seconds 2 -SignalPort 5125 -MediaPort 5124 -Codec ldac
 
       - name: Run T4 quality report sweep
         run: python sonatina\driver\tests\quality_report.py --seconds 1

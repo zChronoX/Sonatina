@@ -40,6 +40,7 @@ typedef struct _SONT_AVDTP_SESSION {
     uint8_t local_seid;
     uint8_t preferred_codec;
     SONT_SBC_PARAMS preferred_sbc;
+    SONT_LDAC_PARAMS preferred_ldac;
 
     uint8_t tx_counter;
     uint8_t pending_tx;
@@ -58,6 +59,9 @@ void SontAvdtpSessionInit(SONT_AVDTP_SESSION *session,
                           uint8_t local_seid,
                           uint8_t preferred_codec,
                           const SONT_SBC_PARAMS *preferred_sbc);
+
+void SontAvdtpSessionSetLdacPreference(SONT_AVDTP_SESSION *session,
+                                       const SONT_LDAC_PARAMS *preferred_ldac);
 
 SONT_AVDTP_STEP_RESULT SontAvdtpSessionStartHandshake(SONT_AVDTP_SESSION *session,
                                                      uint8_t *tx_out,

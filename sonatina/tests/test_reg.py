@@ -63,6 +63,9 @@ class TestRegistryStore(unittest.TestCase):
             aac_channel_mode=0,
             aac_sampling=44100,
             aac_bitrate=192,
+            ldac_sampling=96000,
+            ldac_channel_mode=1,
+            ldac_eqmid=1,
         )
         self.store.write_profile(profile)
         loaded = self.store.read_profile("001122aabbcc")

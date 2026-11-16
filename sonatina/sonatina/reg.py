@@ -24,6 +24,10 @@ MODE_DWORD = {"mono": 0, "dual": 1, "stereo": 2, "joint": 3}
 MODE_BY_DWORD = {v: k for k, v in MODE_DWORD.items()}
 ALLOC_DWORD = {"snr": 0, "loudness": 1}
 ALLOC_BY_DWORD = {v: k for k, v in ALLOC_DWORD.items()}
+LDAC_MODE_DWORD = {"mono": 0, "dual": 1, "stereo": 2}
+LDAC_MODE_BY_DWORD = {v: k for k, v in LDAC_MODE_DWORD.items()}
+LDAC_EQMID_NAMES = {0: "hq", 1: "sq", 2: "mq"}
+LDAC_EQMID_BY_NAME = {"hq": 0, "sq": 1, "mq": 2}
 
 CURRENT_SCHEMA = {
     "Codec": "sz",
@@ -60,6 +64,9 @@ class Profile:
     aac_channel_mode: int = 1
     aac_sampling: int = 48000
     aac_bitrate: int = 256
+    ldac_sampling: int = 48000
+    ldac_channel_mode: int = 2
+    ldac_eqmid: int = 0
 
     def summary(self) -> str:
         if self.codec == "sbc":
@@ -81,6 +88,12 @@ class Profile:
                 self.aac_sampling,
                 2 if self.aac_channel_mode else 1,
                 self.aac_bitrate,
+            )
+        if self.codec == "ldac":
+            return "codec=ldac sampling=%d mode=%s eqmid=%s" % (
+                self.ldac_sampling,
+                LDAC_MODE_BY_DWORD.get(self.ldac_channel_mode, "stereo"),
+                LDAC_EQMID_NAMES.get(self.ldac_eqmid, "hq"),
             )
         return "codec=%s" % self.codec
 
@@ -203,7 +216,7 @@ class Store:
                 min_bitpool=int(_get(key, "SbcMinimumBitpool", defaults.min_bitpool)),
                 max_bitpool=int(_get(key, "SbcMaximumBitpool", defaults.max_bitpool)),
             )
-            if codec not in ("pcm", "sbc", "aac", "aptx"):
+            if codec not in ("pcm", "sbc", "aac", "aptx", "ldac"):
                 codec = "sbc"
             return Profile(
                 device=normalize(address),
@@ -212,6 +225,9 @@ class Store:
                 aac_channel_mode=int(_get(key, "AacChannelMode", 1)),
                 aac_sampling=int(_get(key, "AacSamplingFrequency", 48000)),
                 aac_bitrate=int(_get(key, "AacBitrate", 256)),
+                ldac_sampling=int(_get(key, "LdacSamplingFrequency", 48000)),
+                ldac_channel_mode=int(_get(key, "LdacChannelMode", 2)),
+                ldac_eqmid=int(_get(key, "LdacEqmid", 0)),
             )
         finally:
             winreg.CloseKey(key)
@@ -236,6 +252,9 @@ class Store:
             _set_dword(key, "AacChannelMode", profile.aac_channel_mode)
             _set_dword(key, "AacSamplingFrequency", profile.aac_sampling)
             _set_dword(key, "AacBitrate", profile.aac_bitrate)
+            _set_dword(key, "LdacSamplingFrequency", profile.ldac_sampling)
+            _set_dword(key, "LdacChannelMode", profile.ldac_channel_mode)
+            _set_dword(key, "LdacEqmid", profile.ldac_eqmid)
             _set_sz(key, "UpdatedAt", now_iso())
         finally:
             winreg.CloseKey(key)
@@ -268,7 +287,7 @@ class Store:
         path = self.device_path(address) + r"\Capability"
         key = _create_path(self.hive, path)
         try:
-            for name in ("sbc", "aac", "aptx", "pcm"):
+            for name in ("sbc", "aac", "aptx", "pcm", "ldac"):
                 _set_dword(key, "Codec" + name.capitalize(), 1 if name in codecs else 0)
             _set_dword(key, "SbcMaxBitpool", sbc.max_bitpool if sbc else 0)
             _set_dword(key, "AacMaxBitrate", aac_bitrate)
@@ -288,6 +307,7 @@ class Store:
                 "Aac": bool(_get(key, "CodecAac", 0)),
                 "Aptx": bool(_get(key, "CodecAptx", 0)),
                 "Pcm": bool(_get(key, "CodecPcm", 0)),
+                "Ldac": bool(_get(key, "CodecLdac", 0)),
                 "SbcMaxBitpool": int(_get(key, "SbcMaxBitpool", 0)),
                 "AacMaxBitrate": int(_get(key, "AacMaxBitrate", 0)),
                 "UpdatedAt": _get(key, "UpdatedAt", ""),

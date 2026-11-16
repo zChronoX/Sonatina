@@ -86,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("--aac-sampling", type=int, choices=(44100, 48000))
     set_parser.add_argument("--aac-bitrate", type=int)
     set_parser.add_argument(
+        "--ldac-sampling", type=int, choices=(44100, 48000, 88200, 96000)
+    )
+    set_parser.add_argument(
+        "--ldac-channel-mode", choices=("mono", "dual", "stereo")
+    )
+    set_parser.add_argument("--ldac-eqmid", choices=("hq", "sq", "mq"))
+    set_parser.add_argument(
         "--no-trigger",
         action="store_true",
         help="do not bump the service Trigger value",
@@ -221,6 +228,12 @@ def _print_profile(profile: Profile) -> None:
     print("AacChannelMode: %s" % ("stereo" if profile.aac_channel_mode else "mono"))
     print("AacSamplingFrequency: %d" % profile.aac_sampling)
     print("AacBitrate: %d" % profile.aac_bitrate)
+    print(
+        "LdacChannelMode: %s"
+        % {0: "mono", 1: "dual", 2: "stereo"}.get(profile.ldac_channel_mode, "stereo")
+    )
+    print("LdacSamplingFrequency: %d" % profile.ldac_sampling)
+    print("LdacEqmid: %s" % {0: "hq", 1: "sq", 2: "mq"}.get(profile.ldac_eqmid, "hq"))
 
 
 def _cmd_profile(args) -> int:
@@ -299,6 +312,14 @@ def _cmd_profile(args) -> int:
         profile.aac_sampling = args.aac_sampling
     if args.aac_bitrate:
         profile.aac_bitrate = args.aac_bitrate
+    if args.ldac_sampling:
+        profile.ldac_sampling = args.ldac_sampling
+    if args.ldac_channel_mode:
+        profile.ldac_channel_mode = {"mono": 0, "dual": 1, "stereo": 2}[
+            args.ldac_channel_mode
+        ]
+    if args.ldac_eqmid:
+        profile.ldac_eqmid = {"hq": 0, "sq": 1, "mq": 2}[args.ldac_eqmid]
     try:
         profile.sbc.validate()
     except ValueError as exc:

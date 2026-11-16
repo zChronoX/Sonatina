@@ -74,3 +74,19 @@ size_t SontRtpSbcPayload(const uint8_t *frames, size_t frames_len, uint8_t frame
     }
     return frames_len + 1;
 }
+
+size_t SontRtpLdacPayload(const uint8_t *frames, size_t frames_len, uint8_t frame_count,
+                          uint8_t *out, size_t capacity)
+{
+    if (out == NULL || frame_count == 0 || frame_count > 15 || capacity < 1 + frames_len) {
+        return 0;
+    }
+    if (frames_len != 0 && frames == NULL) {
+        return 0;
+    }
+    out[0] = (uint8_t)(frame_count & 0x0F);
+    if (frames_len != 0) {
+        SONT_MEMCPY(out + 1, frames, frames_len);
+    }
+    return frames_len + 1;
+}

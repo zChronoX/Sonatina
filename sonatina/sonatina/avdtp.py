@@ -85,8 +85,14 @@ MEDIA_TYPE_AUDIO = 0
 TSEP_SRC = 0
 TSEP_SNK = 1
 
-CODEC_TYPE = {"sbc": 0x00, "aac": 0x02, "pcm": 0xFF, "aptx": 0xFF}
+CODEC_TYPE = {"sbc": 0x00, "aac": 0x02, "pcm": 0xFF, "aptx": 0xFF, "ldac": 0xFF}
 CODEC_BY_TYPE = {0x00: "sbc", 0x02: "aac", 0xFF: None}
+
+LDAC_VENDOR_HEADER = b"\x2D\x01\x00\x00\xAA\x00"
+LDAC_FREQ_BITS = {44100: 0x20, 48000: 0x10, 88200: 0x08, 96000: 0x04}
+LDAC_FREQ_ORDER = ((96000, 0x04), (88200, 0x08), (48000, 0x10), (44100, 0x20))
+LDAC_CHMODE_BITS = {"mono": 0x04, "dual": 0x02, "stereo": 0x01}
+LDAC_CHMODE_ORDER = (("stereo", 0x01), ("dual", 0x02), ("mono", 0x04))
 
 AAC_OBJECT_TYPE_AAC_LC = 2
 AAC_FREQ_INDEX = {
@@ -159,16 +165,61 @@ class AacInfo:
 
 
 @dataclass
+class LdacInfo:
+    sampling: int = 48000
+    channel_mode: str = "stereo"
+    eqmid: int = 0  # 0=HQ (990/909), 1=SQ (660/606), 2=MQ (330/303)
+
+    @property
+    def channels(self) -> int:
+        return 1 if self.channel_mode == "mono" else 2
+
+    def to_bytes(self) -> bytes:
+        sf_bit = LDAC_FREQ_BITS.get(self.sampling)
+        cm_bit = LDAC_CHMODE_BITS.get(self.channel_mode)
+        if sf_bit is None:
+            raise ValueError("invalid LDAC sampling %d" % self.sampling)
+        if cm_bit is None:
+            raise ValueError("invalid LDAC channel_mode %r" % self.channel_mode)
+        return LDAC_VENDOR_HEADER + bytes([sf_bit, cm_bit])
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "LdacInfo":
+        if len(data) < 8:
+            raise ValueError("LDAC capability must be 8 bytes, got %d" % len(data))
+        if data[:6] != LDAC_VENDOR_HEADER:
+            raise ValueError("unexpected LDAC vendor/codec header")
+        sampling = None
+        for freq, bit in LDAC_FREQ_ORDER:
+            if data[6] & bit:
+                sampling = freq
+                break
+        if sampling is None:
+            raise ValueError("no supported LDAC sampling bit in 0x%02X" % data[6])
+        channel_mode = None
+        for mode, bit in LDAC_CHMODE_ORDER:
+            if data[7] & bit:
+                channel_mode = mode
+                break
+        if channel_mode is None:
+            raise ValueError("no supported LDAC channel mode bit in 0x%02X" % data[7])
+        return cls(sampling=sampling, channel_mode=channel_mode)
+
+
+@dataclass
 class CodecCapability:
     codec: str
     sbc: SbcParams | None = None
     aac: AacInfo | None = None
+    ldac: LdacInfo | None = None
 
     def specific_bytes(self) -> bytes:
         if self.codec == "sbc":
             return (self.sbc or SbcParams()).to_capability()
         if self.codec == "aac":
             return (self.aac or AacInfo()).to_bytes()
+        if self.codec == "ldac":
+            return (self.ldac or LdacInfo()).to_bytes()
         if self.codec == "aptx":
             # Non-Bluetooth audio codec: two vendor specific octets (placeholder vendor id).
             return b"\x00\x00"
@@ -290,6 +341,7 @@ class CapabilitySet:
     codec: str
     sbc: SbcParams | None = None
     aac: AacInfo | None = None
+    ldac: LdacInfo | None = None
     categories: list[int] = field(default_factory=list)
 
 
@@ -299,6 +351,7 @@ def parse_capabilities(data: bytes) -> CapabilitySet:
     codec: str | None = None
     sbc: SbcParams | None = None
     aac: AacInfo | None = None
+    ldac: LdacInfo | None = None
     seen_codec_block = False
     while index < len(data):
         if index + 2 > len(data):
@@ -343,14 +396,20 @@ def parse_capabilities(data: bytes) -> CapabilitySet:
                 aac = AacInfo.from_bytes(body[2:7])
                 codec = "aac"
             elif codec_type == 0xFF:
-                # Non-Bluetooth audio codec: the presence of vendor specific information
-                # distinguishes raw PCM (header only) from aptX (vendor info).
-                codec = "pcm" if len(body) == 2 else "aptx"
+                if len(body) == 2:
+                    codec = "pcm"
+                elif len(body) >= 10 and body[2:8] == LDAC_VENDOR_HEADER:
+                    ldac = LdacInfo.from_bytes(body[2:10])
+                    codec = "ldac"
+                else:
+                    codec = "aptx"
             else:
                 raise AvdtpError("unsupported codec type 0x%02X" % codec_type)
     if codec is None:
         raise AvdtpError("no Media Codec capability found")
-    return CapabilitySet(codec=codec, sbc=sbc, aac=aac, categories=categories)
+    return CapabilitySet(
+        codec=codec, sbc=sbc, aac=aac, ldac=ldac, categories=categories
+    )
 
 
 def parse_sep_list(payload: bytes) -> list[SepInfo]:

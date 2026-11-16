@@ -413,6 +413,108 @@ class AptxDecoder(Decoder):
         )
 
 
+LDAC_MODES = ("mono", "dual", "stereo")
+LDAC_BITRATES = {
+    0: (909.0, 990.0),  # HQ
+    1: (606.0, 660.0),  # SQ
+    2: (303.0, 330.0),  # MQ
+}
+
+
+def ldac_bitrate_kbps(sampling: int = 48000, eqmid: int = 0) -> float:
+    pair = LDAC_BITRATES.get(eqmid, LDAC_BITRATES[0])
+    return pair[0] if sampling in (44100, 88200) else pair[1]
+
+
+class LdacEncoder(Encoder):
+    codec = "ldac"
+    samples_per_frame = 128
+
+    def __init__(
+        self,
+        sampling: int = 48000,
+        channels: int = 2,
+        eqmid: int = 0,
+        frames_per_packet: int = 2,
+    ) -> None:
+        if sampling not in (44100, 48000, 88200, 96000):
+            raise CodecError("unsupported LDAC sampling %d" % sampling)
+        if eqmid not in (0, 1, 2):
+            raise CodecError("invalid LDAC eqmid %d" % eqmid)
+        self.sampling = sampling
+        self.channels = channels
+        self.eqmid = eqmid
+        self.frames_per_packet = max(1, min(15, frames_per_packet))
+        kbps = ldac_bitrate_kbps(sampling, eqmid)
+        self.frame_len = max(64, int(round(kbps * 1000.0 * 128.0 / (8.0 * sampling))))
+
+    def _frame(self, block: np.ndarray) -> bytes:
+        spf = self.samples_per_frame
+        if len(block) < spf:
+            block = np.pad(block, (0, spf - len(block)))
+        count = min(spf, self.frame_len)
+        index = np.linspace(0, spf - 1, count).astype(np.int32)
+        quantised = np.clip(np.round(block[index] / 256.0), -128, 127).astype(np.int8)
+        return quantised.tobytes() + bytes(self.frame_len - count)
+
+    def payloads(self, pcm: np.ndarray) -> list[Payload]:
+        mono = (
+            pcm.astype(np.float32).mean(axis=1)
+            if pcm.ndim > 1
+            else pcm.astype(np.float32)
+        )
+        spf = self.samples_per_frame
+        frames = [
+            self._frame(mono[start : start + spf]) for start in range(0, len(mono), spf)
+        ]
+        out = []
+        for index in range(0, len(frames), self.frames_per_packet):
+            group = frames[index : index + self.frames_per_packet]
+            out.append(Payload(rtp.pack_ldac(b"".join(group), len(group)), len(group) * spf))
+        return out
+
+
+class LdacDecoder(Decoder):
+    codec = "ldac"
+    samples_per_frame = 128
+
+    def __init__(self, sampling: int = 48000, channels: int = 2) -> None:
+        self.sampling = sampling
+        self.channels = channels
+        self._frames: list[bytes] = []
+
+    def push(self, payload: bytes) -> None:
+        frame_count, body = rtp.unpack_ldac(payload)
+        per = max(1, len(body) // frame_count)
+        for i in range(frame_count):
+            chunk = body[i * per : (i + 1) * per]
+            if chunk:
+                self._frames.append(chunk)
+
+    def finish(self) -> np.ndarray:
+        spf = self.samples_per_frame
+        blocks = []
+        for frame in self._frames:
+            n = min(spf, len(frame))
+            if n == 0:
+                continue
+            raw = np.frombuffer(frame[:n], dtype=np.int8).astype(np.float32) * 256.0
+            if n == 1:
+                block = np.full(spf, float(raw[0]), dtype=np.float32)
+            else:
+                block = np.interp(
+                    np.linspace(0.0, n - 1.0, spf),
+                    np.arange(n, dtype=np.float32),
+                    raw,
+                ).astype(np.float32)
+            blocks.append(block)
+        if not blocks:
+            return np.zeros((0, self.channels), dtype=np.int16)
+        mono = np.concatenate(blocks)
+        stereo = np.repeat(mono[:, None], self.channels, axis=1)
+        return np.clip(stereo, -32768, 32767).astype(np.int16)
+
+
 # --------------------------------------------------------------------------- factory
 
 
@@ -424,6 +526,7 @@ def make_encoder(
     bitpool: int | None = None,
     aac_bitrate: int = 256,
     frames_per_packet: int = 3,
+    ldac_eqmid: int = 0,
 ) -> Encoder:
     if codec == "pcm":
         return PcmEncoder(sampling, channels)
@@ -436,6 +539,8 @@ def make_encoder(
         return AacEncoder(sampling, channels, aac_bitrate)
     if codec == "aptx":
         return AptxEncoder(sampling, channels)
+    if codec == "ldac":
+        return LdacEncoder(sampling, channels, eqmid=ldac_eqmid)
     raise CodecError("unknown codec %r" % codec)
 
 
@@ -457,6 +562,8 @@ def make_decoder(
         return AacDecoder(sampling, channels)
     if codec == "aptx":
         return AptxDecoder(sampling, channels)
+    if codec == "ldac":
+        return LdacDecoder(sampling, channels)
     raise CodecError("unknown codec %r" % codec)
 
 
@@ -467,6 +574,7 @@ def estimate_kbps(
     sbc: SbcParams | None = None,
     bitpool: int | None = None,
     aac_bitrate: int = 256,
+    ldac_eqmid: int = 0,
 ) -> float:
     """Nominal bitrate of a profile, before any transmission."""
     if codec == "sbc":
@@ -478,4 +586,6 @@ def estimate_kbps(
         return float(aac_bitrate)
     if codec == "aptx":
         return 352.0
+    if codec == "ldac":
+        return ldac_bitrate_kbps(sampling, ldac_eqmid)
     return sampling * channels * 16 / 1000.0

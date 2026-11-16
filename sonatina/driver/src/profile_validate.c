@@ -74,6 +74,23 @@ int SontProfileValidateFields(uint32_t codec,
     return 1;
 }
 
+int SontProfileValidateLdacFields(uint32_t ldac_sampling,
+                                  uint32_t ldac_channel_mode,
+                                  uint32_t ldac_eqmid)
+{
+    if (ldac_sampling != 44100u && ldac_sampling != 48000u &&
+        ldac_sampling != 88200u && ldac_sampling != 96000u) {
+        return 0;
+    }
+    if (ldac_channel_mode > 2u) {
+        return 0;
+    }
+    if (ldac_eqmid > 2u) {
+        return 0;
+    }
+    return 1;
+}
+
 void SontFormatBdAddrHex(uint64_t bth_addr, char out[16])
 {
     static const char hex[] = "0123456789ABCDEF";

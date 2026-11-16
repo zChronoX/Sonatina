@@ -127,6 +127,20 @@ def negotiate(transport: UdpTransport, profile: Profile) -> Session:
                 info.bitrate = min(info.bitrate, sink_caps.aac.bitrate)
         capability = avdtp.CodecCapability("aac", aac=info)
         sampling, channels, bitpool = info.sampling, info.channels, None
+    elif profile.codec == "ldac":
+        ldac_mode = {0: "mono", 1: "dual", 2: "stereo"}.get(
+            profile.ldac_channel_mode, "stereo"
+        )
+        info = avdtp.LdacInfo(
+            sampling=profile.ldac_sampling,
+            channel_mode=ldac_mode,
+            eqmid=profile.ldac_eqmid,
+        )
+        if sink_caps.ldac is not None:
+            info.sampling = sink_caps.ldac.sampling or info.sampling
+            info.channel_mode = sink_caps.ldac.channel_mode or info.channel_mode
+        capability = avdtp.CodecCapability("ldac", ldac=info)
+        sampling, channels, bitpool = info.sampling, info.channels, None
     else:
         capability = avdtp.CodecCapability(profile.codec)
         sampling, channels, bitpool = 48000, 2, None
@@ -334,6 +348,7 @@ def run(args) -> int:
                 bitpool=session.bitpool,
                 aac_bitrate=profile.aac_bitrate,
                 frames_per_packet=args.frames_per_packet,
+                ldac_eqmid=profile.ldac_eqmid,
             )
             payloads = encoder.payloads(pcm)
         except codecs.EncoderUnavailable as exc:

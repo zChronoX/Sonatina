@@ -1,0 +1,12 @@
+Sonatina vendors Sony's AOSP LDAC encoder library (platform/external/libldac)
+under the Apache License, Version 2.0 (see LICENSE and NOTICE in this directory).
+
+Upstream repository:
+  https://android.googlesource.com/platform/external/libldac
+
+Retained / minimally adapted files (built with -D_32BIT_FIXED_POINT for integer-only DSP):
+- inc/ldacBT.h            (verbatim)
+- src/struct_ldac.h       (SONATINA_KERNEL portable.h pool/memory shims, MSVC UNUSED_ATTR, _32BIT_FIXED_POINT scalar guard)
+- src/ldacBT_internal.h   (SONATINA_KERNEL portable.h shim, guard <unistd.h> on _WIN32)
+- src/ldacBT_internal.c   (_WIN32 little-endian guard, uint32_t copy in F32 deinterleave)
+- All other src/*.c/*.h   (verbatim)

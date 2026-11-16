@@ -62,6 +62,15 @@ class TestCapabilities(unittest.TestCase):
                 encoded = avdtp.encode_capabilities(avdtp.CodecCapability(codec))
                 self.assertEqual(avdtp.parse_capabilities(encoded).codec, codec)
 
+    def test_ldac_capability_roundtrip(self):
+        info = avdtp.LdacInfo(sampling=96000, channel_mode="dual")
+        encoded = avdtp.encode_capabilities(avdtp.CodecCapability("ldac", ldac=info))
+        parsed = avdtp.parse_capabilities(encoded)
+        self.assertEqual(parsed.codec, "ldac")
+        self.assertIsNotNone(parsed.ldac)
+        self.assertEqual(parsed.ldac.sampling, 96000)
+        self.assertEqual(parsed.ldac.channel_mode, "dual")
+
     def test_sep_list(self):
         seps = [avdtp.SepInfo(seid=1), avdtp.SepInfo(seid=2, tsep=avdtp.TSEP_SRC)]
         parsed = avdtp.parse_sep_list(avdtp.encode_sep_list(seps))

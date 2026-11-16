@@ -66,6 +66,16 @@ class TestPayloads(unittest.TestCase):
     def test_raw_roundtrip(self):
         self.assertEqual(rtp.unpack_raw(rtp.pack_raw(b"abc")), b"abc")
 
+    def test_ldac_roundtrip_and_rejects_empty(self):
+        body = bytes([0xAA, 0x10, 0x20, 0x30]) * 2
+        payload = rtp.pack_ldac(body, frame_count=2)
+        self.assertEqual(payload[0], 0x02)
+        count, raw = rtp.unpack_ldac(payload)
+        self.assertEqual(count, 2)
+        self.assertEqual(raw, body)
+        with self.assertRaises(rtp.RtpError):
+            rtp.unpack_ldac(b"\x00\xAA")
+
 
 class TestSequenceTracker(unittest.TestCase):
     def test_no_loss(self):

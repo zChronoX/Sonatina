@@ -119,6 +119,29 @@ class App:
             row, from_=64, to=512, increment=32, width=6, textvariable=self.aac_bitrate
         ).pack(side="left", padx=2)
 
+        self.ldac_frame = ttk.LabelFrame(right, text="LDAC", padding=6)
+        self.ldac_frame.pack(fill="x", pady=6)
+        self.ldac_sampling = tk.StringVar(value="48000")
+        self.ldac_mode = tk.StringVar(value="stereo")
+        self.ldac_eqmid = tk.StringVar(value="hq")
+        self._combo_row(
+            self.ldac_frame,
+            0,
+            "Sampling",
+            self.ldac_sampling,
+            ("44100", "48000", "88200", "96000"),
+        )
+        self._combo_row(
+            self.ldac_frame,
+            1,
+            "Channel mode",
+            self.ldac_mode,
+            ("mono", "dual", "stereo"),
+        )
+        self._combo_row(
+            self.ldac_frame, 2, "Quality", self.ldac_eqmid, ("hq", "sq", "mq")
+        )
+
         actions = ttk.Frame(right)
         actions.pack(fill="x", pady=(8, 0))
         ttk.Button(actions, text="Apply", command=self.apply).pack(side="left")
@@ -206,6 +229,11 @@ class App:
         self.aac_sampling.set(str(profile.aac_sampling))
         self.aac_channels.set("stereo" if profile.aac_channel_mode else "mono")
         self.aac_bitrate.set(str(profile.aac_bitrate))
+        self.ldac_sampling.set(str(profile.ldac_sampling))
+        self.ldac_mode.set(
+            {0: "mono", 1: "dual", 2: "stereo"}.get(profile.ldac_channel_mode, "stereo")
+        )
+        self.ldac_eqmid.set({0: "hq", 1: "sq", 2: "mq"}.get(profile.ldac_eqmid, "hq"))
         self._update_estimate()
 
     def _form_sbc(self) -> SbcParams:
@@ -227,9 +255,21 @@ class App:
             aac_channel_mode=1 if self.aac_channels.get() == "stereo" else 0,
             aac_sampling=int(self.aac_sampling.get()),
             aac_bitrate=int(self.aac_bitrate.get()),
+            ldac_sampling=int(self.ldac_sampling.get()),
+            ldac_channel_mode={"mono": 0, "dual": 1, "stereo": 2}.get(
+                self.ldac_mode.get(), 2
+            ),
+            ldac_eqmid={"hq": 0, "sq": 1, "mq": 2}.get(self.ldac_eqmid.get(), 0),
         )
 
     def _update_estimate(self) -> None:
+        if self.codec_var.get() == "ldac":
+            eqmid = {"hq": 0, "sq": 1, "mq": 2}.get(self.ldac_eqmid.get(), 0)
+            sf = int(self.ldac_sampling.get() or "48000")
+            pair = (909.0, 990.0) if eqmid == 0 else ((606.0, 660.0) if eqmid == 1 else (303.0, 330.0))
+            kbps = pair[0] if sf in (44100, 88200) else pair[1]
+            self.estimate_var.set("LDAC estimate: %.0f kbit/s" % kbps)
+            return
         try:
             sbc = self._form_sbc()
             sbc.validate()

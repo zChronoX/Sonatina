@@ -18,7 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from sonatina import avdtp  # noqa: E402
-from sonatina.rtp import RtpPacket, pack_sbc  # noqa: E402
+from sonatina.rtp import RtpPacket, pack_ldac, pack_sbc  # noqa: E402
 from sonatina.sbc import SbcParams  # noqa: E402
 
 
@@ -39,6 +39,10 @@ def build_vectors() -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
         avdtp.CodecCapability("sbc", sbc=sbc_44k_stereo)
     )
     cap_pcm = avdtp.encode_capabilities(avdtp.CodecCapability("pcm"))
+    ldac_default = avdtp.LdacInfo(sampling=48000, channel_mode="stereo")
+    cap_ldac = avdtp.encode_capabilities(
+        avdtp.CodecCapability("ldac", ldac=ldac_default)
+    )
 
     set_cfg_default_payload = avdtp.set_configuration(
         2, 1, avdtp.CodecCapability("sbc", sbc=sbc_default)
@@ -166,6 +170,9 @@ def build_vectors() -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
         "d3_hs_07_close_cmd": avdtp.command(
             avdtp.SIG_CLOSE, avdtp.single_seid(2), transaction=6
         ).encode(),
+        "d7_ldac_cap_48k_stereo": ldac_default.to_bytes(),
+        "d7_avdtp_caps_ldac": cap_ldac,
+        "d7_rtp_ldac_payload_2frames": pack_ldac(_pattern(64, 0xAA), frame_count=2),
     }
 
     math_cases = {

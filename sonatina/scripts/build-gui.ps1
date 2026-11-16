@@ -39,6 +39,9 @@ try {
         --noconfirm `
         --onefile `
         --windowed `
+        --paths $pkgRoot `
+        --hidden-import sonatina.gui `
+        --collect-submodules sonatina `
         --name SonatinaConfig `
         --distpath $OutDir `
         $entry

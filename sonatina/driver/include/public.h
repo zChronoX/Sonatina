@@ -40,6 +40,9 @@ typedef struct _SONATINA_PROFILE {
     ULONG AacSampling;
     ULONG AacChannels;
     ULONG AacBitrate;           /* kbit/s */
+    ULONG LdacSampling;         /* 44100/48000/88200/96000 */
+    ULONG LdacChannelMode;      /* 0 mono, 1 dual, 2 stereo */
+    ULONG LdacEqmid;            /* 0 HQ, 1 SQ, 2 MQ */
 } SONATINA_PROFILE, *PSONATINA_PROFILE;
 
 typedef struct _SONATINA_STATE {

@@ -4,6 +4,7 @@
 
 /* Encodes the four SBC "Media Codec Specific Information Elements" octets. */
 size_t SontAvdtpEncodeSbcOctets(const SONT_SBC_PARAMS *params, uint8_t out[4]);
+size_t SontAvdtpEncodeLdacOctets(const SONT_LDAC_PARAMS *params, uint8_t out[8]);
 
 size_t SontAvdtpEncode(uint8_t transaction, uint8_t packet_type, uint8_t message_type,
                        uint8_t signal, const uint8_t *payload, size_t payload_len,
@@ -83,6 +84,21 @@ size_t SontAvdtpEncodeCapabilities(const SONT_CAPABILITIES *caps,
         out[offset++] = header[1];
         SONT_MEMCPY(out + offset, sbc, 4);
         return offset + 4;
+    }
+    if (caps->codec == SONT_AVDTP_CODEC_LDAC) {
+        uint8_t ldac[8];
+        if (SontAvdtpEncodeLdacOctets(&caps->ldac, ldac) != 8) {
+            return 0;
+        }
+        if (offset + 2 + 2 + 8 > capacity) {
+            return 0;
+        }
+        out[offset++] = SONT_AVDTP_CAT_MEDIA_CODEC;
+        out[offset++] = 10;
+        out[offset++] = header[0];
+        out[offset++] = SONT_AVDTP_CODEC_RAW; /* 0xFF vendor-specific on wire */
+        SONT_MEMCPY(out + offset, ldac, 8);
+        return offset + 8;
     }
     if (offset + 2 + 2 > capacity) {
         return 0;
@@ -173,6 +189,65 @@ static bool SontDecodeSbcOctets(const uint8_t in[4], SONT_SBC_PARAMS *params)
     return true;
 }
 
+size_t SontAvdtpEncodeLdacOctets(const SONT_LDAC_PARAMS *params, uint8_t out[8])
+{
+    uint8_t sf_bit;
+    uint8_t cm_bit;
+
+    if (params == NULL || out == NULL) {
+        return 0;
+    }
+    sf_bit = SontLdacSamplingBit(params->sampling);
+    cm_bit = SontLdacChannelModeBit(params->channel_mode);
+    if (sf_bit == 0 || cm_bit == 0) {
+        return 0;
+    }
+    out[0] = 0x2Du;
+    out[1] = 0x01u;
+    out[2] = 0x00u;
+    out[3] = 0x00u;
+    out[4] = 0xAAu;
+    out[5] = 0x00u;
+    out[6] = sf_bit;
+    out[7] = cm_bit;
+    return 8;
+}
+
+static bool SontDecodeLdacOctets(const uint8_t in[8], SONT_LDAC_PARAMS *params)
+{
+    static const uint32_t freqs[] = {96000u, 88200u, 48000u, 44100u};
+    static const uint8_t fbits[] = {0x04u, 0x08u, 0x10u, 0x20u};
+    size_t i;
+    bool ok = false;
+
+    if (in[0] != 0x2Du || in[1] != 0x01u || in[2] != 0x00u || in[3] != 0x00u ||
+        in[4] != 0xAAu || in[5] != 0x00u) {
+        return false;
+    }
+    SONT_MEMSET(params, 0, sizeof(*params));
+    for (i = 0; i < 4; i++) {
+        if ((in[6] & fbits[i]) != 0) {
+            params->sampling = freqs[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+    if ((in[7] & 0x01u) != 0) {
+        params->channel_mode = SONT_LDAC_CHMODE_STEREO;
+    } else if ((in[7] & 0x02u) != 0) {
+        params->channel_mode = SONT_LDAC_CHMODE_DUAL;
+    } else if ((in[7] & 0x04u) != 0) {
+        params->channel_mode = SONT_LDAC_CHMODE_MONO;
+    } else {
+        return false;
+    }
+    params->eqmid = SONT_LDAC_EQMID_HQ;
+    return true;
+}
+
 bool SontAvdtpParseCapabilities(const uint8_t *data, size_t length,
                                 SONT_CAPABILITIES *caps)
 {
@@ -219,6 +294,16 @@ bool SontAvdtpParseCapabilities(const uint8_t *data, size_t length,
                 }
                 SONT_MEMCPY(caps->raw_sbc, body + 2, 4);
                 caps->has_raw_sbc = true;
+            } else if (caps->codec == SONT_AVDTP_CODEC_RAW && body_len >= 10 &&
+                       body[2] == 0x2Du && body[3] == 0x01u &&
+                       body[4] == 0x00u && body[5] == 0x00u &&
+                       body[6] == 0xAAu && body[7] == 0x00u) {
+                if (!SontDecodeLdacOctets(body + 2, &caps->ldac)) {
+                    return false;
+                }
+                caps->codec = SONT_AVDTP_CODEC_LDAC;
+                SONT_MEMCPY(caps->raw_ldac, body + 2, 8);
+                caps->has_raw_ldac = true;
             }
         }
     }
@@ -408,6 +493,75 @@ bool SontAvdtpSelectSbcConfig(const uint8_t peer_sbc[4],
     }
     result.min_bitpool = min_bp;
     result.max_bitpool = max_bp;
+    *selected = result;
+    return true;
+}
+
+bool SontAvdtpSelectLdacConfig(const uint8_t peer_ldac[8],
+                               const SONT_LDAC_PARAMS *preferred,
+                               SONT_LDAC_PARAMS *selected)
+{
+    static const uint32_t freqs[] = {96000u, 88200u, 48000u, 44100u};
+    static const uint8_t fbits[] = {0x04u, 0x08u, 0x10u, 0x20u};
+    static const uint8_t modes[] = {SONT_LDAC_CHMODE_STEREO, SONT_LDAC_CHMODE_DUAL, SONT_LDAC_CHMODE_MONO};
+    static const uint8_t mbits[] = {0x01u, 0x02u, 0x04u};
+    SONT_LDAC_PARAMS result;
+    size_t i;
+    bool ok;
+
+    if (peer_ldac == NULL || preferred == NULL || selected == NULL) {
+        return false;
+    }
+    if (peer_ldac[0] != 0x2Du || peer_ldac[1] != 0x01u ||
+        peer_ldac[2] != 0x00u || peer_ldac[3] != 0x00u ||
+        peer_ldac[4] != 0xAAu || peer_ldac[5] != 0x00u) {
+        return false;
+    }
+
+    SONT_MEMSET(&result, 0, sizeof(result));
+    ok = false;
+    for (i = 0; i < 4; i++) {
+        if (preferred->sampling == freqs[i] && (peer_ldac[6] & fbits[i]) != 0) {
+            result.sampling = freqs[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        for (i = 0; i < 4; i++) {
+            if ((peer_ldac[6] & fbits[i]) != 0) {
+                result.sampling = freqs[i];
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    ok = false;
+    for (i = 0; i < 3; i++) {
+        if (preferred->channel_mode == modes[i] && (peer_ldac[7] & mbits[i]) != 0) {
+            result.channel_mode = modes[i];
+            ok = true;
+            break;
+        }
+    }
+    if (!ok) {
+        for (i = 0; i < 3; i++) {
+            if ((peer_ldac[7] & mbits[i]) != 0) {
+                result.channel_mode = modes[i];
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    result.eqmid = (preferred->eqmid <= SONT_LDAC_EQMID_MQ) ? preferred->eqmid : SONT_LDAC_EQMID_HQ;
     *selected = result;
     return true;
 }

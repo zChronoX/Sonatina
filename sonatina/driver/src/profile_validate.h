@@ -22,6 +22,10 @@ int SontProfileValidateFields(uint32_t codec,
                               uint32_t aac_channels,
                               uint32_t aac_bitrate);
 
+int SontProfileValidateLdacFields(uint32_t ldac_sampling,
+                                  uint32_t ldac_channel_mode,
+                                  uint32_t ldac_eqmid);
+
 /* Format lower 48 bits of `bth_addr` into 12 uppercase hex chars + NUL. */
 void SontFormatBdAddrHex(uint64_t bth_addr, char out[16]);
 

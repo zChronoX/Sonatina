@@ -160,6 +160,23 @@ def unpack_raw(payload: bytes) -> bytes:
     return payload
 
 
+def pack_ldac(frames_bytes: bytes, frame_count: int = 1) -> bytes:
+    if not frames_bytes:
+        raise RtpError("empty LDAC payload")
+    if not 1 <= frame_count <= 15:
+        raise RtpError("LDAC frame_count must be 1..15, got %d" % frame_count)
+    return bytes([frame_count & 0x0F]) + frames_bytes
+
+
+def unpack_ldac(payload: bytes) -> tuple[int, bytes]:
+    if len(payload) < 2:
+        raise RtpError("LDAC payload too short")
+    frame_count = payload[0] & 0x0F
+    if frame_count == 0:
+        raise RtpError("LDAC payload declares 0 frames")
+    return frame_count, payload[1:]
+
+
 def timestamp_after(samples: int, sampling: int, clock: int = CLOCK_RATE) -> int:
     """RTP timestamp advance for `samples` PCM samples at `sampling` Hz."""
     if sampling <= 0:

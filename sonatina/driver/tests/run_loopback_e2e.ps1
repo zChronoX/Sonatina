@@ -7,6 +7,7 @@ param(
     [int]$Seconds = 3,
     [int]$SignalPort = 5005,
     [int]$MediaPort = 5004,
+    [ValidateSet('sbc', 'ldac')][string]$Codec = 'sbc',
     [switch]$SimulateCongestion
 )
 
@@ -17,6 +18,8 @@ $pkgRoot = Split-Path -Parent $driverDir
 $srcDir = Join-Path $driverDir 'src'
 $sbcIncDir = Join-Path $driverDir 'third_party\sbc\include'
 $sbcSrcDir = Join-Path $driverDir 'third_party\sbc\src'
+$ldacIncDir = Join-Path $driverDir 'third_party\ldac\inc'
+$ldacSrcDir = Join-Path $driverDir 'third_party\ldac\src'
 $outDir = Join-Path $testsDir 'build'
 if (-not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir | Out-Null
@@ -30,10 +33,15 @@ $sources = @(
     (Join-Path $srcDir 'avdtp_session.c'),
     (Join-Path $srcDir 'rtp.c'),
     (Join-Path $srcDir 'codec_sbc.c'),
+    (Join-Path $srcDir 'codec_ldac.c'),
     (Join-Path $srcDir 'media_stream.c'),
     (Join-Path $srcDir 'trace_ring.c'),
     (Join-Path $sbcSrcDir 'bits.c'),
     (Join-Path $sbcSrcDir 'sbc.c')
+)
+$ldacSources = @(
+    (Join-Path $ldacSrcDir 'ldaclib.c'),
+    (Join-Path $ldacSrcDir 'ldacBT.c')
 )
 
 $cl = Get-Command cl -ErrorAction SilentlyContinue
@@ -59,13 +67,16 @@ if (-not $cl -and -not $clang -and -not $gcc) {
 
 if ($cl) {
     Write-Host 'compiling loopback_e2e.exe with cl.exe...'
-    & $cl.Source /nologo /W4 /WX /DSONATINA_HOST /DSONATINA_WITH_LIBSBC /I"$srcDir" /I"$sbcIncDir" /Fe:$exe /Fo:"$outDir\" @sources ws2_32.lib
+    & $cl.Source /nologo /c /W3 /wd4100 /wd4127 /wd4189 /wd4244 /wd4245 /wd4267 /wd4456 /wd4457 /wd4459 /wd4701 /wd4702 /wd4706 /D_32BIT_FIXED_POINT /I"$ldacIncDir" /I"$ldacSrcDir" /Fo:"$outDir\" @ldacSources
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $ldacObjs = @((Join-Path $outDir 'ldaclib.obj'), (Join-Path $outDir 'ldacBT.obj'))
+    & $cl.Source /nologo /W4 /WX /DSONATINA_HOST /DSONATINA_WITH_LIBSBC /DSONATINA_WITH_LIBLDAC /D_32BIT_FIXED_POINT /I"$srcDir" /I"$sbcIncDir" /I"$ldacIncDir" /Fe:$exe /Fo:"$outDir\" @sources @ldacObjs ws2_32.lib
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 elseif ($clang) {
     Write-Host 'compiling loopback_e2e.exe with clang...'
     $clangTarget = & $clang.Source -dumpmachine 2>$null
-    $clangArgs = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-DSONATINA_HOST', '-DSONATINA_WITH_LIBSBC', "-I$srcDir", "-I$sbcIncDir", '-o', $exe) + $sources + @('-lws2_32')
+    $clangArgs = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-DSONATINA_HOST', '-DSONATINA_WITH_LIBSBC', '-DSONATINA_WITH_LIBLDAC', '-D_32BIT_FIXED_POINT', "-I$srcDir", "-I$sbcIncDir", "-I$ldacIncDir", "-I$ldacSrcDir", '-o', $exe) + $sources + $ldacSources + @('-lws2_32')
     if ($clangTarget -notmatch 'msvc') {
         $clangArgs += '-lm'
     }
@@ -74,7 +85,7 @@ elseif ($clang) {
 }
 elseif ($gcc) {
     Write-Host 'compiling loopback_e2e.exe with gcc...'
-    & $gcc.Source -std=c11 -Wall -Wextra -Werror -DSONATINA_HOST -DSONATINA_WITH_LIBSBC "-I$srcDir" "-I$sbcIncDir" -o $exe @sources -lws2_32 -lm
+    & $gcc.Source -std=c11 -Wall -Wextra -Werror -DSONATINA_HOST -DSONATINA_WITH_LIBSBC -DSONATINA_WITH_LIBLDAC -D_32BIT_FIXED_POINT "-I$srcDir" "-I$sbcIncDir" "-I$ldacIncDir" "-I$ldacSrcDir" -o $exe @sources @ldacSources -lws2_32 -lm
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 else {
@@ -93,7 +104,7 @@ $sink = $null
 try {
     $sinkArgs = @(
         '-m', 'sonatina', 'sink',
-        '--caps', 'pcm,sbc',
+        '--caps', 'pcm,sbc,ldac',
         '--wait', '15',
         '--duration', "$($Seconds + 4)",
         '--idle', '1.0',
@@ -120,7 +131,7 @@ try {
         exit 1
     }
 
-    $cArgs = @('--signal-port', "$SignalPort", '--media-port', "$MediaPort", '--seconds', "$Seconds")
+    $cArgs = @('--signal-port', "$SignalPort", '--media-port', "$MediaPort", '--seconds', "$Seconds", '--codec', $Codec)
     if ($SimulateCongestion) {
         $cArgs += '--simulate-congestion'
     }

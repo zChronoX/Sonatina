@@ -103,12 +103,28 @@ class TestEstimate(unittest.TestCase):
             codecs.estimate_kbps("aac", aac_bitrate=256), 256.0, places=3
         )
         self.assertAlmostEqual(codecs.estimate_kbps("aptx"), 352.0, places=3)
+        self.assertAlmostEqual(
+            codecs.estimate_kbps("ldac", sampling=48000, ldac_eqmid=0), 990.0, places=3
+        )
+        self.assertAlmostEqual(
+            codecs.estimate_kbps("ldac", sampling=44100, ldac_eqmid=1), 606.0, places=3
+        )
+
+    def test_ldac_roundtrip(self):
+        pcm = tone(0.1)
+        encoder = codecs.make_encoder("ldac", sampling=48000, channels=2, ldac_eqmid=0)
+        decoder = codecs.make_decoder("ldac", sampling=48000, channels=2)
+        for payload in encoder.payloads(pcm):
+            decoder.push(payload.data)
+        result = decoder.finish()
+        self.assertEqual(result.shape[1], 2)
+        self.assertGreater(len(result), 0)
 
     def test_unknown_codec(self):
         with self.assertRaises(codecs.CodecError):
-            codecs.make_encoder("ldac")
+            codecs.make_encoder("bogus_codec")
         with self.assertRaises(codecs.CodecError):
-            codecs.make_decoder("ldac")
+            codecs.make_decoder("bogus_codec")
 
 
 @unittest.skipIf(codecs.ffmpeg_path() is not None, "FFmpeg is installed")

@@ -15,7 +15,7 @@ from .reg import Store
 from .sbc import SbcParams
 from .transport import UdpTransport
 
-KNOWN_CODECS = ("pcm", "sbc", "aac", "aptx")
+KNOWN_CODECS = ("pcm", "sbc", "aac", "aptx", "ldac")
 
 
 class SinkError(Exception):
@@ -170,6 +170,12 @@ def build_seps(
                 "aac",
                 aac=avdtp.AacInfo(sampling=sampling, channels=2, bitrate=aac_bitrate),
             )
+        elif name == "ldac":
+            ldac_sf = sampling if sampling in (44100, 48000, 88200, 96000) else 48000
+            capability = avdtp.CodecCapability(
+                "ldac",
+                ldac=avdtp.LdacInfo(sampling=ldac_sf, channel_mode="stereo"),
+            )
         else:
             capability = avdtp.CodecCapability(name)
         seps.append(
@@ -238,10 +244,20 @@ def run(args) -> int:
         sampling = (
             sbc.sampling
             if sbc
-            else (capability.aac.sampling if capability.aac else args.sampling)
+            else (
+                capability.aac.sampling
+                if capability.aac
+                else (capability.ldac.sampling if capability.ldac else args.sampling)
+            )
         )
         channels = (
-            sbc.channels if sbc else (capability.aac.channels if capability.aac else 2)
+            sbc.channels
+            if sbc
+            else (
+                capability.aac.channels
+                if capability.aac
+                else (capability.ldac.channels if capability.ldac else 2)
+            )
         )
 
         try:

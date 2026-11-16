@@ -28,4 +28,9 @@ bool SontRtpDecodeHeader(const uint8_t *data, size_t length, SONT_RTP_HEADER *he
 size_t SontRtpSbcPayload(const uint8_t *frames, size_t frames_len, uint8_t frame_count,
                          uint8_t *out, size_t capacity);
 
+/* LDAC payload: one octet with the frame count in the low nibble (bits 3..0),
+ * followed by the concatenated LDAC transport frames. */
+size_t SontRtpLdacPayload(const uint8_t *frames, size_t frames_len, uint8_t frame_count,
+                          uint8_t *out, size_t capacity);
+
 #endif /* SONATINA_RTP_H */

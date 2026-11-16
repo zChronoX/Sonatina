@@ -6,7 +6,7 @@ headset simulator negotiates codecs with AVDTP and measures the stream.
 
 __version__ = "0.1.0"
 
-CODECS = ("pcm", "sbc", "aac", "aptx")
+CODECS = ("pcm", "sbc", "aac", "aptx", "ldac")
 
 REG_ROOT = r"Software\Sonatina"
 

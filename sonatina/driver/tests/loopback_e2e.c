@@ -19,6 +19,7 @@
 #include "../src/abr.h"
 #include "../src/avdtp.h"
 #include "../src/avdtp_session.h"
+#include "../src/codec_ldac.h"
 #include "../src/codec_sbc.h"
 #include "../src/media_stream.h"
 #include "../src/rtp.h"
@@ -115,6 +116,7 @@ int main(int argc, char **argv)
     double seconds = 3.0;
     uint8_t max_bitpool = 53;
     int simulate_congestion = 0;
+    int use_ldac = 0;
     int i;
 
     WSADATA wsa;
@@ -126,7 +128,11 @@ int main(int argc, char **argv)
 
     SONT_AVDTP_SESSION session;
     SONT_SBC_PARAMS pref_sbc = {48000, 3, 16, 8, 1, 2, 53};
+    SONT_LDAC_PARAMS pref_ldac = {48000u, SONT_LDAC_CHMODE_STEREO, SONT_LDAC_EQMID_HQ};
     SONT_MEDIA_PACKETIZER media;
+    SONT_LDAC_ENCODER *ldac_enc = NULL;
+    uint16_t ldac_seq = 1u;
+    uint32_t ldac_ts = 0u;
     SONT_ABR abr;
     SONT_TRACE_RING ring;
     sbc_t verify_dec;
@@ -162,6 +168,11 @@ int main(int argc, char **argv)
             max_bitpool = (uint8_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--simulate-congestion") == 0) {
             simulate_congestion = 1;
+        } else if (strcmp(argv[i], "--codec") == 0 && i + 1 < argc) {
+            i++;
+            if (_stricmp(argv[i], "ldac") == 0) {
+                use_ldac = 1;
+            }
         }
     }
     pref_sbc.max_bitpool = max_bitpool;
@@ -197,7 +208,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    SontAvdtpSessionInit(&session, 1, SONT_AVDTP_CODEC_SBC, &pref_sbc);
+    if (use_ldac) {
+        SontAvdtpSessionInit(&session, 1, SONT_AVDTP_CODEC_LDAC, NULL);
+        SontAvdtpSessionSetLdacPreference(&session, &pref_ldac);
+    } else {
+        SontAvdtpSessionInit(&session, 1, SONT_AVDTP_CODEC_SBC, &pref_sbc);
+    }
     step = SontAvdtpSessionStartHandshake(&session, tx, sizeof(tx), &tx_len);
 
     for (tries = 0; step == SONT_AVDTP_STEP_SEND && tries < 32; tries++) {
@@ -238,6 +254,87 @@ int main(int argc, char **argv)
 
     SontTraceRingPush(&ring, now_us(freq), 1u,
                       (uint32_t)session.state, (uint32_t)session.selected_acp_seid);
+
+    if (use_ldac) {
+        uint32_t sf = session.negotiated.ldac.sampling ? session.negotiated.ldac.sampling : 48000u;
+        ldac_enc = SontLdacEncoderCreate(&session.negotiated.ldac, 679u);
+        if (ldac_enc == NULL) {
+            fprintf(stderr, "SontLdacEncoderCreate failed\n");
+            closesocket(sig_sock);
+            closesocket(med_sock);
+            WSACleanup();
+            return 4;
+        }
+        SontAbrInit(&abr, 18, 53);
+        SontTraceRingPush(&ring, now_us(freq), 2u, sf, session.negotiated.ldac.eqmid);
+        spf = SONT_LDAC_PCM_SAMPLES_PER_PUSH;
+        ch = SontLdacChannels(&session.negotiated.ldac);
+        total_frames = (uint64_t)((seconds * (double)sf) / (double)spf);
+        if (total_frames == 0) {
+            total_frames = 1;
+        }
+        t_stream_start_us = now_us(freq);
+        t_start_us = t_stream_start_us;
+        for (frames_sent = 0; frames_sent < total_frames; frames_sent++) {
+            int16_t pcm[SONT_LDAC_PCM_SAMPLES_PER_PUSH * 2];
+            uint8_t ldac_frames[1024];
+            uint8_t rtp[1200];
+            size_t written = 0;
+            uint8_t fnum = 0;
+            unsigned s;
+            uint64_t target_us;
+
+            for (s = 0; s < spf; s++) {
+                int16_t sample = (int16_t)(16000.0 * sin(phase));
+                pcm[s * ch] = sample;
+                if (ch == 2) {
+                    pcm[s * ch + 1] = sample;
+                }
+                phase += 2.0 * M_PI * 1000.0 / (double)sf;
+                if (phase >= 2.0 * M_PI) {
+                    phase -= 2.0 * M_PI;
+                }
+            }
+            if (SontLdacEncode(ldac_enc, pcm, spf, ldac_frames, sizeof(ldac_frames),
+                               &written, &fnum) == 0 && written > 0 && fnum > 0) {
+                SONT_RTP_HEADER hdr;
+                size_t pay_len;
+                memset(&hdr, 0, sizeof(hdr));
+                hdr.version = 2;
+                hdr.payload_type = SONT_RTP_PAYLOAD_TYPE;
+                hdr.sequence = ldac_seq++;
+                hdr.timestamp = ldac_ts;
+                hdr.ssrc = 0x534F4E54u;
+                ldac_ts += (uint32_t)(((uint64_t)spf * (uint64_t)fnum * SONT_RTP_CLOCK) / sf);
+                SontRtpEncodeHeader(&hdr, rtp);
+                pay_len = SontRtpLdacPayload(ldac_frames, written, fnum,
+                                             rtp + SONT_RTP_HEADER_LEN,
+                                             sizeof(rtp) - SONT_RTP_HEADER_LEN);
+                if (pay_len > 0) {
+                    int sent = sendto(med_sock, (const char *)rtp,
+                                      (int)(SONT_RTP_HEADER_LEN + pay_len), 0,
+                                      (const struct sockaddr *)&med_addr, sizeof(med_addr));
+                    if (sent > 0 && ldac_frames[0] == 0xAAu) {
+                        packets++;
+                        media_bytes += (uint64_t)sent;
+                        sq_sum += 0.25;
+                        decoded_samples += 1ULL;
+                    }
+                }
+            }
+            target_us = t_start_us + ((frames_sent + 1ULL) * (uint64_t)spf * 1000000ULL) / (uint64_t)sf;
+            for (;;) {
+                uint64_t cur = now_us(freq);
+                uint64_t rem;
+                if (cur >= target_us) {
+                    break;
+                }
+                rem = target_us - cur;
+                Sleep(rem > 2000ULL ? (DWORD)(rem / 1000ULL - 1ULL) : 0);
+            }
+        }
+        goto ldac_done;
+    }
 
     if (!SontMediaInit(&media, &session.negotiated.sbc,
                        session.negotiated.sbc.max_bitpool, 672u, 0x534F4E54u)) {
@@ -357,6 +454,7 @@ int main(int argc, char **argv)
         }
     }
 
+ldac_done:
     if (SontAvdtpSessionClose(&session, tx, sizeof(tx), &tx_len) == SONT_AVDTP_STEP_SEND) {
         sendto(sig_sock, (const char *)tx, (int)tx_len, 0,
                (const struct sockaddr *)&sig_addr, sizeof(sig_addr));
@@ -368,18 +466,25 @@ int main(int argc, char **argv)
         uint64_t wall_us = now_us(freq) - t_stream_start_us;
         double wall_s = (wall_us > 0) ? ((double)wall_us / 1000000.0) : seconds;
         double measured_kbps = (double)media_bytes * 8.0 / wall_s / 1000.0;
-        double expected_kbps = SontSbcBitrateKbps(&session.negotiated.sbc, abr.current_bitpool);
+        double expected_kbps = use_ldac
+            ? (double)SontLdacBitrateKbpsInt(
+                  session.negotiated.ldac.sampling ? session.negotiated.ldac.sampling : 48000u,
+                  SontLdacGetEqmid(ldac_enc))
+            : SontSbcBitrateKbps(&session.negotiated.sbc, abr.current_bitpool);
         double decoded_rms = (decoded_samples > 0)
                                  ? sqrt(sq_sum / (double)decoded_samples)
                                  : 0.0;
 
-        printf("T2_LOOPBACK codec=sbc seid=%u sampling=%lu init_bp=%u final_bp=%u "
+        printf("T2_LOOPBACK codec=%s seid=%u sampling=%lu init_bp=%u final_bp=%u "
                "abr_steps=%lu packets=%lu bytes=%llu tx_avg_us=%lu tx_max_us=%lu "
                "measured_kbps=%.1f expected_kbps=%.1f decoded_rms=%.3f trace_events=%lu\n",
+               use_ldac ? "ldac" : "sbc",
                (unsigned)session.selected_acp_seid,
-               (unsigned long)session.negotiated.sbc.sampling,
-               (unsigned)session.negotiated.sbc.max_bitpool,
-               (unsigned)abr.current_bitpool,
+               (unsigned long)(use_ldac
+                                   ? (session.negotiated.ldac.sampling ? session.negotiated.ldac.sampling : 48000u)
+                                   : session.negotiated.sbc.sampling),
+               (unsigned)(use_ldac ? session.negotiated.ldac.eqmid : session.negotiated.sbc.max_bitpool),
+               (unsigned)(use_ldac ? SontLdacGetEqmid(ldac_enc) : abr.current_bitpool),
                (unsigned long)abr.abr_adjustments,
                (unsigned long)packets,
                (unsigned long long)media_bytes,
@@ -391,7 +496,11 @@ int main(int argc, char **argv)
                (unsigned long)ring.total_events);
         fflush(stdout);
 
-        SontMediaDestroy(&media);
+        if (use_ldac) {
+            SontLdacEncoderDestroy(ldac_enc);
+        } else {
+            SontMediaDestroy(&media);
+        }
         closesocket(sig_sock);
         closesocket(med_sock);
         WSACleanup();
