@@ -47,6 +47,11 @@ typedef struct _SONT_ABR {
 
 void SontAbrInit(SONT_ABR *abr, uint8_t min_bitpool, uint8_t max_bitpool);
 
+/* Override the delay thresholds (microseconds). The metric fed to
+ * SontAbrOnPacketSent is whatever delay the caller tracks: the driver feeds the
+ * audio duration already queued to the controller when a packet is submitted. */
+void SontAbrSetThresholds(SONT_ABR *abr, uint32_t low_us, uint32_t high_us, uint32_t critical_us);
+
 /* Record one media packet transmission outcome.
  * Returns 1 if `current_bitpool` changed (written to *new_bitpool_out), else 0. */
 int SontAbrOnPacketSent(SONT_ABR *abr,

@@ -42,13 +42,21 @@
 #define SONT_IDLE_POLL_MS            1000u
 
 /* Media path */
-#define SONT_MEDIA_FLUSH_TO_MS       40u
+#define SONT_MEDIA_FLUSH_TO_MS       0u      /* 0 = no L2CAP flush timeout: never discard
+                                                * audio the controller is still sending */
 #define SONT_MEDIA_LEAD_US           20000u  /* send-ahead */
 #define SONT_MEDIA_PREFILL_MS        30u     /* jitter buffer on the WaveRT tap */
 #define SONT_MEDIA_MAX_BUFFER_MS     150u
 #define SONT_MEDIA_MAX_BURST         24u
 #define SONT_MEDIA_MAX_WAIT_MS       10u
-#define SONT_MEDIA_MAX_TX_FAILURES   8u
+#define SONT_MEDIA_MAX_TX_FAILURES   16u     /* consecutive failed completions = link gone */
+/* ABR metric: audio already queued to the controller when a packet is submitted */
+#define SONT_ABR_QUEUE_LOW_US        50000u
+#define SONT_ABR_QUEUE_HIGH_US       90000u
+#define SONT_ABR_QUEUE_CRITICAL_US   130000u
+#define SONT_SBC_ABR_FLOOR           20u     /* never below this bitpool (2 is unlistenable) */
+#define SONT_LDAC_RECOVER_PACKETS    1500u   /* clean packets before raising LDAC quality */
+#define SONT_TRACE_CRITICAL_GAP_US   250000u /* rate limit for TxCritical trace events */
 #define SONT_MEDIA_MAX_PCM_CH        2u
 #define SONT_MEDIA_MAX_SAMPLES       128u
 #define SONT_TIMER_RESOLUTION_100NS  20000u  /* 2 ms while streaming */
@@ -73,9 +81,13 @@ typedef struct _SONT_MEDIA_ENGINE {
     uint8_t LdacEqmid;
     uint16_t Seq;
     uint32_t Timestamp;
-    ULONG TxAvgUs;
+    uint8_t LdacMaxEqmid;        /* best quality negotiated (lowest EQMID) */
+    ULONG LdacCleanPackets;
+    ULONG TxAvgUs;               /* completion latency */
     ULONG TxMaxUs;
     ULONG TxFailures;
+    ULONG Dropped;               /* packets dropped because the queue was full */
+    ULONGLONG LastCriticalTraceUs;
 } SONT_MEDIA_ENGINE, *PSONT_MEDIA_ENGINE;
 
 typedef struct _SONT_SIGNALING_SCRATCH {
@@ -84,6 +96,7 @@ typedef struct _SONT_SIGNALING_SCRATCH {
     SONT_ABR abr;
     SONT_MEDIA_ENGINE engine;
     SONT_ASYNC_RX rx;              /* outstanding receive on the signalling channel */
+    SONT_TX_QUEUE txq;             /* media packets in flight */
     KWAIT_BLOCK wait_blocks[4];
     BOOLEAN StartRejected;
     uint8_t tx[SONT_AVDTP_MAX_PDU];
@@ -671,6 +684,7 @@ static VOID SontMediaStop(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH sc
     if (!e->Active) {
         return;
     }
+    SontTxQueueDrain(&scratch->txq);  /* before the media channel can be closed */
     if (e->Codec == SONT_AVDTP_CODEC_SBC) {
         SontMediaDestroy(&scratch->media);
     }
@@ -708,7 +722,16 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
             RtlZeroMemory(e, sizeof(*e));
             return STATUS_UNSUCCESSFUL;
         }
-        SontAbrInit(&scratch->abr, sbc->min_bitpool, sbc->max_bitpool);
+        {
+            uint8_t floor_bp = (sbc->max_bitpool > SONT_SBC_ABR_FLOOR) ? SONT_SBC_ABR_FLOOR
+                                                                       : sbc->max_bitpool;
+            if (floor_bp < sbc->min_bitpool) {
+                floor_bp = sbc->min_bitpool;
+            }
+            SontAbrInit(&scratch->abr, floor_bp, sbc->max_bitpool);
+            SontAbrSetThresholds(&scratch->abr, SONT_ABR_QUEUE_LOW_US, SONT_ABR_QUEUE_HIGH_US,
+                                 SONT_ABR_QUEUE_CRITICAL_US);
+        }
     } else if (cfg->codec == SONT_AVDTP_CODEC_LDAC) {
         USHORT ldac_mtu = (USHORT)((mtu > SONT_RTP_HEADER_LEN + 1u) ? mtu - SONT_RTP_HEADER_LEN - 1u : 0u);
         if (ldac_mtu < 679u) {
@@ -728,6 +751,7 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         e->LdacEqmid = cfg->ldac.eqmid;
+        e->LdacMaxEqmid = cfg->ldac.eqmid;
     } else {
         return STATUS_NOT_SUPPORTED;
     }
@@ -796,59 +820,105 @@ static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
     KeReleaseSpinLock(&src->Lock, old_irql);
 }
 
-static NTSTATUS SontSendSbcPacket(PSONT_DEVICE_EXTENSION ext,
-                                  PSONT_SIGNALING_SCRATCH scratch,
-                                  size_t rtp_len)
+/* Collects finished transfers: completion latency and failures. Returns an
+ * error once the link looks dead (many consecutive failed completions). */
+static NTSTATUS SontReapTx(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
 {
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    NTSTATUS st;
+    ULONG lat_us;
+    KIRQL old_irql;
+
+    while (SontTxQueueReap(&scratch->txq, &st, &lat_us)) {
+        if (lat_us > e->TxMaxUs) {
+            e->TxMaxUs = lat_us;
+        }
+        e->TxAvgUs = (e->TxAvgUs == 0u) ? lat_us : ((e->TxAvgUs * 7u + lat_us) / 8u);
+        KeAcquireSpinLock(&ext->Lock, &old_irql);
+        if (NT_SUCCESS(st)) {
+            ext->State.Packets++;
+        } else {
+            ext->State.Errors++;
+        }
+        ext->State.TxTimeUs = lat_us;
+        ext->State.TxTimeAvgUs = e->TxAvgUs;
+        ext->State.TxTimeMaxUs = e->TxMaxUs;
+        KeReleaseSpinLock(&ext->Lock, old_irql);
+        if (NT_SUCCESS(st)) {
+            e->TxFailures = 0;
+        } else if (st != STATUS_CANCELLED && ++e->TxFailures >= SONT_MEDIA_MAX_TX_FAILURES) {
+            return st;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
+/* Queues one RTP packet. *queued_us gets the audio already in flight before it
+ * (the ABR metric); returns STATUS_DEVICE_BUSY when it had to be dropped. */
+static NTSTATUS SontQueueMediaPacket(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch,
+                                     const uint8_t *data, size_t len, ULONG audio_us,
+                                     ULONG *queued_us)
+{
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
+    PSONT_TX_SLOT slot;
+    LONG queued;
+    ULONGLONG now_us;
+
+    queued = InterlockedCompareExchange(&scratch->txq.InFlightAudioUs, 0, 0);
+    *queued_us = (queued > 0) ? (ULONG)queued : 0u;
+    slot = (len <= SONT_TX_SLOT_BYTES) ? SontTxQueueAcquire(&scratch->txq) : NULL;
+    if (slot != NULL) {
+        RtlCopyMemory(slot->Buffer, data, len);
+        SontTxQueueSubmit(slot, ext->Transport.MediaChannel, (ULONG)len, audio_us);
+    } else {
+        e->Dropped++;
+    }
+
+    now_us = SontQueryTimestampUs(ext);
+    if ((slot == NULL || *queued_us >= SONT_ABR_QUEUE_CRITICAL_US) &&
+        now_us - e->LastCriticalTraceUs >= SONT_TRACE_CRITICAL_GAP_US) {
+        e->LastCriticalTraceUs = now_us;
+        SontTraceLog(ext, SonatinaEventTxCritical, *queued_us / 1000u, e->Dropped);
+    }
+    return (slot != NULL) ? STATUS_SUCCESS : STATUS_DEVICE_BUSY;
+}
+
+static ULONG SontAudioUs(ULONG samples, ULONG rate)
+{
+    return (rate != 0) ? (ULONG)(((ULONGLONG)samples * 1000000ULL) / rate) : 0u;
+}
+
+static VOID SontSendSbcPacket(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch,
+                              size_t rtp_len)
+{
+    PSONT_MEDIA_ENGINE e = &scratch->engine;
     const SONT_SBC_PARAMS *sbc = &scratch->session.negotiated.sbc;
-    LARGE_INTEGER freq;
-    LARGE_INTEGER t0;
-    LARGE_INTEGER t1;
-    ULONG tx_us = 0;
-    uint8_t old_bp;
+    ULONG frames = (rtp_len > SONT_RTP_HEADER_LEN) ? (ULONG)(scratch->rtp[SONT_RTP_HEADER_LEN] & 0x0Fu) : 0u;
+    ULONG queued_us = 0;
+    uint8_t old_bp = scratch->abr.current_bitpool;
     uint8_t new_bp = 0;
     int abr_changed;
     NTSTATUS status;
     KIRQL old_irql;
 
-    t0 = KeQueryPerformanceCounter(&freq);
-    status = SontTransportSend(&ext->Transport, ext->Transport.MediaChannel,
-                               scratch->rtp, (ULONG)rtp_len);
-    t1 = KeQueryPerformanceCounter(NULL);
-    if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
-        tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
-    }
-
-    old_bp = scratch->abr.current_bitpool;
-    abr_changed = SontAbrOnPacketSent(&scratch->abr, (uint32_t)tx_us,
-                                      NT_SUCCESS(status), &new_bp);
+    status = SontQueueMediaPacket(ext, scratch, scratch->rtp, rtp_len,
+                                  SontAudioUs(frames * e->SamplesPerPush, e->Rate), &queued_us);
+    abr_changed = SontAbrOnPacketSent(&scratch->abr, queued_us, NT_SUCCESS(status), &new_bp);
     if (abr_changed && !SontMediaSetBitpool(&scratch->media, new_bp)) {
         abr_changed = 0;
     }
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
-    if (NT_SUCCESS(status)) {
-        ext->State.Packets++;
-        ext->State.TxTimeUs = tx_us;
-    } else {
-        ext->State.Errors++;
-    }
-    ext->State.TxTimeMaxUs = scratch->abr.tx_max_us;
-    ext->State.TxTimeAvgUs = scratch->abr.tx_avg_us;
     ext->State.TxTimeHighCount = scratch->abr.tx_high_count;
     ext->State.TxTimeCriticalCount = scratch->abr.tx_critical_count;
     ext->State.AbrAdjustments = scratch->abr.abr_adjustments;
     ext->State.CurrentBitpool = scratch->media.bitpool;
     ext->State.BitrateKbps = (ULONG)SontSbcBitrateKbpsInt(sbc, scratch->media.bitpool);
-    ext->State.LostPackets = scratch->engine.Pull.underruns;
-    if (!NT_SUCCESS(status) || tx_us >= scratch->abr.tx_critical_us) {
-        SontTraceLogLocked(ext, SonatinaEventTxCritical, tx_us, (ULONG)status);
-    }
+    ext->State.LostPackets = e->Pull.underruns;
     if (abr_changed) {
         SontTraceLogLocked(ext, SonatinaEventAbrStep, (ULONG)old_bp, (ULONG)new_bp);
     }
     KeReleaseSpinLock(&ext->Lock, old_irql);
-    return status;
 }
 
 static NTSTATUS SontPushLdac(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
@@ -858,10 +928,7 @@ static NTSTATUS SontPushLdac(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
     size_t ldac_len = 0;
     size_t payload_len;
     uint8_t frame_num = 0;
-    LARGE_INTEGER freq;
-    LARGE_INTEGER t0;
-    LARGE_INTEGER t1;
-    ULONG tx_us = 0;
+    ULONG queued_us = 0;
     NTSTATUS status;
     KIRQL old_irql;
 
@@ -891,54 +958,55 @@ static NTSTATUS SontPushLdac(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
         return STATUS_UNSUCCESSFUL;
     }
 
-    t0 = KeQueryPerformanceCounter(&freq);
-    status = SontTransportSend(&ext->Transport, ext->Transport.MediaChannel, scratch->rtp,
-                               (ULONG)(SONT_RTP_HEADER_LEN + payload_len));
-    t1 = KeQueryPerformanceCounter(NULL);
-    if (freq.QuadPart > 0 && t1.QuadPart >= t0.QuadPart) {
-        tx_us = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000LL) / freq.QuadPart);
-    }
-    if (tx_us > e->TxMaxUs) {
-        e->TxMaxUs = tx_us;
-    }
-    e->TxAvgUs = (e->TxAvgUs == 0u) ? tx_us : ((e->TxAvgUs * 7u + tx_us) / 8u);
+    status = SontQueueMediaPacket(ext, scratch, scratch->rtp, SONT_RTP_HEADER_LEN + payload_len,
+                                  SontAudioUs((ULONG)frame_num * e->FrameSamples, e->Rate),
+                                  &queued_us);
     e->Seq = (uint16_t)(e->Seq + 1u);
     e->Timestamp += (uint32_t)frame_num * e->FrameSamples;
     e->SentFirst = TRUE;
 
-    /* Simple LDAC ABR: step quality down on a failed or very slow send. */
-    if ((!NT_SUCCESS(status) || tx_us >= SONT_ABR_DEFAULT_CRITICAL_US) &&
-        e->LdacEqmid < SONT_LDAC_EQMID_MQ &&
-        SontLdacSetEqmid(e->Ldac, (uint8_t)(e->LdacEqmid + 1u)) == 0) {
-        SontTraceLog(ext, SonatinaEventAbrStep, e->LdacEqmid, (ULONG)e->LdacEqmid + 1u);
-        e->LdacEqmid++;
+    /* LDAC ABR on the same queue metric: step quality down on a full queue,
+     * back up after a long clean run. */
+    if (!NT_SUCCESS(status) || queued_us >= SONT_ABR_QUEUE_CRITICAL_US) {
+        e->LdacCleanPackets = 0;
+        if (e->LdacEqmid < SONT_LDAC_EQMID_MQ &&
+            SontLdacSetEqmid(e->Ldac, (uint8_t)(e->LdacEqmid + 1u)) == 0) {
+            SontTraceLog(ext, SonatinaEventAbrStep, e->LdacEqmid, (ULONG)e->LdacEqmid + 1u);
+            e->LdacEqmid++;
+        }
+    } else if (queued_us < SONT_ABR_QUEUE_LOW_US) {
+        if (++e->LdacCleanPackets >= SONT_LDAC_RECOVER_PACKETS && e->LdacEqmid > e->LdacMaxEqmid) {
+            if (SontLdacSetEqmid(e->Ldac, (uint8_t)(e->LdacEqmid - 1u)) == 0) {
+                SontTraceLog(ext, SonatinaEventAbrStep, e->LdacEqmid, (ULONG)e->LdacEqmid - 1u);
+                e->LdacEqmid--;
+            }
+            e->LdacCleanPackets = 0;
+        }
+    } else {
+        e->LdacCleanPackets = 0;
     }
 
     KeAcquireSpinLock(&ext->Lock, &old_irql);
-    if (NT_SUCCESS(status)) {
-        ext->State.Packets++;
-        ext->State.TxTimeUs = tx_us;
-    } else {
-        ext->State.Errors++;
-    }
-    ext->State.TxTimeMaxUs = e->TxMaxUs;
-    ext->State.TxTimeAvgUs = e->TxAvgUs;
     ext->State.LostPackets = e->Pull.underruns;
     ext->State.BitrateKbps = (ULONG)SontLdacBitrateKbpsInt(e->Rate, e->LdacEqmid);
     KeReleaseSpinLock(&ext->Lock, old_irql);
-    return status;
+    return STATUS_SUCCESS;
 }
 
-/* Encodes and sends every codec frame that is due now. */
+/* Encodes and queues every codec frame that is due now. */
 static NTSTATUS SontMediaTick(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH scratch)
 {
     PSONT_MEDIA_ENGINE e = &scratch->engine;
     uint32_t due;
     uint32_t i;
-    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS status;
 
     if (!e->Active || ext->Transport.MediaChannel == NULL) {
         return STATUS_SUCCESS;
+    }
+    status = SontReapTx(ext, scratch);
+    if (!NT_SUCCESS(status)) {
+        return status;  /* the link is gone */
     }
     due = SontMediaClockFramesDue(&e->Clock, SontQueryTimestampUs(ext),
                                   e->SamplesPerPush, SONT_MEDIA_MAX_BURST);
@@ -952,16 +1020,16 @@ static NTSTATUS SontMediaTick(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATC
             if (step < 0) {
                 return STATUS_UNSUCCESSFUL;
             }
-            status = (step == 1) ? SontSendSbcPacket(ext, scratch, rtp_len) : STATUS_SUCCESS;
+            if (step == 1) {
+                SontSendSbcPacket(ext, scratch, rtp_len);
+            }
         } else {
             status = SontPushLdac(ext, scratch);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
         }
         SontMediaClockConsume(&e->Clock, e->SamplesPerPush);
-        if (NT_SUCCESS(status)) {
-            e->TxFailures = 0;
-        } else if (++e->TxFailures >= SONT_MEDIA_MAX_TX_FAILURES) {
-            return status;  /* the link is gone */
-        }
     }
     return STATUS_SUCCESS;
 }
@@ -1350,6 +1418,12 @@ static VOID SontSignalingWorker(PVOID context)
         return;
     }
     status = SontAsyncRxInit(&scratch->rx, t);
+    if (NT_SUCCESS(status)) {
+        status = SontTxQueueInit(&scratch->txq, t);
+        if (!NT_SUCCESS(status)) {
+            SontAsyncRxFree(&scratch->rx);
+        }
+    }
     if (!NT_SUCCESS(status)) {
         ExFreePoolWithTag(scratch, SONT_POOL_TAG);
         SontRecordSignalingError(ext);
@@ -1420,6 +1494,7 @@ static VOID SontSignalingWorker(PVOID context)
         }
     }
 
+    SontTxQueueFree(&scratch->txq);
     SontAsyncRxFree(&scratch->rx);
     SontTransportUnregisterServer(t);
     {

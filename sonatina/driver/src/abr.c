@@ -31,6 +31,16 @@ void SontAbrInit(SONT_ABR *abr, uint8_t min_bitpool, uint8_t max_bitpool)
     abr->tx_low_us = SONT_ABR_DEFAULT_LOW_US;
 }
 
+void SontAbrSetThresholds(SONT_ABR *abr, uint32_t low_us, uint32_t high_us, uint32_t critical_us)
+{
+    if (abr == NULL || low_us >= high_us || high_us >= critical_us) {
+        return;
+    }
+    abr->tx_low_us = low_us;
+    abr->tx_high_us = high_us;
+    abr->tx_critical_us = critical_us;
+}
+
 int SontAbrOnPacketSent(SONT_ABR *abr,
                         uint32_t tx_time_us,
                         bool send_ok,

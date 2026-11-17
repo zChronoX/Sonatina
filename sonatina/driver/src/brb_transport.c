@@ -586,3 +586,168 @@ VOID SontAsyncRxFree(PSONT_ASYNC_RX rx)
     rx->Brb = NULL;
     rx->Irp = NULL;
 }
+
+/* ------------------------------------------------------------------ async transmit queue */
+
+static NTSTATUS SontTxCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
+{
+    PSONT_TX_SLOT slot = (PSONT_TX_SLOT)Context;
+    PSONT_TX_QUEUE queue = slot->Queue;
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    slot->Status = Irp->IoStatus.Status;
+    slot->DoneQpc = KeQueryPerformanceCounter(NULL).QuadPart;
+    InterlockedExchangeAdd(&queue->InFlightAudioUs, -(LONG)slot->AudioUs);
+    InterlockedExchange(&slot->Completed, 1);
+    KeSetEvent(&queue->Done, IO_NO_INCREMENT, FALSE);
+    InterlockedExchange(&slot->Busy, 0);
+    /* Last access to the queue: once InFlight reaches 0 the owner may free it. */
+    InterlockedDecrement(&queue->InFlight);
+    return STATUS_MORE_PROCESSING_REQUIRED;  /* IRP is reused */
+}
+
+NTSTATUS SontTxQueueInit(PSONT_TX_QUEUE queue, PSONT_TRANSPORT transport)
+{
+    LARGE_INTEGER freq;
+    ULONG i;
+
+    if (queue == NULL || transport == NULL || !transport->HasBth) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    RtlZeroMemory(queue, sizeof(*queue));
+    queue->Transport = transport;
+    KeInitializeEvent(&queue->Done, NotificationEvent, FALSE);
+    (void)KeQueryPerformanceCounter(&freq);
+    queue->QpcFrequency = (freq.QuadPart > 0) ? freq.QuadPart : 10000000LL;
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        PSONT_TX_SLOT slot = &queue->Slots[i];
+        slot->Queue = queue;
+        slot->Irp = IoAllocateIrp(transport->Parent->StackSize, FALSE);
+        slot->Brb = (struct _BRB_L2CA_ACL_TRANSFER *)transport->Bth.BthAllocateBrb(
+            BRB_L2CA_ACL_TRANSFER, SONT_POOL_TAG);
+        if (slot->Irp == NULL || slot->Brb == NULL) {
+            SontTxQueueFree(queue);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
+PSONT_TX_SLOT SontTxQueueAcquire(PSONT_TX_QUEUE queue)
+{
+    ULONG i;
+
+    if (queue == NULL || queue->Transport == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        PSONT_TX_SLOT slot = &queue->Slots[i];
+        if (slot->Irp != NULL && slot->Busy == 0 && slot->Completed == 0) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+VOID SontTxQueueSubmit(PSONT_TX_SLOT slot, L2CAP_CHANNEL_HANDLE channel,
+                       ULONG length, ULONG audio_us)
+{
+    PSONT_TX_QUEUE queue = slot->Queue;
+    PSONT_TRANSPORT transport = queue->Transport;
+    PIO_STACK_LOCATION stack;
+
+    transport->Bth.BthReuseBrb((PBRB)slot->Brb, BRB_L2CA_ACL_TRANSFER);
+    slot->Brb->BtAddress = transport->RemoteAddress;
+    slot->Brb->ChannelHandle = channel;
+    slot->Brb->TransferFlags = ACL_TRANSFER_DIRECTION_OUT;
+    slot->Brb->Buffer = slot->Buffer;
+    slot->Brb->BufferSize = (length <= SONT_TX_SLOT_BYTES) ? length : SONT_TX_SLOT_BYTES;
+    slot->Brb->BufferMDL = NULL;
+    slot->Brb->Timeout = 0;
+
+    IoReuseIrp(slot->Irp, STATUS_SUCCESS);
+    stack = IoGetNextIrpStackLocation(slot->Irp);
+    stack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    stack->Parameters.DeviceIoControl.IoControlCode = IOCTL_INTERNAL_BTH_SUBMIT_BRB;
+    stack->Parameters.Others.Argument1 = slot->Brb;
+    IoSetCompletionRoutine(slot->Irp, SontTxCompletion, slot, TRUE, TRUE, TRUE);
+
+    slot->AudioUs = audio_us;
+    slot->Status = STATUS_PENDING;
+    slot->SubmitQpc = KeQueryPerformanceCounter(NULL).QuadPart;
+    InterlockedIncrement(&queue->InFlight);
+    InterlockedExchangeAdd(&queue->InFlightAudioUs, (LONG)audio_us);
+    InterlockedExchange(&slot->Busy, 1);
+    (void)IoCallDriver(transport->Parent, slot->Irp);  /* completion routine always runs */
+}
+
+BOOLEAN SontTxQueueReap(PSONT_TX_QUEUE queue, NTSTATUS *status, ULONG *latency_us)
+{
+    ULONG i;
+
+    if (queue == NULL) {
+        return FALSE;
+    }
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        PSONT_TX_SLOT slot = &queue->Slots[i];
+        if (slot->Completed != 0 && slot->Busy == 0) {
+            LONGLONG ticks = slot->DoneQpc - slot->SubmitQpc;
+            if (status != NULL) {
+                *status = slot->Status;
+            }
+            if (latency_us != NULL) {
+                *latency_us = (ticks > 0) ? (ULONG)((ticks * 1000000LL) / queue->QpcFrequency) : 0u;
+            }
+            InterlockedExchange(&slot->Completed, 0);
+            return TRUE;
+        }
+    }
+    KeClearEvent(&queue->Done);
+    return FALSE;
+}
+
+VOID SontTxQueueDrain(PSONT_TX_QUEUE queue)
+{
+    ULONG i;
+    LARGE_INTEGER tick;
+
+    if (queue == NULL || queue->Transport == NULL) {
+        return;
+    }
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        if (queue->Slots[i].Busy != 0 && queue->Slots[i].Irp != NULL) {
+            (void)IoCancelIrp(queue->Slots[i].Irp);
+        }
+    }
+    tick.QuadPart = -10LL * 10000LL;  /* 10 ms */
+    while (InterlockedCompareExchange(&queue->InFlight, 0, 0) > 0) {
+        (void)KeWaitForSingleObject(&queue->Done, Executive, KernelMode, FALSE, &tick);
+        KeClearEvent(&queue->Done);
+    }
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        InterlockedExchange(&queue->Slots[i].Completed, 0);
+    }
+    queue->InFlightAudioUs = 0;
+}
+
+VOID SontTxQueueFree(PSONT_TX_QUEUE queue)
+{
+    ULONG i;
+
+    if (queue == NULL || queue->Transport == NULL) {
+        return;
+    }
+    SontTxQueueDrain(queue);
+    for (i = 0; i < SONT_TX_SLOTS; i++) {
+        PSONT_TX_SLOT slot = &queue->Slots[i];
+        if (slot->Brb != NULL) {
+            queue->Transport->Bth.BthFreeBrb((PBRB)slot->Brb);
+            slot->Brb = NULL;
+        }
+        if (slot->Irp != NULL) {
+            IoFreeIrp(slot->Irp);
+            slot->Irp = NULL;
+        }
+    }
+    queue->Transport = NULL;
+}

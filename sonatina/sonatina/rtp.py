@@ -6,8 +6,8 @@ Only the subset needed by the simulator is implemented:
 * payload type 96 (dynamic), clock 90 kHz;
 * payload layouts for SBC, AAC and raw codecs as described in the audio profile specification.
 
-SBC: the high nibble of the first payload byte carries the number of SBC frames;
-     the low nibble is unused (RFA).
+SBC: bits 3..0 of the first payload byte carry the number of SBC frames;
+     bits 7..4 are F|S|L|RFA, all 0 for unfragmented packets.
 AAC: a 16-bit AU-headers-length field followed by one AU header (13-bit AU-size,
      3-bit AU-index) and the ADTS frame. One AU per packet.
 PCM/aptX: the encoded frame(s) follow the RTP header directly.
@@ -101,13 +101,14 @@ class MediaPayload:
 def pack_sbc(frames: list[bytes]) -> bytes:
     if not 1 <= len(frames) <= SBC_MAX_FRAMES:
         raise RtpError("SBC payload must carry 1..15 frames, got %d" % len(frames))
-    return bytes([len(frames) << 4]) + b"".join(frames)
+    # A2DP media payload header: F | S | L | RFA | number of frames (bits 3..0)
+    return bytes([len(frames) & 0x0F]) + b"".join(frames)
 
 
 def unpack_sbc(payload: bytes, frame_len: int) -> list[bytes]:
     if len(payload) < 1:
         raise RtpError("empty SBC payload")
-    count = payload[0] >> 4
+    count = payload[0] & 0x0F
     if count == 0:
         raise RtpError("SBC payload declares 0 frames")
     body = payload[1:]

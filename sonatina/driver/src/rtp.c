@@ -68,7 +68,8 @@ size_t SontRtpSbcPayload(const uint8_t *frames, size_t frames_len, uint8_t frame
     if (frames_len != 0 && frames == NULL) {
         return 0;
     }
-    out[0] = (uint8_t)((frame_count & 0x0F) << 4);
+    /* A2DP media payload header: F | S | L | RFA | number of frames (bits 3..0) */
+    out[0] = (uint8_t)(frame_count & 0x0F);
     if (frames_len != 0) {
         SONT_MEMCPY(out + 1, frames, frames_len);
     }

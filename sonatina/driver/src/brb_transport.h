@@ -72,6 +72,37 @@ typedef struct _SONT_ASYNC_RX {
     UCHAR Buffer[SONT_TRANSPORT_RX_CAP];
 } SONT_ASYNC_RX, *PSONT_ASYNC_RX;
 
+/* Asynchronous media transmit queue: several ACL transfers in flight at once.
+ * Waiting for each packet's completion before sending the next one caps the
+ * throughput at packet_size / completion_latency, and completion latency on a
+ * real link (sniff, coexistence, USB) is easily 30-50 ms. */
+#define SONT_TX_SLOTS      12u
+#define SONT_TX_SLOT_BYTES 1200u
+
+typedef struct _SONT_TX_QUEUE SONT_TX_QUEUE, *PSONT_TX_QUEUE;
+
+typedef struct _SONT_TX_SLOT {
+    PSONT_TX_QUEUE Queue;
+    PIRP Irp;
+    struct _BRB_L2CA_ACL_TRANSFER *Brb;
+    volatile LONG Busy;        /* submitted, not completed */
+    volatile LONG Completed;   /* completed, not yet reaped by the worker */
+    NTSTATUS Status;
+    LONGLONG SubmitQpc;
+    LONGLONG DoneQpc;
+    ULONG AudioUs;             /* audio carried by the packet */
+    UCHAR Buffer[SONT_TX_SLOT_BYTES];
+} SONT_TX_SLOT, *PSONT_TX_SLOT;
+
+struct _SONT_TX_QUEUE {
+    PSONT_TRANSPORT Transport;
+    KEVENT Done;               /* notification: some slot completed */
+    volatile LONG InFlight;
+    volatile LONG InFlightAudioUs;
+    LONGLONG QpcFrequency;
+    SONT_TX_SLOT Slots[SONT_TX_SLOTS];
+};
+
 NTSTATUS SontTransportInitialize(PSONT_TRANSPORT transport, PDEVICE_OBJECT parent);
 
 NTSTATUS SontTransportRegisterServer(PSONT_TRANSPORT transport);
@@ -98,5 +129,16 @@ NTSTATUS SontAsyncRxStart(PSONT_ASYNC_RX rx, L2CAP_CHANNEL_HANDLE channel);
 VOID SontAsyncRxComplete(PSONT_ASYNC_RX rx);
 VOID SontAsyncRxCancel(PSONT_ASYNC_RX rx);
 VOID SontAsyncRxFree(PSONT_ASYNC_RX rx);
+
+NTSTATUS SontTxQueueInit(PSONT_TX_QUEUE queue, PSONT_TRANSPORT transport);
+/* A free slot to fill (Buffer) and submit, or NULL when all are in flight. */
+PSONT_TX_SLOT SontTxQueueAcquire(PSONT_TX_QUEUE queue);
+VOID SontTxQueueSubmit(PSONT_TX_SLOT slot, L2CAP_CHANNEL_HANDLE channel,
+                       ULONG length, ULONG audio_us);
+/* Collects one completed transfer; FALSE when none is waiting. */
+BOOLEAN SontTxQueueReap(PSONT_TX_QUEUE queue, NTSTATUS *status, ULONG *latency_us);
+/* Cancels everything in flight and waits for it (call before closing the channel). */
+VOID SontTxQueueDrain(PSONT_TX_QUEUE queue);
+VOID SontTxQueueFree(PSONT_TX_QUEUE queue);
 
 #endif /* SONATINA_BRB_TRANSPORT_H */

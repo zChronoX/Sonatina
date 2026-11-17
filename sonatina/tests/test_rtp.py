@@ -43,7 +43,7 @@ class TestPayloads(unittest.TestCase):
     def test_sbc_roundtrip(self):
         frames = [bytes([i]) * 68 for i in range(3)]
         payload = rtp.pack_sbc(frames)
-        self.assertEqual(payload[0] >> 4, 3)
+        self.assertEqual(payload[0], 0x03)  # frame count in bits 3..0 (A2DP spec)
         self.assertEqual(rtp.unpack_sbc(payload, 68), frames)
 
     def test_sbc_rejects_empty_and_truncated(self):

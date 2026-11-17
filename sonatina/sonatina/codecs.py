@@ -179,7 +179,7 @@ class SbcDecoder(Decoder):
 
     def push(self, payload: bytes) -> None:
         if len(payload) >= 2 and payload[1] == 0x9C:
-            count = payload[0] >> 4
+            count = payload[0] & 0x0F
             body = payload[1:]
             if count > 0 and len(body) % count == 0:
                 self._frames.extend(rtp.unpack_sbc(payload, len(body) // count))

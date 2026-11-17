@@ -127,6 +127,18 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
 - CI: artefatto `Sonatina-VM-<cfg>-x64` con driver firmato con certificato di
   test usa e getta (`SonatinaTest.cer`), `SonatinaSvc.exe` e script.
 
+## Primo test su cuffia reale (2026-11-17, VM VMware + dongle USB)
+- **Funziona end-to-end**: driver caricato in modalita' test, connessione alle CMF
+  Headphone Pro (2C:BE:EE:4E:ED:2E), AVDTP negoziato, SBC 48 kHz stereo in streaming,
+  439 pacchetti, 0 errori, 0 underrun.
+- **Qualita' crollata**: ABR fino a bitpool 2 (72 kbit/s). Causa: invio sincrono, un
+  pacchetto alla volta, con completamento ACL a 30-50 ms -> throughput limitato dalla
+  latenza. Corretto con coda di trasmissione asincrona (`SONT_TX_QUEUE`, 12 pacchetti
+  in volo), ABR sull'audio in coda (50/90/130 ms) con pavimento bitpool 20, niente
+  flush timeout L2CAP sul canale media, trace `TxCritical` limitato a 4/s.
+- **Header payload SBC**: numero di frame nei bit 3..0 (era nei bit 7..4, in C e
+  Python): una cuffia reale avrebbe letto 0 frame per pacchetto.
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
 - Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.

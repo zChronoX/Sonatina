@@ -253,7 +253,7 @@ static void RunUnitAssertions(void)
         assert(hdr.sequence == 0);
         assert(hdr.timestamp == 0);
         assert(hdr.ssrc == 0x12345678u);
-        assert(rtp[SONT_RTP_HEADER_LEN] == 0x50); /* 5 frames in high nibble */
+        assert(rtp[SONT_RTP_HEADER_LEN] == 0x05); /* 5 frames, bits 3..0 (A2DP spec) */
 
         assert(SontMediaPushPcmFrame(&pkt, pcm, 128, rtp, sizeof(rtp), &rtp_len) == 0);
         assert(SontMediaFlush(&pkt, rtp, sizeof(rtp), &rtp_len) == 1);
@@ -262,7 +262,7 @@ static void RunUnitAssertions(void)
         assert(!hdr.marker);
         assert(hdr.sequence == 1);
         assert(hdr.timestamp == 640u);
-        assert(rtp[SONT_RTP_HEADER_LEN] == 0x10);
+        assert(rtp[SONT_RTP_HEADER_LEN] == 0x01);
         assert(SontMediaFlush(&pkt, rtp, sizeof(rtp), &rtp_len) == 0);
 
         SontMediaDestroy(&pkt);
@@ -509,6 +509,27 @@ static void RunUnitAssertions(void)
         /* Starved for 1 s: skip instead of bursting 375 frames */
         assert(SontMediaClockFramesDue(&clk, 2010000u, 128, 16) == 16);
         assert(clk.skips == 1);
+    }
+
+    /* 6h. ABR on the queued-audio metric: 40 ms of steady queue is healthy,
+     * a full queue steps the bitpool down, never below the floor. */
+    {
+        SONT_ABR abr;
+        uint8_t bp = 0;
+        int i, changes = 0;
+        SontAbrInit(&abr, 20, 53);
+        SontAbrSetThresholds(&abr, 50000, 90000, 130000);
+        for (i = 0; i < 200; i++) {
+            changes += SontAbrOnPacketSent(&abr, 40000, true, &bp);
+        }
+        assert(changes == 0 && abr.current_bitpool == 53);
+        assert(SontAbrOnPacketSent(&abr, 140000, true, &bp) == 1 && bp == 45);
+        for (i = 0; i < 400; i++) {
+            (void)SontAbrOnPacketSent(&abr, 0, false, &bp);  /* dropped: queue full */
+        }
+        assert(abr.current_bitpool == 20);
+        SontAbrSetThresholds(&abr, 9, 5, 1);                 /* invalid order: ignored */
+        assert(abr.tx_high_us == 90000);
     }
 
     /* 6c. Wire format golden bytes straight from the AVDTP specification. */

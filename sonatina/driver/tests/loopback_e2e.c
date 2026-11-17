@@ -76,7 +76,7 @@ static int verify_rtp_sbc_decode(sbc_t *dec,
     }
     payload = rtp + SONT_RTP_HEADER_LEN;
     payload_len = rtp_len - SONT_RTP_HEADER_LEN;
-    count = (unsigned)(payload[0] >> 4);
+    count = (unsigned)(payload[0] & 0x0F);
     body_len = payload_len - 1u;
     if (count == 0 || (body_len % count) != 0) {
         return 0;
