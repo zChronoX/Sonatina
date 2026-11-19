@@ -47,6 +47,7 @@ from bumble.device import Connection, Device, DeviceConfiguration
 from bumble.pairing import PairingConfig
 
 import sonatina_avrcp
+import sonatina_media
 
 log = logging.getLogger("sonatina")
 
@@ -642,7 +643,7 @@ class SonatinaHost:
         self.lib = codec_lib or CodecLib()
         self.ring = PcmRing()
         self.volume = EndpointVolume(self.lib, settings.volume_endpoint)
-        self.remote = sonatina_avrcp.RemoteControl(self)
+        self.remote = sonatina_avrcp.RemoteControl(self, sonatina_media.sessions())
         self.connection: Connection | None = None
         self.session_task: asyncio.Task | None = None
         self.pump: MediaPump | None = None

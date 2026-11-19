@@ -2,8 +2,9 @@
 
 Two roles on the same AVCTP channel:
   * Target (TG): the headset's buttons (play/pause, next, previous, volume keys) arrive
-    as pass-through commands and become Windows media keys, so any player reacts.
-    The headset can also ask for our playback status, guessed from audio activity.
+    as pass-through commands. Play/pause/next/previous go to the current Windows media
+    session (sonatina_media), whose real status is also reported to the headset; without
+    it they become media keys and the status is guessed from audio activity.
   * Controller (CT): when the headset supports absolute volume (AVRCP 1.4+), the Windows
     volume of "CABLE Input" is sent to the headset, and the headset's own volume buttons
     move the Windows slider. Our software gain then only does mute, so the encoder always
@@ -36,6 +37,12 @@ VK_MEDIA_NEXT_TRACK = 0xB0
 VK_MEDIA_PREV_TRACK = 0xB1
 VK_MEDIA_STOP = 0xB2
 VK_MEDIA_PLAY_PAUSE = 0xB3
+
+MEDIA_COMMANDS = {   # sonatina_media commands, when Windows media sessions are available
+    Key.STOP: "stop",
+    Key.FORWARD: "skip_next",
+    Key.BACKWARD: "skip_previous",
+}
 
 KEY_MAP = {
     Key.PLAY: VK_MEDIA_PLAY_PAUSE,
@@ -99,10 +106,13 @@ class RemoteControl:
     """AVRCP for the one headset SonatinaHost is connected to.
 
     host must provide: s (Settings with media_keys, absolute_volume), volume
-    (EndpointVolume), audio_age() -> seconds since non-silent audio was streamed."""
+    (EndpointVolume), audio_age() -> seconds since non-silent audio was streamed.
+    media: Windows media sessions for real play/pause and status (else media keys and
+    a status guessed from the audio)."""
 
-    def __init__(self, host) -> None:
+    def __init__(self, host, media=None) -> None:
         self.host = host
+        self.media = media             # sonatina_media.MediaSessions (None: media keys only)
         self.connection: Connection | None = None
         self.protocol: avrcp.Protocol | None = None
         self.tasks: list[asyncio.Task] = []
@@ -197,23 +207,41 @@ class RemoteControl:
         if not getattr(self.host.s, "media_keys", True):
             return
         now = time.monotonic()
+        name = getattr(key, "name", str(key))
         if vk == VK_MEDIA_PLAY_PAUSE:
-            # The headset button means "toggle" to whoever presses it, whatever command the
-            # headset sends. Two exceptions: auto-play right after connecting, and a PAUSE
-            # (e.g. from a wear sensor) when nothing is playing, which would start playback.
             if now - self.last_play_pause < PLAY_PAUSE_DEBOUNCE_S:
                 return
             if key == Key.PLAY and now - self.connected_at < 3.0:
                 log.info("headset button PLAY right after connecting: ignored")
                 return
+            self.last_play_pause = now
+        media = self.media
+        if media is not None and media.available:
+            # Real player control. A headset that follows our (real) play status sends the
+            # right PLAY or PAUSE; one that does not is just a toggle button.
+            if vk == VK_MEDIA_PLAY_PAUSE:
+                command = (("play" if key == Key.PLAY else "pause") if self.status_asked
+                           else "toggle_play_pause")
+            else:
+                command = MEDIA_COMMANDS.get(key)
+            if command is not None:
+                log.info("headset button %s -> %s", name, command)
+                media.command(command)
+                return
+        elif vk == VK_MEDIA_PLAY_PAUSE:
+            # Only the toggle key: guard against a PAUSE (e.g. a wear sensor) when nothing
+            # plays, which would start playback.
             if key == Key.PAUSE and self.host.audio_age() > PAUSE_IGNORE_SILENT_S:
                 log.info("headset button PAUSE while nothing plays: ignored")
                 return
-            self.last_play_pause = now
-        log.info("headset button %s", getattr(key, "name", key))
+        log.info("headset button %s", name)
         send_key(vk)
 
     def play_status(self) -> avrcp.PlayStatus:
+        media = self.media
+        if media is not None and media.available and media.status is not None:
+            return {"playing": avrcp.PlayStatus.PLAYING, "paused": avrcp.PlayStatus.PAUSED
+                    }.get(media.status, avrcp.PlayStatus.STOPPED)
         if self.host.audio_age() < ACTIVE_HOLD_S:
             return avrcp.PlayStatus.PLAYING
         return avrcp.PlayStatus.PAUSED

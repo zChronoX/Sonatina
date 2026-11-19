@@ -116,6 +116,23 @@ async def main():
     print('A: play status', status)
     assert status == avrcp.PlayStatus.PLAYING
 
+    # Windows media sessions available: real commands, real status
+    class FakeMedia:
+        available = True
+        status = 'paused'
+        def __init__(self): self.cmds = []
+        def command(self, name): self.cmds.append(name); return True
+    media = FakeMedia(); host.remote.media = media
+    await asyncio.sleep(1.0)                         # status poller: PLAYING -> PAUSED
+    status = await asyncio.wait_for(anext(hp.monitor_playback_status()), 3)
+    assert status == avrcp.PlayStatus.PAUSED, status
+    for k in (Key.PLAY, Key.FORWARD, Key.BACKWARD, Key.PAUSE):
+        await hp.send_key_event(k, True); await hp.send_key_event(k, False)
+        await asyncio.sleep(0.5)
+    print('A: media commands', media.cmds)
+    assert media.cmds == ['play', 'skip_next', 'skip_previous', 'pause'], media.cmds
+    host.remote.media = None
+
     await conn.disconnect(); await asyncio.sleep(0.5)
     assert not host.remote.absolute and not host.volume.hardware
 

@@ -586,10 +586,14 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
   notifications -> Windows slider. Headset volume is set *before* our gain goes to
   unity (no loud moment); echoes of values we sent are ignored for 1.5 s. Our gain
   then only mutes. Without absolute volume: software gain as before.
-- Buttons: PLAY/PAUSE -> media play/pause (toggle; PLAY within 3 s of connecting and
-  PAUSE after 3 s of silence are ignored: auto-play, wear sensors), FORWARD/BACKWARD
-  -> next/previous, VOLUME_UP/DOWN/MUTE -> Windows volume keys.
-- Playback status for the headset guessed from audio activity (> -60 dBFS).
+- Buttons: PLAY/PAUSE/FORWARD/BACKWARD/STOP -> explicit play/pause/next/previous on the
+  current Windows media session (`sonatina_media.py`, GlobalSystemMediaTransportControls
+  via PyWinRT, own MTA thread); a headset that does not follow our play status gets
+  toggle play/pause. PLAY within 3 s of connecting is ignored (auto-play).
+  VOLUME_UP/DOWN/MUTE -> Windows volume keys.
+- Playback status for the headset = real status of the media session. Fallback without
+  PyWinRT or without a session: media keys, status guessed from audio (> -60 dBFS).
+  First hardware run (Air5) showed why: the guess flips to PAUSED during a track change.
 - Tray: "Volume handled by the headphones" and "Headphone buttons" switches
   (settings `absolute_volume`, `media_keys`). Test: `tests/avrcp_virtual.py`.
 
