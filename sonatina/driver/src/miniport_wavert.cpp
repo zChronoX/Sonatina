@@ -535,6 +535,7 @@ CMiniportWaveRTStreamSonatina::CMiniportWaveRTStreamSonatina(
       m_PlayOffset(0),
       m_WriteOffset(0),
       m_LinearPosition(0),
+      m_ByteCarry(0),
       m_CopiedLinear(0),
       m_ContentId(0)
 {
@@ -1008,7 +1009,11 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
 
     if (m_BlockAlign > 1)
     {
-        bytes -= bytes % m_BlockAlign;
+        /* Carry the partial block: dropping it every tick made the virtual
+         * clock run ~0.7% slow and drained the PCM ring (underrun every ~10 s). */
+        bytes += m_ByteCarry;
+        m_ByteCarry = (ULONG)(bytes % m_BlockAlign);
+        bytes -= m_ByteCarry;
     }
 
     PVOID dma = m_DmaBuffer;
@@ -1139,6 +1144,7 @@ CMiniportWaveRTStreamSonatina::SetState(
             m_WriteOffset = 0;
             m_LinearPosition = 0;
             m_CopiedLinear = 0;
+            m_ByteCarry = 0;
             m_ElapsedNotifyHns = 0;
             m_ByteRemainderHns = 0;
             m_LastDmaHns = 0;
@@ -1179,6 +1185,7 @@ CMiniportWaveRTStreamSonatina::SetState(
                 m_LastDmaHns = KSCONVERT_PERFORMANCE_TIME(m_QpcFrequency.QuadPart, qpc);
             }
             m_CopiedLinear = m_LinearPosition;
+            m_ByteCarry = 0;
             m_State = KSSTATE_RUN;
             if (m_PcmSource != NULL)
             {
@@ -1211,8 +1218,9 @@ CMiniportWaveRTStreamSonatina::SetState(
     else if (startTimer && m_NotificationTimer)
     {
         ExSetTimer(m_NotificationTimer, -SONT_HNS_PER_MS, SONT_HNS_PER_MS, NULL);
-        DbgPrint("Sonatina: WaveRT RUN dma=%lu bytes notif=%lu x %llu hns copylag=%lu ms\n",
-                 m_DmaBufferSize, m_NotificationsPerBuffer, m_NotificationIntervalHns, SONT_COPY_LAG_MS);
+        DbgPrint("Sonatina: WaveRT RUN dma=%lu bytes notif=%lu x %llu hns copylag=%lu bytes\n",
+                 m_DmaBufferSize, m_NotificationsPerBuffer, m_NotificationIntervalHns,
+                 (ULONG)min((ULONGLONG)m_AvgBytesPerSec * SONT_COPY_LAG_MS / 1000ULL, (ULONGLONG)(m_DmaBufferSize / 4)));
     }
 
     return STATUS_SUCCESS;

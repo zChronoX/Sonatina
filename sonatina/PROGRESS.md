@@ -1,0 +1,1 @@
+- 2026-11-19 Bug trovato (log "PCM underrun ring=0" ogni ~10 s, ring drain ~6.5 ms/s): UpdatePositionLocked scartava ogni tick i byte non multipli di BlockAlign senza riportarli -> clock virtuale ~0.7% lento. Ora il resto e' riportato (m_ByteCarry). Il copy-lag effettivo e' limitato a dma/4 (dma=3840 B = 20 ms => 5 ms); il log ora lo mostra in byte.

@@ -78,6 +78,7 @@ private:
     ULONGLONG m_PlayOffset;
     ULONGLONG m_WriteOffset;
     ULONGLONG m_LinearPosition;
+    ULONG m_ByteCarry;          /* bytes not yet a whole block: carried to the next update */
     ULONGLONG m_CopiedLinear;   /* bytes already copied to the PCM ring (lags m_LinearPosition) */
     ULONG m_ContentId;
 
