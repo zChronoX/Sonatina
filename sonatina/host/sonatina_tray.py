@@ -129,6 +129,8 @@ class TrayApp:
                 log.warning("dongle gone, retrying in %.0f s", RETRY_S)
             except asyncio.CancelledError:
                 pass
+            except sh.SystemResumed as gap:
+                log.info("PC resumed from sleep (%s): restarting Bluetooth", gap)
             except Exception as error:
                 log.error("host stopped: %r (retry in %.0f s)", error, RETRY_S)
             self.host = None

@@ -627,6 +627,20 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
   latency; only a kernel audio driver could report the real one). Players with an audio
   offset (VLC, mpv, MPC-HC) can use the tooltip value. Test: `tests/latency_virtual.py`.
 
+### U2c. Robustness `[~]` (code + virtual test done, hardware test pending)
+- Clock drift: clock servo (U2b).
+- Sleep / resume: a 2 s timer that fires after more than 10 s means the PC slept (Windows'
+  monotonic clock counts sleep): the whole host restarts (USB transport, radio link and
+  WASAPI stream are stale), the headset is paged again. `SystemResumed`, tray and CLI.
+- Capture watchdog: no WASAPI callback for 3 s while running -> close, refresh PortAudio's
+  device list, reopen (VB-CABLE reinstalled, audio service restarted). Retry every 5 s.
+- Adapter unplugged: transport terminates -> tray retries every 5 s (already in U1).
+- Barrot `33FA:0012` quirk (one spurious byte after Read Local Extended Features):
+  `StrictEventSplitter` replaces Bumble's event splitter for Barrot VIDs only; every USB
+  interrupt transfer holds whole events, bytes that cannot be a complete event are dropped.
+  Untested on hardware (the UGREEN is still used by Windows).
+- Test: `tests/robustness_virtual.py`.
+
 ### U3. Microphone (HFP) `[ ]` — harder, later
 - HFP Audio Gateway over RFCOMM (Bumble has HFP) + SCO/eSCO audio (CVSD or
   mSBC). Over USB, SCO uses the ISOCHRONOUS endpoints: needs WinUSB isoch
@@ -651,7 +665,7 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Uninstaller: stop, remove autostart, give the adapter back to Windows (delete the libwdi
   driver package, rescan), optionally VB-CABLE and settings.
 - Supported adapters list in the README (tested: Realtek RTL8761BUV `0BDA:8771`; Barrot
-  `33FA:0012` needs the extra-byte quirk first).
+  `33FA:0012`: quirk written (U2c), hardware test pending).
 
 ### U5. README for GitHub `[x]` (root `README.md`, English)
 - Install / first pairing / tray menu / switching headsets / codecs / uninstall /

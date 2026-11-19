@@ -417,6 +417,9 @@ class ToneSource:
         if self.task:
             self.task.cancel()
 
+    def check(self) -> None:
+        pass
+
 
 def find_capture_device(name: str):
     import sounddevice as sd
@@ -438,12 +441,11 @@ def find_capture_device(name: str):
 class CableCapture:
     """Captures the VB-CABLE output (what Windows plays to "CABLE Input")."""
 
-    def __init__(self, ring: PcmRing, device_name: str) -> None:
+    def _open(self) -> None:
         import sounddevice as sd
 
         self.sd = sd
-        self.ring = ring
-        index, dev, api = find_capture_device(device_name)
+        index, dev, api = find_capture_device(self.device_name)
         extra = None
         if "WASAPI" in api:
             try:
@@ -457,16 +459,61 @@ class CableCapture:
             extra_settings=extra,
         )
 
+    def __init__(self, ring: PcmRing, device_name: str) -> None:
+        self.ring = ring
+        self.device_name = device_name
+        self.stream = None
+        self.running = False
+        self.last_callback = 0.0
+        self.retry_at = 0.0
+        self.restarts = 0
+        self._open()
+
     def _callback(self, indata, frames, time_info, status) -> None:
+        self.last_callback = time.monotonic()
         if status:
             log.debug("capture status: %s", status)
         self.ring.write(bytes(indata))
 
     def start(self) -> None:
+        self.running = True
+        self.last_callback = time.monotonic()
         self.stream.start()
 
     def stop(self) -> None:
-        self.stream.stop()
+        self.running = False
+        self._close()
+
+    def _close(self) -> None:
+        if self.stream is not None:
+            try:
+                self.stream.abort()
+                self.stream.close()
+            except Exception as error:
+                log.debug("capture close: %r", error)
+            self.stream = None
+
+    def check(self) -> None:
+        """Watchdog: WASAPI streams die when the device goes away (sleep, VB-CABLE
+        reinstalled, audio service restarted). Reopen after 3 s without data."""
+        now = time.monotonic()
+        if not self.running or now - self.last_callback < 3.0 or now < self.retry_at:
+            return
+        self.retry_at = now + 5.0
+        log.warning("no audio from %s for %.0f s: reopening the capture", self.device_name,
+                    now - self.last_callback)
+        self._close()
+        try:
+            try:   # PortAudio caches the device list: refresh it (the cable may be new)
+                self.sd._terminate()
+                self.sd._initialize()
+            except Exception as error:
+                log.debug("PortAudio refresh: %r", error)
+            self._open()
+            self.start()
+            self.restarts += 1
+        except Exception as error:
+            log.warning("capture reopen failed (%r), retrying", error)
 
 
 # ----------------------------------------------------------------------------- volume
@@ -1345,6 +1392,68 @@ class SonatinaHost:
                 print(line, flush=True)
 
 
+# ----------------------------------------------------------------------------- robustness
+class SystemResumed(Exception):
+    """The PC slept: USB, the radio link and WASAPI streams are stale. Start over."""
+
+
+async def watch_suspend(interval: float = 2.0, gap: float = 10.0) -> None:
+    """A 2 s sleep that takes more than 10 s means the PC was suspended (monotonic time
+    keeps counting during sleep on Windows) or the process was frozen."""
+    while True:
+        t0 = time.monotonic()
+        await asyncio.sleep(interval)
+        elapsed = time.monotonic() - t0
+        if elapsed > gap:
+            raise SystemResumed(f"{elapsed:.0f} s")
+
+
+async def watch_capture(source) -> None:
+    while True:
+        await asyncio.sleep(1.0)
+        source.check()
+
+
+BARROT_VENDOR_IDS = ("33FA",)
+
+
+class StrictEventSplitter:
+    """HCI event splitter for controllers that pad USB interrupt transfers.
+
+    Barrot (UGREEN BT 6.0, 33FA:0012) sends one spurious byte after the Read Local
+    Extended Features event; Bumble's splitter, reading a byte stream, then takes it as
+    the start of the next event and every later event is misparsed. Each interrupt
+    transfer holds whole events, so bytes that cannot be a complete event at the end of
+    a transfer are dropped here."""
+
+    def __init__(self, emit) -> None:
+        self.emit = emit
+        self.dropped = 0
+
+    def feed(self, data: bytes) -> None:
+        data = bytes(data)
+        while data:
+            if len(data) < 2 or len(data) < 2 + data[1]:
+                self.dropped += len(data)
+                log.debug("HCI: dropped %d spurious byte(s) %s", len(data), data.hex())
+                return
+            size = 2 + data[1]
+            self.emit(data[:size])
+            data = data[size:]
+
+
+def apply_transport_quirks(spec: str, hci_source) -> None:
+    vid = spec.split(":")[1].upper() if spec.lower().startswith("usb:") and spec.count(":") >= 2 else ""
+    splitters = getattr(hci_source, "splitters", None)
+    if vid in BARROT_VENDOR_IDS and isinstance(splitters, dict):
+        from bumble import hci as bumble_hci
+
+        old = splitters.get(bumble_hci.HCI_EVENT_PACKET)
+        if old is not None:
+            splitters[bumble_hci.HCI_EVENT_PACKET] = StrictEventSplitter(old.emit)
+            log.info("Barrot adapter: spurious-byte quirk on")
+
+
 # ----------------------------------------------------------------------------- main
 def set_timer_resolution() -> None:
     if sys.platform == "win32":
@@ -1366,6 +1475,7 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
     source = ToneSource(host.ring) if settings.tone else CableCapture(host.ring, settings.capture)
 
     async with await open_transport(settings.transport) as (hci_source, hci_sink):
+        apply_transport_quirks(settings.transport, hci_source)
         config = DeviceConfiguration()
         config.name = "Sonatina"
         config.class_of_device = DeviceClass.pack_class_of_device(
@@ -1387,16 +1497,24 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
                  host.headset_name(settings.address))
         source.start()
         tasks = [asyncio.create_task(host.keep_connected()),
-                 asyncio.create_task(host.follow_volume())]
+                 asyncio.create_task(host.follow_volume()),
+                 asyncio.create_task(watch_capture(source))]
         if settings.stats:
             tasks.append(asyncio.create_task(host.print_stats(
                 interval=60.0 if stats_to_log else 5.0, to_log=stats_to_log)))
+        suspend = asyncio.create_task(watch_suspend())
         try:
-            await hci_source.terminated
+            await asyncio.wait([asyncio.ensure_future(hci_source.terminated), suspend],
+                               return_when=asyncio.FIRST_COMPLETED)
+            if suspend.done():
+                suspend.result()   # raises SystemResumed
         finally:
+            suspend.cancel()
             for t in tasks:
                 t.cancel()
             source.stop()
+            if host.pump is not None:
+                await host.pump.stop()
 
 
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Sonatina")
@@ -1442,10 +1560,15 @@ def main() -> None:
             entry.pop("codec", None)
             entry.pop("ldac_quality", None)
     settings.tone = args.tone
-    try:
-        asyncio.run(amain(settings))
-    except KeyboardInterrupt:
-        pass
+    while True:
+        try:
+            asyncio.run(amain(settings))
+            return
+        except SystemResumed as gap:
+            log.info("PC resumed from sleep (%s): restarting", gap)
+            time.sleep(2.0)
+        except KeyboardInterrupt:
+            return
 
 
 if __name__ == "__main__":
