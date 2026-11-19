@@ -91,6 +91,7 @@ class TrayApp:
     def _on_host(self, host: sh.SonatinaHost) -> None:
         host.on_change = lambda settings: sh.save_settings(settings, sh.SETTINGS_PATH)
         self.host = host
+        self._warned_missing = False   # the adapter is back
 
     def run_coro(self, coro) -> None:
         """Runs a host coroutine from the tray thread."""
@@ -132,7 +133,12 @@ class TrayApp:
             except sh.SystemResumed as gap:
                 log.info("PC resumed from sleep (%s): restarting Bluetooth", gap)
             except Exception as error:
-                log.error("host stopped: %r (retry in %.0f s)", error, RETRY_S)
+                if "device not found" in repr(error):   # adapter unplugged: wait quietly
+                    if not getattr(self, "_warned_missing", False):
+                        log.warning("Bluetooth adapter not found, waiting for it")
+                        self._warned_missing = True
+                else:
+                    log.error("host stopped: %r (retry in %.0f s)", error, RETRY_S)
             self.host = None
             self.dongle_ok = False
             if not self.quitting:
