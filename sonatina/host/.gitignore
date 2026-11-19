@@ -1,3 +1,4 @@
 codec/*.so
 __pycache__/
 tests/rx_*.bin
+.venv/

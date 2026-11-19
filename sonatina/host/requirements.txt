@@ -1,3 +1,5 @@
 bumble>=0.0.236
 sounddevice>=0.4.6
 pycaw>=20240210
+pystray>=0.19
+pillow>=10

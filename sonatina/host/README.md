@@ -19,10 +19,21 @@ Nessun driver kernel nostro: Secure Boot resta attivo.
   in `%LOCALAPPDATA%\Google\bumble\firmware\realtek`.
 - Cuffie già abbinate alla chiavetta (fatto nella prova U0).
 
-## Uso
+## Installazione (avvio automatico, icona nell'area di notifica)
+    powershell -ExecutionPolicy Bypass -File install-host.ps1              # installa / aggiorna
+    powershell -ExecutionPolicy Bypass -File install-host.ps1 -Uninstall   # toglie l'avvio automatico
+Crea un ambiente Python privato (`.venv`), un collegamento in Esecuzione automatica e avvia
+`sonatina_tray.py` (pythonw, senza console). Icona: blu = in streaming, grigio = in attesa delle
+cuffie, rosso = chiavetta non trovata / errore. Menu: Riavvia connessione, Apri log, Esci.
+Log: `%LOCALAPPDATA%\Sonatina\sonatina.log`.
+
+## Uso da console (debug)
     python sonatina_host.py                    # LDAC 660 kbit/s
     python sonatina_host.py --ldac-quality hq  # LDAC 990 kbit/s
     python sonatina_host.py --codec sbc        # SBC (bitpool fino a 53 / massimo delle cuffie)
     python sonatina_host.py --tone             # tono 1 kHz, senza VB-CABLE
     python sonatina_host.py --list-devices
 Ogni 5 s stampa: stato, livello del buffer, underrun, pacchetti, ritardo massimo del pump.
+
+Volume: VB-CABLE ignora il proprio cursore, quindi SonatinaHost legge volume e muto di Windows
+sull'uscita VB-CABLE (pycaw) e applica il guadagno prima della codifica (rampa, niente scatti).

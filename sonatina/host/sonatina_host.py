@@ -605,14 +605,34 @@ class SonatinaHost:
             self.volume.poll()
             await asyncio.sleep(0.1)
 
-    async def print_stats(self) -> None:
+    def stats_line(self) -> str:
+        p = self.pump
+        return (f"[{self.state}] ring={self.ring.level_ms()} ms underruns={self.ring.underruns} "
+                f"dropped={self.ring.dropped // FRAME_BYTES} smp"
+                + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms" if p else ""))
+
+    def summary(self) -> str:
+        """One line for the tray tooltip."""
+        p = self.pump
+        if self.state == "streaming" and p is not None and p.encoder is not None:
+            vol = "" if self.volume.last is None else (
+                " · muto" if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
+            return f"Sonatina: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
+        return {"idle": "Sonatina: in attesa delle cuffie", "securing": "Sonatina: connessione...",
+                "negotiating": "Sonatina: connessione...", "error": "Sonatina: errore (vedi log)"
+                }.get(self.state, f"Sonatina: {self.state}")
+
+    async def print_stats(self, interval: float = 5.0, to_log: bool = False) -> None:
+        last = None
         while True:
-            await asyncio.sleep(5)
-            p = self.pump
-            print(f"[{self.state}] ring={self.ring.level_ms()} ms underruns={self.ring.underruns} "
-                  f"dropped={self.ring.dropped // FRAME_BYTES} smp"
-                  + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms"
-                     if p else ""), flush=True)
+            await asyncio.sleep(interval)
+            line = self.stats_line()
+            if to_log:
+                if line != last:
+                    log.info("%s", line)
+                last = line
+            else:
+                print(line, flush=True)
 
 
 # ----------------------------------------------------------------------------- main
@@ -624,11 +644,15 @@ def set_timer_resolution() -> None:
             pass
 
 
-async def amain(settings: Settings) -> None:
+async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) -> None:
+    """Runs until the dongle goes away (unplugged) or the task is cancelled.
+    on_host(host) is called once the host object exists (used by the tray)."""
     from bumble.transport import open_transport
 
     set_timer_resolution()
     host = SonatinaHost(settings)
+    if on_host is not None:
+        on_host(host)
     source = ToneSource(host.ring) if settings.tone else CableCapture(host.ring, settings.capture)
 
     async with await open_transport(settings.transport) as (hci_source, hci_sink):
@@ -647,14 +671,14 @@ async def amain(settings: Settings) -> None:
         device = Device.from_config_with_hci(config, hci_source, hci_sink)
         host.attach(device)
         await device.power_on()
-        print(f"Sonatina on {device.public_address}  ->  {settings.address}  "
-              f"codec={settings.codec}" + (f"/{settings.ldac_quality}" if settings.codec == "ldac" else ""),
-              flush=True)
+        log.info("Sonatina on %s -> %s codec=%s%s", device.public_address, settings.address,
+                 settings.codec, f"/{settings.ldac_quality}" if settings.codec == "ldac" else "")
         source.start()
         tasks = [asyncio.create_task(host.keep_connected()),
                  asyncio.create_task(host.follow_volume())]
         if settings.stats:
-            tasks.append(asyncio.create_task(host.print_stats()))
+            tasks.append(asyncio.create_task(host.print_stats(
+                interval=60.0 if stats_to_log else 5.0, to_log=stats_to_log)))
         try:
             await hci_source.terminated
         finally:
