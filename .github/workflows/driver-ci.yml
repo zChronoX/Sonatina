@@ -104,6 +104,10 @@ jobs:
           foreach ($f in 'SonatinaAudio.inf', 'SonatinaAudio.sys', 'SonatinaAudio.cat') {
             Copy-Item (Join-Path $inf.DirectoryName $f) "$out\driver\"
           }
+          # Symbols for crash-dump analysis (WinDbg !analyze); not installed by the INF.
+          $pdb = Get-ChildItem "sonatina\driver\build\x64\$cfg" -Recurse -Filter SonatinaAudio.pdb | Select-Object -First 1
+          if ($pdb) { New-Item -ItemType Directory -Force -Path "$out\symbols" | Out-Null; Copy-Item $pdb.FullName "$out\symbols\" }
+          else { Write-Warning 'SonatinaAudio.pdb not found; package has no symbols' }
           $signtool = Get-ChildItem 'sonatina\driver\packages', 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw 'signtool.exe not found' }

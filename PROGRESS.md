@@ -139,6 +139,12 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
 - **Header payload SBC**: numero di frame nei bit 3..0 (era nei bit 7..4, in C e
   Python): una cuffia reale avrebbe letto 0 frame per pacchetto.
 
+- **Secondo test (2026-11-19, build con coda asincrona)**: SBC 48 kHz stereo stabile a
+  bitpool 39 (il massimo negoziato con le cuffie, 0 step ABR), 294 kbit/s, 510 pacchetti,
+  0 errori, 0 underrun, completamento ACL medio 0,37 ms (max 8,4 ms). Connessione
+  avviata dal driver (outgoing) al primo tentativo. Restano da provare: pausa lunga,
+  riconnessione avviata dalla cuffia, multipoint/chiamate, riavvio, Driver Verifier.
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
 - Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.

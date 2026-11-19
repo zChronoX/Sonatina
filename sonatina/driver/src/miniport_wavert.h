@@ -49,6 +49,10 @@ class CMiniportWaveRTStreamSonatina :
 {
 private:
     CMiniportWaveRTSonatina *m_Miniport;
+    /* Cached at Init (PASSIVE_LEVEL). DISPATCH_LEVEL paths (timer callback,
+     * GetPosition, SetState) must use this, never m_Miniport->PcmSource():
+     * a non-inlined accessor can be emitted in a PAGE section in Debug builds. */
+    PSONT_PCM_SOURCE m_PcmSource;
     PPORTWAVERTSTREAM m_PortStream;
     BOOLEAN m_StreamRegistered;
 

@@ -518,6 +518,7 @@ CMiniportWaveRTStreamSonatina::CMiniportWaveRTStreamSonatina(
 )
     : CUnknown(UnknownOuter),
       m_Miniport(NULL),
+      m_PcmSource(NULL),
       m_PortStream(NULL),
       m_StreamRegistered(FALSE),
       m_State(KSSTATE_STOP),
@@ -599,6 +600,7 @@ CMiniportWaveRTStreamSonatina::Init(
 
     m_Miniport = Miniport;
     m_Miniport->AddRef();
+    m_PcmSource = m_Miniport->PcmSource();
     m_StreamRegistered = TRUE;
     m_PortStream = PortStream;
     m_AvgBytesPerSec = WaveFormat->nAvgBytesPerSec;
@@ -606,9 +608,9 @@ CMiniportWaveRTStreamSonatina::Init(
     m_SampleRate = WaveFormat->nSamplesPerSec;
     m_Channels = WaveFormat->nChannels;
 
-    if (m_Miniport->PcmSource() != NULL)
+    if (m_PcmSource != NULL)
     {
-        PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+        PSONT_PCM_SOURCE src = m_PcmSource;
         KIRQL oldIrql;
         KeAcquireSpinLock(&src->Lock, &oldIrql);
         src->StreamSampleRate = m_SampleRate;
@@ -1007,7 +1009,7 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
         m_ElapsedNotifyHns += deltaHns;
     }
 
-    PSONT_PCM_SOURCE src = (m_Miniport != NULL) ? m_Miniport->PcmSource() : NULL;
+    PSONT_PCM_SOURCE src = m_PcmSource;
     if (src != NULL && dma != NULL && dmaSize > 0 && bytes > 0)
     {
         ULONG copyLen = (bytes > (ULONGLONG)dmaSize) ? dmaSize : (ULONG)bytes;
@@ -1100,9 +1102,9 @@ CMiniportWaveRTStreamSonatina::SetState(
             m_ElapsedNotifyHns = 0;
             m_ByteRemainderHns = 0;
             m_LastDmaHns = 0;
-            if (m_Miniport && m_Miniport->PcmSource())
+            if (m_PcmSource != NULL)
             {
-                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                PSONT_PCM_SOURCE src = m_PcmSource;
                 KeAcquireSpinLockAtDpcLevel(&src->Lock);
                 src->StreamRunning = FALSE;
                 SontPcmRingReset(&src->Ring);
@@ -1122,9 +1124,9 @@ CMiniportWaveRTStreamSonatina::SetState(
                 stopTimer = TRUE;
             }
             m_State = KSSTATE_PAUSE;
-            if (m_Miniport && m_Miniport->PcmSource())
+            if (m_PcmSource != NULL)
             {
-                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                PSONT_PCM_SOURCE src = m_PcmSource;
                 KeAcquireSpinLockAtDpcLevel(&src->Lock);
                 src->StreamRunning = FALSE;
                 KeReleaseSpinLockFromDpcLevel(&src->Lock);
@@ -1137,9 +1139,9 @@ CMiniportWaveRTStreamSonatina::SetState(
                 m_LastDmaHns = KSCONVERT_PERFORMANCE_TIME(m_QpcFrequency.QuadPart, qpc);
             }
             m_State = KSSTATE_RUN;
-            if (m_Miniport && m_Miniport->PcmSource())
+            if (m_PcmSource != NULL)
             {
-                PSONT_PCM_SOURCE src = m_Miniport->PcmSource();
+                PSONT_PCM_SOURCE src = m_PcmSource;
                 KeAcquireSpinLockAtDpcLevel(&src->Lock);
                 src->StreamSampleRate = m_SampleRate;
                 src->StreamChannels = m_Channels;
@@ -1147,7 +1149,7 @@ CMiniportWaveRTStreamSonatina::SetState(
                 KeReleaseSpinLockFromDpcLevel(&src->Lock);
             }
             if (prevState != KSSTATE_RUN &&
-                (m_NotificationsPerBuffer > 0 || (m_Miniport && m_Miniport->PcmSource())))
+                (m_NotificationsPerBuffer > 0 || m_PcmSource != NULL))
             {
                 startTimer = TRUE;
             }
