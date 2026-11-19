@@ -515,3 +515,78 @@ costs are not justified). Kept for reference.
 ### R4. Release QA `[ ]`
 - T3 (Verifier + soak) and T5 (install/upgrade/uninstall matrix) green;
   tested on at least two headsets and two Bluetooth controllers.
+
+---
+
+## 14. Phase U — user-mode stack on a dedicated USB dongle (NEW DIRECTION)
+
+Decision 2026-11-19. The kernel driver works (LDAC verified, long-pause test
+passed) but cannot load with Secure Boot on, and Riot Vanguard (LoL/Valorant)
+requires Secure Boot and refuses test-signing. An EV certificate is not an
+option (personal project). Phase U removes every kernel component of ours:
+
+```
+Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headphone Pro")
+             -> SonatinaHost.exe: WASAPI capture of "CABLE Output"
+                -> jitter buffer -> SBC / LDAC (/ AAC / aptX) encoder (our C code as a DLL)
+                -> AVDTP/A2DP + L2CAP + SDP + pairing (user-mode Bluetooth host)
+                -> HCI over USB (WinUSB, Microsoft-signed) -> dedicated dongle -> headset
+```
+
+- Nothing to sign: WinUSB and VB-CABLE are already Microsoft-signed, Secure
+  Boot stays on, Vanguard is unaffected. The Windows Bluetooth stack is not
+  involved at all (so the original "audio lost after a pause" bug cannot
+  come from it).
+- The dongle is exclusive to Sonatina (Windows no longer sees it).
+
+### U0. Feasibility spike `[x]` (2026-11-19)
+- Result: Realtek RTL8761BUV `0BDA:8771` on WinUSB + Bumble 0.0.236 (Python
+  3.15): firmware loaded, pairing OK, CMF capabilities read, SBC stream
+  plays cleanly. Findings for U1:
+  - firmware: `rtl8761bu_fw.bin` from gitlab.com/kernel-firmware (git.kernel.org
+    serves an anti-bot page; `bumble-rtk-fw-download` 0.0.236 is broken);
+  - authenticate BEFORE encrypt on reconnect (encrypt alone hangs);
+  - CMF caps to our stack: SBC bitpool 2..39 (Windows got 2..27), AAC-LC
+    44.1/48 kHz VBR <= 262144 bit/s, LDAC 44.1/48/96 kHz; media MTU 679;
+  - AAC: one frame per RTP packet must fit the MTU. ffmpeg 256k frames
+    exceed 679 bytes half of the time (choppy, pops). Encoder needs a peak
+    bitrate / max frame size cap (FDK-AAC `AACENC_PEAK_BITRATE`, as Android);
+  - the headset reconnects to us by itself (incoming connection, we are
+    PERIPHERAL): accept incoming as well as paging.
+- Bumble (Google, Apache-2.0, Python) as the host stack, WinUSB via Zadig.
+- Dongles available: UGREEN BT 6.0 = Barrot `33FA:0012` (known quirk: sends
+  one spurious byte after HCI Read Local Extended Features, Linux needed a
+  btusb fix: the host must drop it), plus two spare dongles to try.
+- Done when: the dongle answers HCI reset/version, pairs with the CMF, and an
+  SBC tone plays from a Bumble A2DP source script.
+
+### U1. SonatinaHost (headless) `[ ]`
+- Reuse: AVDTP session logic, SBC/LDAC encoders, RTP, ABR, jitter buffer
+  (portable C, already host-compiled) as `sonatina_core.dll`; Python or C#
+  host for Bumble + WASAPI capture of VB-CABLE.
+- Pairing + link keys stored locally; auto-reconnect when the headset turns
+  on; silence keep-alive instead of Suspend (lesson from the kernel driver).
+- Per-headset profile (codec, quality), chosen in the app: only the
+  selected headset is driven.
+
+### U2. AVRCP volume + media keys `[ ]`
+- Absolute volume (headset buttons <-> Windows volume of the VB-CABLE
+  endpoint), play/pause/next mapped to Windows media keys.
+
+### U3. Microphone (HFP) `[ ]` — harder, later
+- HFP Audio Gateway over RFCOMM (Bumble has HFP) + SCO/eSCO audio (CVSD or
+  mSBC). Over USB, SCO uses the ISOCHRONOUS endpoints: needs WinUSB isoch
+  (WinUsb_*IsochPipe*, or libusb >= 1.0.27) — to be proven on the dongle.
+- Exposed to Windows as a recording device through a second virtual cable.
+- Note: while the mic is in use the headset switches to HFP (mono, 16 kHz),
+  as with any Bluetooth Classic source.
+
+### U4. Installer + dashboard (replaces G3/S5 for this direction) `[ ]`
+- One `.exe`: installs SonatinaHost (autostart, tray), VB-CABLE, assigns
+  WinUSB to the chosen dongle (libwdi, as Zadig), shortcuts; uninstall
+  restores the dongle to Windows Bluetooth.
+- Dashboard per G3 (WinUI 3, Mica/Acrylic, light/dark, Segoe UI Variable,
+  real data only).
+
+The kernel driver stays in the repo as reference and as the option for a
+Secure-Boot-off machine.

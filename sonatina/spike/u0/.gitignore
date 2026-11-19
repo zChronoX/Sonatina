@@ -1,0 +1,4 @@
+*.sbc
+*.aac
+*.bin
+.venv/
