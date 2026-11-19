@@ -1,4 +1,5 @@
 codec/*.so
 __pycache__/
 tests/rx_*.bin
+tests/rx_*.aac
 .venv/

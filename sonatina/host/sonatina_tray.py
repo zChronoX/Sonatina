@@ -27,6 +27,7 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
     (tr("LDAC 990 kbit/s (massima qualita')", "LDAC 990 kbit/s (best quality)"), "ldac", "hq"),
     ("LDAC 660 kbit/s", "ldac", "sq"),
     (tr("LDAC 330 kbit/s (connessione debole)", "LDAC 330 kbit/s (weak link)"), "ldac", "mq"),
+    (tr("AAC (cuffie senza LDAC)", "AAC (headphones without LDAC)"), "aac", None),
     (tr("SBC (compatibile con tutte)", "SBC (works with all headphones)"), "sbc", None),
 ]
 RETRY_S = 5.0

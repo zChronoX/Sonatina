@@ -167,9 +167,15 @@ reconnects the headset with the new parameters.
   `2D 01 00 00 / AA 00`) verified on hardware: CMF Headphone Pro, 48 kHz
   660 kbit/s, quality on par with the Microsoft driver.
 - **Next, in this order**:
-  1. **AAC** `[ ]` (AirPods, Soundpeats Air5, most headsets): FDK-AAC
-     (fixed-point, AAC-LC, A2DP AAC caps + LATM/MPEG-4 framing as in AOSP
-     `a2dp_aac_encoder`), VBR off, 256-320 kbit/s.
+  1. **AAC** `[~]` (code + virtual test done, hardware test pending): FDK-AAC v2.0.3
+     encoder sources vendored in `sonatina/host/codec/third_party/fdk-aac`, built into
+     `sonatina_codec.dll` (v3: `sont_aac_*`). AAC-LC 48 kHz stereo, LATM with
+     StreamMuxConfig in every frame (TT_MP4_LATM_MCP1, audioMuxVersion 0), afterburner,
+     CBR, one AudioMuxElement per RTP packet, timestamps +1024. Peak bitrate from the MTU
+     ((MTU-12-16)*8*48000/1024: CMF 679 -> 244 kbit/s peak, 219 average; Air5 895 ->
+     256), target 256 kbit/s (`aac_bitrate`), capped by the sink's bitrate field.
+     Object type MPEG-2 LC if offered, else MPEG-4 LC. Fallback LDAC -> AAC -> SBC.
+     Test: `e2e_virtual.py` decodes the stream with ffmpeg (1 kHz tone back).
   2. **aptX** `[ ]` and **aptX HD** `[ ]`: libfreeaptx (LGPL-2.1+, integer
      only), A2DP vendor IDs Qualcomm `4F 00 00 00 / 01 00` (aptX) and
      `D7 00 00 00 / 24 00` (aptX HD).
@@ -418,7 +424,7 @@ build target.
 |---|---|---|---|
 | SBC | AOSP `external/bluetooth/sbc` | Apache-2.0 | yes |
 | LDAC | AOSP | Apache-2.0 | yes |
-| AAC | FDK-AAC | Fraunhofer FDK licence (no patent grant) | personal use only: planned (D7.1) |
+| AAC | FDK-AAC | Fraunhofer FDK licence (no patent grant) | personal use only: done in the host (D7.1) |
 | aptX / aptX HD | libfreeaptx | LGPL-2.1+ (main patent considered expired) | personal use only: planned (D7.2) |
 | aptX Adaptive / Lossless | Qualcomm | proprietary | no open encoder: not possible |
 

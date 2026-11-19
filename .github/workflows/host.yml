@@ -120,6 +120,7 @@ jobs:
             --distpath build/dist --workpath build/pyi `
             --paths sonatina/host `
             --add-binary "sonatina/host/codec/sonatina_codec.dll;codec" `
+            --add-data "sonatina/host/codec/third_party/fdk-aac/NOTICE;licenses/fdk-aac" `
             --collect-submodules bumble --collect-data bumble `
             --collect-all libusb_package --collect-all _sounddevice_data `
             --hidden-import pystray._win32 --hidden-import pycaw.pycaw `

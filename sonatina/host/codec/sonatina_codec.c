@@ -3,6 +3,7 @@
  * driver (codec_sbc.c + libsbc, codec_ldac.c + libldac fixed point). */
 #include "codec_sbc.h"
 #include "codec_ldac.h"
+#include "aacenc_lib.h"   /* Fraunhofer FDK AAC (third_party/fdk-aac) */
 
 #ifdef _WIN32
 #define SONT_API __declspec(dllexport)
@@ -10,7 +11,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 2; }
+SONT_API int sont_codec_version(void) { return 3; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -93,6 +94,102 @@ SONT_API int sont_sbc_encode(void *h, const int16_t *pcm, unsigned samples_per_c
         return -1;
     }
     return (int)w;
+}
+
+/* ------------------------------------------------------------------ AAC */
+
+/* AAC-LC in LATM (audioMuxVersion 0, StreamMuxConfig in every frame), the A2DP
+ * packetization: one AudioMuxElement = one RTP payload. Settings follow Android's
+ * a2dp_aac_encoder: afterburner on, peak bitrate bounded by the media MTU so that
+ * no frame exceeds a packet. vbr_mode 0 = CBR (bitrate), 1..5 = FDK VBR modes. */
+SONT_API void *sont_aac_create(unsigned sampling, unsigned channels, unsigned bitrate,
+                               unsigned peak_bitrate, unsigned vbr_mode)
+{
+    HANDLE_AACENCODER h = NULL;
+    AACENC_InfoStruct info;
+    if (aacEncOpen(&h, 0x01 /* AAC only */, channels) != AACENC_OK) {
+        return NULL;
+    }
+    if (aacEncoder_SetParam(h, AACENC_AOT, AOT_AAC_LC) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_SAMPLERATE, sampling) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_CHANNELMODE, channels == 1 ? MODE_1 : MODE_2) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_CHANNELORDER, 1) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_TRANSMUX, TT_MP4_LATM_MCP1) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_HEADER_PERIOD, 1) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_AUDIOMUXVER, 0) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_GRANULE_LENGTH, 1024) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_AFTERBURNER, 1) != AACENC_OK ||
+        aacEncoder_SetParam(h, AACENC_BITRATEMODE, vbr_mode) != AACENC_OK) {
+        aacEncClose(&h);
+        return NULL;
+    }
+    if (vbr_mode == 0 && aacEncoder_SetParam(h, AACENC_BITRATE, bitrate) != AACENC_OK) {
+        aacEncClose(&h);
+        return NULL;
+    }
+    if (peak_bitrate && aacEncoder_SetParam(h, AACENC_PEAK_BITRATE, peak_bitrate) != AACENC_OK) {
+        aacEncClose(&h);
+        return NULL;
+    }
+    if (aacEncEncode(h, NULL, NULL, NULL, NULL) != AACENC_OK ||
+        aacEncInfo(h, &info) != AACENC_OK || info.frameLength != 1024) {
+        aacEncClose(&h);
+        return NULL;
+    }
+    return h;
+}
+
+SONT_API void sont_aac_destroy(void *h)
+{
+    HANDLE_AACENCODER e = (HANDLE_AACENCODER)h;
+    if (e) {
+        aacEncClose(&e);
+    }
+}
+
+/* Effective encoder settings, for logs: bitrate, peak bitrate, delay in samples. */
+SONT_API int sont_aac_get(void *h, unsigned what)
+{
+    HANDLE_AACENCODER e = (HANDLE_AACENCODER)h;
+    AACENC_InfoStruct info;
+    switch (what) {
+    case 0: return (int)aacEncoder_GetParam(e, AACENC_BITRATE);
+    case 1: return (int)aacEncoder_GetParam(e, AACENC_PEAK_BITRATE);
+    case 2: return aacEncInfo(e, &info) == AACENC_OK ? (int)info.nDelay : -1;
+    default: return -1;
+    }
+}
+
+/* pcm: `frames` frames of interleaved int16 (1024 per call keeps one AU out per call).
+ * Returns the bytes of one AudioMuxElement written to out, 0 while the encoder fills
+ * its look-ahead, <0 on error. */
+SONT_API int sont_aac_encode(void *h, const int16_t *pcm, unsigned frames, unsigned channels,
+                             uint8_t *out, unsigned capacity)
+{
+    HANDLE_AACENCODER e = (HANDLE_AACENCODER)h;
+    AACENC_BufDesc in_desc = {0}, out_desc = {0};
+    AACENC_InArgs in_args = {0};
+    AACENC_OutArgs out_args = {0};
+    void *in_ptr = (void *)pcm, *out_ptr = out;
+    INT in_id = IN_AUDIO_DATA, in_size = (INT)(frames * channels * 2), in_el = 2;
+    INT out_id = OUT_BITSTREAM_DATA, out_size = (INT)capacity, out_el = 1;
+
+    in_desc.numBufs = 1;
+    in_desc.bufs = &in_ptr;
+    in_desc.bufferIdentifiers = &in_id;
+    in_desc.bufSizes = &in_size;
+    in_desc.bufElSizes = &in_el;
+    out_desc.numBufs = 1;
+    out_desc.bufs = &out_ptr;
+    out_desc.bufferIdentifiers = &out_id;
+    out_desc.bufSizes = &out_size;
+    out_desc.bufElSizes = &out_el;
+    in_args.numInSamples = (INT)(frames * channels);
+
+    if (aacEncEncode(e, &in_desc, &out_desc, &in_args, &out_args) != AACENC_OK) {
+        return -1;
+    }
+    return out_args.numOutBytes;
 }
 
 /* ------------------------------------------------------------------ volume */
