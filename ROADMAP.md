@@ -590,12 +590,34 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Note: while the mic is in use the headset switches to HFP (mono, 16 kHz),
   as with any Bluetooth Classic source.
 
-### U4. Installer + dashboard (replaces G3/S5 for this direction) `[ ]`
-- One `.exe`: installs SonatinaHost (autostart, tray), VB-CABLE, assigns
-  WinUSB to the chosen dongle (libwdi, as Zadig), shortcuts; uninstall
-  restores the dongle to Windows Bluetooth.
-- Dashboard per G3 (WinUI 3, Mica/Acrylic, light/dark, Segoe UI Variable,
-  real data only).
+### U4. One-click installer `[ ]` (next)
+- Goal: like the commercial A2DP drivers, one `SonatinaSetup.exe` does everything; nothing to
+  install by hand (today: Python, pip packages, Zadig, firmware download, VB-CABLE, script).
+- Build in GitHub Actions (windows runner) on tags: PyInstaller (onedir) bundle of
+  `sonatina_tray.py` (no Python needed on the PC) + Inno Setup installer. Kernel-driver CI jobs
+  only on manual trigger (save minutes of the private repo).
+- Installer steps: choose the USB Bluetooth adapter to dedicate (list of class E0 USB devices,
+  warning that Windows will no longer use it) -> bind WinUSB with libwdi (`wdi-simple`, as
+  Zadig) -> Realtek firmware shipped in the package (linux-firmware rtl_bt, redistributable) ->
+  VB-CABLE: detect, otherwise download from vb-audio.com and run its setup -> set the cable as
+  default output and name it "Sonatina" -> autostart + Start menu -> first run opens pairing.
+- Uninstaller: stop, remove autostart, give the adapter back to Windows (delete the libwdi
+  driver package, rescan), optionally VB-CABLE and settings.
+- Supported adapters list in the README (tested: Realtek RTL8761BUV `0BDA:8771`; Barrot
+  `33FA:0012` needs the extra-byte quirk first).
+
+### U5. README for GitHub `[ ]`
+- Install / first pairing / tray menu / switching headsets / codecs / uninstall /
+  troubleshooting (log path) / limits (no mic yet) / codec licences.
+
+### U6. Dashboard `[ ]`
+- Per G3 (WinUI 3, Mica/Acrylic, light/dark, Segoe UI Variable, real data only): replaces the
+  tray menus for pairing, codec, status.
+
+### Multi-headset (done in U1, 2026-11-19)
+- `%LOCALAPPDATA%\Sonatina\settings.json`: paired headsets (name, codec, LDAC quality),
+  preferred one. Tray: Cuffie (switch, search + pair, forget), Qualita' audio (LDAC 990/660/330,
+  SBC). Not discoverable; only paired headsets may connect. Virtual tests: `tests/pair_virtual.py`.
 
 The kernel driver stays in the repo as reference and as the option for a
 Secure-Boot-off machine.

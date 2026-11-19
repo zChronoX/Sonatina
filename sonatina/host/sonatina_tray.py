@@ -20,8 +20,14 @@ import sonatina_host as sh
 
 log = logging.getLogger("sonatina")
 
-APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Sonatina")
+APP_DIR = sh.APP_DIR
 LOG_PATH = os.path.join(APP_DIR, "sonatina.log")
+CODEC_CHOICES = [  # (label, codec, ldac quality)
+    ("LDAC 990 kbit/s (massima qualita')", "ldac", "hq"),
+    ("LDAC 660 kbit/s", "ldac", "sq"),
+    ("LDAC 330 kbit/s (connessione debole)", "ldac", "mq"),
+    ("SBC (compatibile con tutte)", "sbc", None),
+]
 RETRY_S = 5.0
 
 
@@ -74,15 +80,40 @@ class TrayApp:
         self.quitting = False
         self.dongle_ok = False
         self.icon = None
+        self.found: dict[str, str] = {}   # discovered, not yet paired
 
     # -- host thread ----------------------------------------------------------
     def _on_host(self, host: sh.SonatinaHost) -> None:
+        host.on_change = lambda settings: sh.save_settings(settings, sh.SETTINGS_PATH)
         self.host = host
+
+    def run_coro(self, coro) -> None:
+        """Runs a host coroutine from the tray thread."""
+        if self.loop is None or self.host is None:
+            coro.close()
+            return
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        future.add_done_callback(lambda f: self._refresh_menu())
+
+    def notify(self, text: str) -> None:
+        try:
+            if self.icon is not None:
+                self.icon.notify(text, "Sonatina")
+        except Exception:
+            pass
+
+    def _refresh_menu(self) -> None:
+        try:
+            if self.icon is not None:
+                self.icon.update_menu()
+        except Exception:
+            pass
 
     async def _run_once(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.main_task = asyncio.current_task()
         self.dongle_ok = True
+        self.settings = sh.load_settings(sh.SETTINGS_PATH)  # re-read: may have changed
         await sh.amain(self.settings, on_host=self._on_host, stats_to_log=True)
 
     def host_thread(self) -> None:
@@ -119,7 +150,92 @@ class TrayApp:
                 last = (key, text)
                 self.icon.icon = make_icon(COLORS[key])
                 self.icon.title = text[:127]
+                self._refresh_menu()
             time.sleep(1.0)
+
+    # -- headsets menu --------------------------------------------------------
+    def on_search(self, *_args) -> None:
+        host = self.host
+        if host is None or host.discovering:
+            return
+        self.notify("Metti le cuffie in modalita' abbinamento: ricerca per 12 secondi...")
+
+        async def search():
+            found = await host.discover(12)
+            new = {a: n for a, n in found.items() if a not in host.paired}
+            self.found = new
+            if new:
+                self.notify("Trovate: " + ", ".join(new.values()) + ". Scegli in Cuffie > Abbina.")
+            else:
+                self.notify("Nessuna cuffia nuova trovata. Sono in modalita' abbinamento?")
+
+        self.run_coro(search())
+
+    def _pair_action(self, address: str, name: str):
+        def action(*_args):
+            host = self.host
+            if host is None:
+                return
+
+            async def pair():
+                ok = await host.pair(address, name)
+                self.found.pop(address, None)
+                self.notify(f"{name}: abbinate" if ok else f"{name}: abbinamento non riuscito")
+
+            self.run_coro(pair())
+        return action
+
+    def _select_action(self, address: str):
+        return lambda *_a: self.host and self.run_coro(self.host.select(address))
+
+    def _forget_action(self, address: str):
+        return lambda *_a: self.host and self.run_coro(self.host.forget(address))
+
+    def _codec_action(self, codec: str, quality):
+        def action(*_args):
+            host = self.host
+            if host is not None and host.s.address:
+                self.run_coro(host.set_codec(host.s.address, codec, quality))
+        return action
+
+    def _codec_checked(self, codec: str, quality):
+        def checked(_item):
+            host = self.host
+            if host is None or not host.s.address:
+                return False
+            c, q = host.codec_for(host.s.address)
+            return c == codec and (codec != "ldac" or q == quality)
+        return checked
+
+    def headsets_menu(self):
+        import pystray
+
+        host = self.host
+        if host is None:
+            yield pystray.MenuItem("Chiavetta non pronta", None, enabled=False)
+            return
+        for address in sorted(host.paired):
+            yield pystray.MenuItem(
+                host.headset_name(address), self._select_action(address),
+                checked=lambda _i, a=address: self.host is not None and self.host.s.address == a,
+                radio=True)
+        if not host.paired:
+            yield pystray.MenuItem("Nessuna cuffia abbinata", None, enabled=False)
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem("Cerca nuove cuffie...", self.on_search, enabled=not host.discovering)
+        for address, name in sorted(self.found.items(), key=lambda kv: kv[1]):
+            yield pystray.MenuItem(f"Abbina: {name}", self._pair_action(address, name))
+        if host.s.address:
+            yield pystray.Menu.SEPARATOR
+            yield pystray.MenuItem(f"Dimentica {host.headset_name(host.s.address)}",
+                                   self._forget_action(host.s.address))
+
+    def codec_menu(self):
+        import pystray
+
+        for label, codec, quality in CODEC_CHOICES:
+            yield pystray.MenuItem(label, self._codec_action(codec, quality),
+                                   checked=self._codec_checked(codec, quality), radio=True)
 
     def open_log(self, *_args) -> None:
         if sys.platform == "win32":
@@ -142,6 +258,9 @@ class TrayApp:
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: self.status()[1], None, enabled=False),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Cuffie", pystray.Menu(self.headsets_menu)),
+            pystray.MenuItem("Qualita' audio", pystray.Menu(self.codec_menu)),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Riavvia connessione", self.on_restart),
             pystray.MenuItem("Apri log", self.open_log),
             pystray.MenuItem("Esci", self.on_quit),
@@ -156,7 +275,7 @@ def main() -> None:
         log.info("another SonatinaHost is already running")
         return
     log.info("SonatinaHost tray starting")
-    TrayApp(sh.Settings(stats=True)).run()
+    TrayApp(sh.load_settings(sh.SETTINGS_PATH)).run()
     log.info("SonatinaHost tray stopped")
     os._exit(0)  # do not wait for the USB thread
 

@@ -33,7 +33,7 @@ async def run(codec, with_ldac=True, seconds=3.0):
             s=server.add_sink(ldac_sink_caps()); s.on('rtp_packet', rx.append)
         s2=server.add_sink(sbc_sink_caps()); s2.on('rtp_packet', rx.append)
     avdtp.Listener.for_device(devs[1]).on('connection', on_avdtp)
-    st=sh.Settings(codec=codec, address=addrs[1], tone=True)
+    st=sh.Settings(codec=codec, address=addrs[1], tone=True, allow_unknown=True)
     host=sh.SonatinaHost(st)
     async def nosecure(c): return None
     host._secure=nosecure

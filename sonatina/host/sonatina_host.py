@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+import json
 import logging
 import math
 import os
@@ -40,7 +41,7 @@ from bumble.avdtp import (
     find_avdtp_service_with_connection,
 )
 from bumble.avdtp import Protocol as AvdtpProtocol
-from bumble.core import DeviceClass, PhysicalTransport
+from bumble.core import AdvertisingData, DeviceClass, PhysicalTransport
 from bumble.device import Connection, Device, DeviceConfiguration
 from bumble.pairing import PairingConfig
 
@@ -464,15 +465,51 @@ def sbc_config(max_bitpool: int) -> MediaCodecCapabilities:
 @dataclass
 class Settings:
     transport: str = "usb:0BDA:8771"
-    address: str = "2C:BE:EE:4E:ED:2E"
-    codec: str = "ldac"           # ldac | sbc
+    address: str = ""             # preferred headset ("" = the first paired one)
+    codec: str = "ldac"           # default codec: ldac | sbc (per headset override in `headsets`)
     ldac_quality: str = "sq"      # hq | sq | mq
     sbc_max_bitpool: int = 53
     capture: str = "CABLE Output"
     volume_endpoint: str = "VB-Audio Virtual Cable"
     tone: bool = False
     stats: bool = True
-    extra: dict = field(default_factory=dict)
+    allow_unknown: bool = False   # accept connections from headsets we never paired
+    headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
+
+
+SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "capture",
+                "volume_endpoint", "headsets")
+
+
+def load_settings(path: str) -> Settings:
+    s = Settings()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for key in SAVED_FIELDS:
+            if key in data:
+                setattr(s, key, data[key])
+    except FileNotFoundError:
+        pass
+    except Exception as error:
+        log.warning("settings %s unreadable (%r): using defaults", path, error)
+    return s
+
+
+def save_settings(s: Settings, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({key: getattr(s, key) for key in SAVED_FIELDS}, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def norm_addr(address) -> str:
+    """'2c:be:..:2e/P' -> '2C:BE:..:2E'"""
+    return str(address).split("/")[0].upper()
+
+
+AUDIO_VIDEO_MAJOR_CLASS = 0x04
 
 
 class SonatinaHost:
@@ -485,6 +522,53 @@ class SonatinaHost:
         self.session_task: asyncio.Task | None = None
         self.pump: MediaPump | None = None
         self.state = "idle"
+        self.peer: str | None = None          # address of the connected headset
+        self.paired: set[str] = set()
+        self.pairing_target: str | None = None
+        self.pairing_done = asyncio.Event()
+        self.pairing_done.set()
+        self.discovering = False
+        self.discovered: dict[str, str] = {}  # address -> name
+        self.on_change = None                 # called after settings changed (save)
+
+    # -- settings ---------------------------------------------------------------
+    def headset_name(self, address: str | None) -> str:
+        if not address:
+            return "-"
+        return self.s.headsets.get(address, {}).get("name") or address
+
+    def codec_for(self, address: str) -> tuple[str, str]:
+        h = self.s.headsets.get(address, {})
+        return h.get("codec", self.s.codec), h.get("ldac_quality", self.s.ldac_quality)
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(self.s)
+            except Exception as error:
+                log.warning("saving settings failed: %r", error)
+
+    async def refresh_paired(self) -> None:
+        self.paired = set()
+        if self.device.keystore is not None:
+            for name, _keys in await self.device.keystore.get_all():
+                self.paired.add(norm_addr(name))
+        changed = False
+        for address in self.paired:
+            if address not in self.s.headsets:
+                self.s.headsets[address] = {}
+                changed = True
+        if not self.s.address and self.paired:
+            self.s.address = sorted(self.paired)[0]
+            changed = True
+        if changed:
+            self._changed()
+
+    async def after_power_on(self) -> None:
+        """Connectable for paired headsets, never discoverable (nobody else can find us)."""
+        await self.device.set_discoverable(False)
+        await self.device.set_connectable(True)
+        await self.refresh_paired()
 
     # -- device setup ---------------------------------------------------------
     @staticmethod
@@ -502,15 +586,24 @@ class SonatinaHost:
     def _on_connection(self, connection: Connection) -> None:
         if connection.transport != PhysicalTransport.BR_EDR:
             return
-        log.info("connected: %s (we are %s)", connection.peer_address,
+        peer = norm_addr(connection.peer_address)
+        loop = asyncio.get_running_loop()
+        known = peer in self.paired or peer == self.pairing_target or self.s.allow_unknown
+        if not known or self.connection is not None:
+            log.warning("refusing %s (%s)", peer, "busy" if known else "not paired")
+            loop.create_task(connection.disconnect())
+            return
+        log.info("connected: %s %s (we are %s)", self.headset_name(peer), peer,
                  "CENTRAL" if connection.role == 0 else "PERIPHERAL")
         self.connection = connection
+        self.peer = peer
         connection.on("disconnection", self._on_disconnection)
-        self.session_task = asyncio.get_running_loop().create_task(self._session(connection))
+        self.session_task = loop.create_task(self._session(connection, peer))
 
     def _on_disconnection(self, reason) -> None:
         log.info("disconnected (reason 0x%02X)", reason)
         self.connection = None
+        self.peer = None
         self.state = "idle"
         if self.pump:
             asyncio.get_running_loop().create_task(self.pump.stop())
@@ -527,10 +620,20 @@ class SonatinaHost:
             if not connection.is_encrypted:
                 await connection.encrypt()
 
-    async def _session(self, connection: Connection) -> None:
+    async def _session(self, connection: Connection, peer: str) -> None:
         try:
             self.state = "securing"
+            if peer == self.pairing_target:
+                await self.pairing_done.wait()   # pair() authenticates this link
             await self._secure(connection)
+            if not self.s.headsets.get(peer, {}).get("name"):
+                try:
+                    name = await asyncio.wait_for(connection.request_remote_name(), 5)
+                    self.s.headsets.setdefault(peer, {})["name"] = name
+                    self._changed()
+                    log.info("headset name: %s", name)
+                except Exception as error:
+                    log.debug("remote name: %r", error)
             self.state = "negotiating"
             version = await find_avdtp_service_with_connection(connection) or (1, 3)
             protocol = await AvdtpProtocol.connect(connection, version)
@@ -538,11 +641,12 @@ class SonatinaHost:
 
             mtu_holder = {"mtu": 679}
             choice = None
-            if self.s.codec == "ldac":
+            codec, ldac_quality = self.codec_for(peer)
+            if codec == "ldac":
                 sink = protocol.find_remote_sink_by_codec(
                     AVDTP_AUDIO_MEDIA_TYPE, A2DP_NON_A2DP_CODEC_TYPE, LDAC_VENDOR_ID, LDAC_CODEC_ID)
                 if sink is not None:
-                    eqmid = LDAC_EQMID[self.s.ldac_quality]
+                    eqmid = LDAC_EQMID.get(ldac_quality, 1)
                     choice = (sink, ldac_config(),
                               lambda: LdacEncoder(self.lib, eqmid, mtu_holder["mtu"]))
                 else:
@@ -586,19 +690,121 @@ class SonatinaHost:
 
     # -- connection management -------------------------------------------------
     async def keep_connected(self) -> None:
-        """Wait a little for the headset to connect to us, then page it; retry forever."""
+        """Wait a little for a headset to connect to us, then page the preferred one;
+        retry forever. Any paired headset that connects by itself is accepted too."""
         await asyncio.sleep(3)
         backoff = 3.0
         while True:
-            if self.connection is None:
+            busy = self.discovering or self.pairing_target is not None
+            if self.connection is None and self.s.address and not busy:
                 try:
-                    log.info("connecting to %s ...", self.s.address)
+                    log.info("connecting to %s ...", self.headset_name(self.s.address))
                     await self.device.connect(self.s.address, transport=PhysicalTransport.BR_EDR)
                     backoff = 3.0
                 except Exception as error:
                     log.info("connect failed (%s), retry in %.0f s", type(error).__name__, backoff)
                     backoff = min(backoff * 1.5, 20.0)
             await asyncio.sleep(backoff if self.connection is None else 2.0)
+
+    # -- headset management (called from the tray) ------------------------------
+    async def discover(self, seconds: float = 12.0) -> dict[str, str]:
+        """Looks for headsets in pairing mode (Audio/Video class of device)."""
+        self.discovering = True
+        self.discovered = {}
+        unnamed: list = []
+
+        def on_result(address, class_of_device, data, rssi) -> None:
+            _services, major, _minor = DeviceClass.split_class_of_device(class_of_device)
+            if major != AUDIO_VIDEO_MAJOR_CLASS:
+                return
+            key = norm_addr(address)
+            name = None
+            try:
+                name = data.get(AdvertisingData.COMPLETE_LOCAL_NAME) or data.get(
+                    AdvertisingData.SHORTENED_LOCAL_NAME)
+            except Exception:
+                pass
+            if key not in self.discovered:
+                log.info("found %s %s", name or "?", key)
+                if not name:
+                    unnamed.append(address)
+            self.discovered[key] = str(name) if name else self.discovered.get(key, key)
+
+        self.device.on("inquiry_result", on_result)
+        try:
+            await self.device.start_discovery(auto_restart=False)
+            await asyncio.sleep(seconds)
+            await self.device.stop_discovery()
+            for address in unnamed:
+                try:
+                    name = await asyncio.wait_for(self.device.request_remote_name(address), 5)
+                    self.discovered[norm_addr(address)] = name
+                except Exception:
+                    pass
+        finally:
+            self.device.remove_listener("inquiry_result", on_result)
+            self.discovering = False
+        return dict(self.discovered)
+
+    async def pair(self, address: str, name: str | None = None) -> bool:
+        address = norm_addr(address)
+        self.pairing_target = address
+        self.pairing_done.clear()
+        try:
+            if self.connection is not None:
+                await self.connection.disconnect()
+                await asyncio.sleep(1)
+            log.info("pairing with %s %s ...", name or "?", address)
+            connection = await self.device.connect(address, transport=PhysicalTransport.BR_EDR)
+            await connection.authenticate()
+            if not connection.is_encrypted:
+                await connection.encrypt()
+            await self.refresh_paired()
+            entry = self.s.headsets.setdefault(address, {})
+            if name:
+                entry["name"] = name
+            self.s.address = address
+            self._changed()
+            log.info("paired with %s", self.headset_name(address))
+            return True
+        except Exception as error:
+            log.error("pairing with %s failed: %r", address, error)
+            return False
+        finally:
+            self.pairing_target = None
+            self.pairing_done.set()
+
+    async def select(self, address: str) -> None:
+        """Makes `address` the preferred headset and switches to it."""
+        address = norm_addr(address)
+        self.s.address = address
+        self._changed()
+        if self.connection is not None and self.peer != address:
+            await self.connection.disconnect()
+
+    async def set_codec(self, address: str, codec: str, ldac_quality: str | None = None) -> None:
+        entry = self.s.headsets.setdefault(norm_addr(address), {})
+        entry["codec"] = codec
+        if ldac_quality:
+            entry["ldac_quality"] = ldac_quality
+        self._changed()
+        if self.connection is not None and self.peer == norm_addr(address):
+            await self.connection.disconnect()   # renegotiates with the new codec
+
+    async def forget(self, address: str) -> None:
+        address = norm_addr(address)
+        if self.connection is not None and self.peer == address:
+            await self.connection.disconnect()
+        if self.device.keystore is not None:
+            for name, _keys in await self.device.keystore.get_all():
+                if norm_addr(name) == address:
+                    await self.device.keystore.delete(name)
+        self.s.headsets.pop(address, None)
+        if self.s.address == address:
+            self.s.address = ""
+        await self.refresh_paired()
+        self._changed()
+        log.info("forgot %s", address)
 
     async def follow_volume(self) -> None:
         while True:
@@ -617,7 +823,11 @@ class SonatinaHost:
         if self.state == "streaming" and p is not None and p.encoder is not None:
             vol = "" if self.volume.last is None else (
                 " · muto" if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
-            return f"Sonatina: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
+            return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
+        if self.discovering:
+            return "Sonatina: ricerca cuffie..."
+        if self.pairing_target:
+            return f"Sonatina: abbinamento con {self.headset_name(self.pairing_target)}..."
         return {"idle": "Sonatina: in attesa delle cuffie", "securing": "Sonatina: connessione...",
                 "negotiating": "Sonatina: connessione...", "error": "Sonatina: errore (vedi log)"
                 }.get(self.state, f"Sonatina: {self.state}")
@@ -671,8 +881,10 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
         device = Device.from_config_with_hci(config, hci_source, hci_sink)
         host.attach(device)
         await device.power_on()
-        log.info("Sonatina on %s -> %s codec=%s%s", device.public_address, settings.address,
-                 settings.codec, f"/{settings.ldac_quality}" if settings.codec == "ldac" else "")
+        await host.after_power_on()
+        log.info("Sonatina on %s, paired: %s, preferred: %s", device.public_address,
+                 ", ".join(host.headset_name(a) for a in sorted(host.paired)) or "none",
+                 host.headset_name(settings.address))
         source.start()
         tasks = [asyncio.create_task(host.keep_connected()),
                  asyncio.create_task(host.follow_volume())]
@@ -687,15 +899,21 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
             source.stop()
 
 
+APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Sonatina")
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SonatinaHost: A2DP source on a dedicated USB dongle")
-    parser.add_argument("--transport", default=Settings.transport)
-    parser.add_argument("--address", default=Settings.address)
-    parser.add_argument("--codec", choices=["ldac", "sbc"], default=Settings.codec)
-    parser.add_argument("--ldac-quality", choices=["hq", "sq", "mq"], default=Settings.ldac_quality)
-    parser.add_argument("--sbc-bitpool", type=int, default=Settings.sbc_max_bitpool)
-    parser.add_argument("--capture", default=Settings.capture, help="capture device name (substring)")
-    parser.add_argument("--volume-endpoint", default=Settings.volume_endpoint,
+    parser = argparse.ArgumentParser(
+        description="SonatinaHost: A2DP source on a dedicated USB dongle. "
+                    f"Options not given come from {SETTINGS_PATH}.")
+    parser.add_argument("--transport")
+    parser.add_argument("--address", help="headset to connect (AA:BB:CC:DD:EE:FF)")
+    parser.add_argument("--codec", choices=["ldac", "sbc"])
+    parser.add_argument("--ldac-quality", choices=["hq", "sq", "mq"])
+    parser.add_argument("--sbc-bitpool", type=int)
+    parser.add_argument("--capture", help="capture device name (substring)")
+    parser.add_argument("--volume-endpoint",
                         help="playback endpoint whose Windows volume is followed (substring)")
     parser.add_argument("--tone", action="store_true", help="1 kHz test tone instead of VB-CABLE")
     parser.add_argument("--list-devices", action="store_true")
@@ -712,9 +930,18 @@ def main() -> None:
         print(sd.query_devices())
         return
 
-    settings = Settings(transport=args.transport, address=args.address, codec=args.codec,
-                        ldac_quality=args.ldac_quality, sbc_max_bitpool=args.sbc_bitpool,
-                        capture=args.capture, volume_endpoint=args.volume_endpoint, tone=args.tone)
+    settings = load_settings(SETTINGS_PATH)
+    for name, value in (("transport", args.transport), ("address", args.address),
+                        ("codec", args.codec), ("ldac_quality", args.ldac_quality),
+                        ("sbc_max_bitpool", args.sbc_bitpool), ("capture", args.capture),
+                        ("volume_endpoint", args.volume_endpoint)):
+        if value is not None:
+            setattr(settings, name, norm_addr(value) if name == "address" else value)
+    if args.codec or args.ldac_quality:   # explicit choice wins over the per-headset one
+        for entry in settings.headsets.values():
+            entry.pop("codec", None)
+            entry.pop("ldac_quality", None)
+    settings.tone = args.tone
     try:
         asyncio.run(amain(settings))
     except KeyboardInterrupt:
