@@ -27,7 +27,25 @@ def aac_sink_caps():
                                   I.SamplingFrequency.SF_44100|I.SamplingFrequency.SF_48000,
                                   I.Channels.MONO|I.Channels.STEREO, 1, 320000))
 
-async def run(codec, with_ldac=True, with_aac=False, seconds=3.0):
+def aptx_sink_caps(hd):
+    info = (a2dp.VendorSpecificMediaCodecInformation(0xD7, 0x24, bytes([0x32, 0, 0, 0, 0])) if hd
+            else a2dp.VendorSpecificMediaCodecInformation(0x4F, 0x01, bytes([0x32])))
+    return avdtp.MediaCodecCapabilities(media_type=avdtp.MediaType.AUDIO, media_codec_type=a2dp.CodecType.NON_A2DP,
+        media_codec_information=info)
+
+# raw L2CAP media packets (aptX has no RTP header, so the parsed ones are meaningless)
+RAW = []
+_orig_on_packet = avdtp.LocalSink.on_avdtp_packet
+def _on_packet(self, packet):
+    RAW.append((self, bytes(packet)))
+    try:
+        _orig_on_packet(self, packet)
+    except Exception:
+        pass
+avdtp.LocalSink.on_avdtp_packet = _on_packet
+
+async def run(codec, with_ldac=True, with_aac=False, with_aptx=False, seconds=3.0):
+    RAW.clear()
     addrs=['F0:F1:F2:F3:F4:F5','2C:BE:EE:4E:ED:2E']
     link=LocalLink()
     ctrls=[Controller('C1',link=link,public_address=addrs[0]),Controller('C2',link=link,public_address=addrs[1])]
@@ -35,11 +53,15 @@ async def run(codec, with_ldac=True, with_aac=False, seconds=3.0):
     for d in devs: d.classic_enabled=True
     await devs[0].power_on(); await devs[1].power_on()
     rx=[]
+    aptx_sinks=set()
     def on_avdtp(server):
         if with_ldac:
             s=server.add_sink(ldac_sink_caps()); s.on('rtp_packet', rx.append)
         if with_aac:
             s3=server.add_sink(aac_sink_caps()); s3.on('rtp_packet', rx.append)
+        if with_aptx:
+            for hd in (True, False):
+                s4=server.add_sink(aptx_sink_caps(hd)); s4.on('rtp_packet', rx.append); aptx_sinks.add(s4)
         s2=server.add_sink(sbc_sink_caps()); s2.on('rtp_packet', rx.append)
     avdtp.Listener.for_device(devs[1]).on('connection', on_avdtp)
     st=sh.Settings(codec=codec, address=addrs[1], tone=True, allow_unknown=True)
@@ -62,15 +84,25 @@ async def run(codec, with_ldac=True, with_aac=False, seconds=3.0):
           f'pkts/s={len(rx)/seconds:.1f} max_payload={max(sizes) if sizes else 0} ts_steps={sorted(set(b-a for a,b in zip(ts,ts[1:])))[:5]} '
           f'seq_ok={seqs==list(range(seqs[0],seqs[0]+len(seqs))) if seqs else None} underruns={host.ring.underruns} skips={p.skips if p else None} max_late={p.max_late_ms if p else 0:.1f}')
     if rx: print('first payload hdr', bytes(rx[0].payload)[:4].hex())
-    assert host.state == 'streaming' and len(rx) > 50 and seqs == list(range(seqs[0], seqs[0] + len(seqs))), 'stream check failed'
+    has_rtp = getattr(p.encoder, 'rtp', True)   # aptX: no RTP header, seq/ts meaningless
+    assert host.state == 'streaming' and len(rx) > 50 and (
+        not has_rtp or seqs == list(range(seqs[0], seqs[0] + len(seqs)))), 'stream check failed'
+    chain = sh.CODEC_CHAIN[sh.CODEC_CHAIN.index(codec):]
     if codec == 'ldac' and with_ldac:
         expected = 'LDAC'
+    elif with_aptx and 'aptx_hd' in chain:
+        expected = 'aptX HD'
+    elif with_aptx and 'aptx' in chain:
+        expected = 'aptX'
     elif codec in ('ldac', 'aac') and with_aac:
         expected = 'AAC'
     else:
         expected = 'SBC'
     assert p.encoder.name == expected, (p.encoder.name, expected)
-    if expected == 'AAC':
+    if expected.startswith('aptX'):
+        check_aptx([pkt for sink, pkt in RAW if sink in aptx_sinks], expected == 'aptX HD',
+                   p.encoder.per_packet * p.encoder.push_bytes)
+    elif expected == 'AAC':
         assert sorted(set(b - a for a, b in zip(ts, ts[1:]))) == [1024], 'AAC timestamps'
         check_aac([bytes(x.payload) for x in rx])
     elif rx:
@@ -97,6 +129,30 @@ def check_aac(payloads):
     assert 980 < freq < 1020 and peak > 3000, (freq, peak)
 
 
+def check_aptx(raw, hd, packet_bytes):
+    """Raw packets -> ffmpeg aptX decoder: the 1 kHz tone must come back."""
+    import array, shutil, subprocess
+    header = 12 if hd else 0
+    sizes = {len(r) for r in raw}
+    assert sizes == {header + packet_bytes}, (sizes, header + packet_bytes)
+    if hd:
+        assert all(r[0] == 0x80 and r[1] == 96 for r in raw), 'aptX HD needs the RTP header'
+    data = b''.join(r[header:] for r in raw)
+    name = 'rx_aptx_hd.bin' if hd else 'rx_aptx.bin'
+    open(name, 'wb').write(data)
+    if not shutil.which('ffmpeg'):
+        print('ffmpeg missing: aptX decode check skipped'); return
+    pcm = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'aptx_hd' if hd else 'aptx', '-sample_rate', '48000',
+                          '-i', name, '-f', 's16le', '-ac', '1', '-'], capture_output=True, check=True).stdout
+    a = array.array('h'); a.frombytes(pcm)
+    a = a[len(a) // 4:]
+    crossings = sum(1 for x, y in zip(a, a[1:]) if x < 0 <= y)
+    freq = crossings * 48000 / len(a)
+    peak = max(abs(v) for v in a)
+    print(f'{"aptX HD" if hd else "aptX"} decoded: {len(a)/48000:.2f} s, {freq:.0f} Hz, peak {peak}, packet {header + packet_bytes} B')
+    assert 980 < freq < 1020 and peak > 3000, (freq, peak)
+
+
 def aac_mtu_check():
     """Loud noise at the CMF's MTU: no access unit may exceed the packet."""
     import random
@@ -117,6 +173,8 @@ async def main():
     await run('ldac', with_ldac=False)
     await run('aac', with_aac=True)
     await run('ldac', with_ldac=False, with_aac=True)   # LDAC missing -> AAC
+    await run('ldac', with_ldac=False, with_aac=True, with_aptx=True)   # LDAC missing -> aptX HD
+    await run('aptx', with_aac=True, with_aptx=True)
     aac_mtu_check()
 asyncio.run(main())
 print('E2E OK')

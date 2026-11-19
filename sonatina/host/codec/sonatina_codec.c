@@ -4,6 +4,7 @@
 #include "codec_sbc.h"
 #include "codec_ldac.h"
 #include "aacenc_lib.h"   /* Fraunhofer FDK AAC (third_party/fdk-aac) */
+#include "freeaptx.h"     /* aptX / aptX HD (third_party/libfreeaptx, LGPL-2.1+) */
 
 #ifdef _WIN32
 #define SONT_API __declspec(dllexport)
@@ -11,7 +12,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 3; }
+SONT_API int sont_codec_version(void) { return 4; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -190,6 +191,51 @@ SONT_API int sont_aac_encode(void *h, const int16_t *pcm, unsigned frames, unsig
         return -1;
     }
     return out_args.numOutBytes;
+}
+
+/* ------------------------------------------------------------------ aptX / aptX HD */
+
+/* hd = 0: aptX (4 bytes per 4 stereo samples), 1: aptX HD (6 bytes). */
+SONT_API void *sont_aptx_create(unsigned hd) { return aptx_init(hd ? 1 : 0); }
+
+SONT_API void sont_aptx_destroy(void *h)
+{
+    if (h) {
+        aptx_finish((struct aptx_context *)h);
+    }
+}
+
+/* pcm: `frames` stereo frames of interleaved int16, frames a multiple of 4. The
+ * codec takes 24-bit samples: int16 is widened (<< 8). Returns bytes written. */
+SONT_API int sont_aptx_encode(void *h, const int16_t *pcm, unsigned frames,
+                              uint8_t *out, unsigned capacity)
+{
+    unsigned char in[4 * 2 * 3 * 32];   /* 128 stereo frames of 24 bit per pass */
+    unsigned done = 0, total = 0;
+    if (h == NULL || (frames & 3) != 0) {
+        return -1;
+    }
+    while (done < frames) {
+        unsigned n = frames - done, i;
+        size_t written = 0, used;
+        if (n > 128) {
+            n = 128;
+        }
+        for (i = 0; i < n * 2; i++) {
+            int32_t v = (int32_t)pcm[done * 2 + i] * 256;
+            in[i * 3 + 0] = (unsigned char)(v & 0xFF);
+            in[i * 3 + 1] = (unsigned char)((v >> 8) & 0xFF);
+            in[i * 3 + 2] = (unsigned char)((v >> 16) & 0xFF);
+        }
+        used = aptx_encode((struct aptx_context *)h, in, n * 6, out + total, capacity - total,
+                           &written);
+        if (used != n * 6) {
+            return -1;   /* output buffer too small */
+        }
+        total += (unsigned)written;
+        done += n;
+    }
+    return (int)total;
 }
 
 /* ------------------------------------------------------------------ volume */

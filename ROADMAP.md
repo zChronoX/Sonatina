@@ -176,9 +176,16 @@ reconnects the headset with the new parameters.
      256), target 256 kbit/s (`aac_bitrate`), capped by the sink's bitrate field.
      Object type MPEG-2 LC if offered, else MPEG-4 LC. Fallback LDAC -> AAC -> SBC.
      Test: `e2e_virtual.py` decodes the stream with ffmpeg (1 kHz tone back).
-  2. **aptX** `[ ]` and **aptX HD** `[ ]`: libfreeaptx (LGPL-2.1+, integer
-     only), A2DP vendor IDs Qualcomm `4F 00 00 00 / 01 00` (aptX) and
-     `D7 00 00 00 / 24 00` (aptX HD).
+  2. **aptX** `[~]` and **aptX HD** `[~]` (code + virtual test done; the hardware test needs
+     headphones that offer aptX, see the "headset codecs" log line):
+     libfreeaptx (LGPL-2.1+, commit 476e2d5) vendored in
+     `sonatina/host/codec/third_party/libfreeaptx`, `sont_aptx_*` in `sonatina_codec.dll`
+     v4 (int16 widened to 24 bit). Vendor IDs `4F/0001` (aptX), `D7/0024` (aptX HD),
+     config byte 0x12 (48 kHz, stereo; HD + 4 reserved bytes). Framing as Android and
+     PipeWire: aptX without RTP header, aptX HD with it; 128-sample pushes packed up to
+     the MTU. 384 / 576 kbit/s. Codec order (Android's): LDAC > aptX HD > aptX > AAC > SBC,
+     starting from the codec chosen in the tray. Test: `e2e_virtual.py` decodes both with
+     ffmpeg.
   - Not possible: aptX Adaptive / Lossless (no open encoder).
 
 ### D8. Signing, installer and QA `[~]`
@@ -425,7 +432,7 @@ build target.
 | SBC | AOSP `external/bluetooth/sbc` | Apache-2.0 | yes |
 | LDAC | AOSP | Apache-2.0 | yes |
 | AAC | FDK-AAC | Fraunhofer FDK licence (no patent grant) | personal use only: done in the host (D7.1) |
-| aptX / aptX HD | libfreeaptx | LGPL-2.1+ (main patent considered expired) | personal use only: planned (D7.2) |
+| aptX / aptX HD | libfreeaptx | LGPL-2.1+ (main patent considered expired) | personal use only: done in the host (D7.2) |
 | aptX Adaptive / Lossless | Qualcomm | proprietary | no open encoder: not possible |
 
 Consequence: "100% parity" for AAC/aptX is a business decision. The engineering

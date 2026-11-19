@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds sonatina_codec.dll (Windows x64, mingw-w64) and/or sonatina_codec.so (Linux, tests)
-# from the driver's codec sources (SBC, LDAC) and the vendored FDK AAC encoder.
+# from the driver's codec sources (SBC, LDAC), the vendored FDK AAC encoder and libfreeaptx.
 # Run from this directory.
 #   sh build_codec.sh          # both
 #   sh build_codec.sh so       # Linux only (CI tests)
@@ -11,9 +11,10 @@ D=../../driver
 FDK=third_party/fdk-aac
 SRC="sonatina_codec.c $D/src/codec_sbc.c $D/src/codec_ldac.c \
      $D/third_party/sbc/src/sbc.c $D/third_party/sbc/src/bits.c \
-     $D/third_party/ldac/src/ldacBT.c $D/third_party/ldac/src/ldaclib.c"
+     $D/third_party/ldac/src/ldacBT.c $D/third_party/ldac/src/ldaclib.c \
+     third_party/libfreeaptx/freeaptx.c"
 FDK_INC=$(for d in $FDK/lib*/include; do printf -- "-I%s " "$d"; done)
-INC="-I$D/src -I$D/third_party/sbc/include -I$D/third_party/ldac/inc -I$D/third_party/ldac/src $FDK_INC"
+INC="-Ithird_party/libfreeaptx -I$D/src -I$D/third_party/sbc/include -I$D/third_party/ldac/inc -I$D/third_party/ldac/src $FDK_INC"
 DEF="-DSONATINA_WITH_LIBSBC -DSONATINA_WITH_LIBLDAC -D_32BIT_FIXED_POINT"
 FDK_FLAGS="-O2 -fno-exceptions -fno-rtti -w $FDK_INC"
 

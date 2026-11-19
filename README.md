@@ -1,14 +1,15 @@
 # Sonatina
 
 Sonatina streams the sound of Windows to Bluetooth headphones in **LDAC** (up to 990 kbit/s),
-**AAC** or **SBC**, through a **dedicated USB Bluetooth adapter**, without any kernel driver of its own.
+**aptX HD**, **aptX**, **AAC** or **SBC**, through a **dedicated USB Bluetooth adapter**, without any kernel driver of its own.
 Secure Boot stays on, so anti-cheat software (Riot Vanguard, ...) keeps working.
 
 ```
-Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LDAC / AAC / SBC ──► USB adapter (WinUSB) ──► headphones
+Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LDAC / aptX / AAC / SBC ──► USB adapter (WinUSB) ──► headphones
 ```
 
-- Works with any A2DP headphones: LDAC when they support it, then AAC, SBC otherwise.
+- Works with any A2DP headphones: the best codec they support, in this order: LDAC, aptX HD, aptX,
+  AAC, SBC.
 - Several headphones: pair them once, Sonatina uses whichever one you switch on.
 - Follows the Windows volume and mute.
 - Runs in the notification area and starts with Windows.
@@ -51,7 +52,7 @@ Right-click menu:
 | Menu | What it does |
 |---|---|
 | Headphones | switch between paired headphones, search and pair new ones, forget the current ones |
-| Audio quality | LDAC 990 / 660 / 330 kbit/s, AAC or SBC, remembered per headphones |
+| Audio quality | LDAC 990 / 660 / 330 kbit/s, aptX HD, aptX, AAC or SBC, remembered per headphones |
 | Volume handled by the headphones | the Windows volume moves the headphones' own volume and their volume buttons move the Windows slider (AVRCP absolute volume, when supported) |
 | Headphone buttons | play/pause, next and previous control the current player (Spotify, browsers, Media Player...) |
 | Restart connection | reconnects the headphones |
@@ -80,7 +81,8 @@ no longer need it, and pick your normal output in the sound settings.
 
 - No microphone / calls (HFP).
 - Headphone buttons (play/pause/next) and headphone-side volume (AVRCP) are not handled yet.
-- No aptX yet. AAC is limited by the headphones' packet size (about 220 kbit/s on the CMF, 256 on most).
+- No aptX Adaptive / Lossless (no open encoder). AAC is limited by the headphones' packet size
+  (about 220 kbit/s on the CMF, 256 on most).
 - Audio is ~200–300 ms late (Bluetooth + buffers); Windows does not know it, so video lip-sync can
   be off.
 
@@ -106,6 +108,7 @@ needs test signing with Secure Boot off, so it is kept only as a reference.
 
 Sonatina code: see `LICENSE` (to be added). Third-party parts: Bumble (Apache-2.0), libldac and
 libsbc from AOSP (Apache-2.0), Fraunhofer FDK AAC (FDK AAC licence, see
-`sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
+`sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libfreeaptx
+(LGPL-2.1+), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
 redistributable), PyInstaller bootloader (GPL with exception). VB-CABLE is downloaded from
-vb-audio.com and is not part of this project. "Bluetooth", "LDAC" and "AAC" are trademarks of their owners.
+vb-audio.com and is not part of this project. "Bluetooth", "LDAC", "aptX" and "AAC" are trademarks of their owners.

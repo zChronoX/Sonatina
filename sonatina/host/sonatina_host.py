@@ -80,6 +80,20 @@ LDAC_CODEC_ID = 0x00AA
 LDAC_EQMID = {"hq": 0, "sq": 1, "mq": 2}
 LDAC_KBPS = {0: 990, 1: 660, 2: 330}
 RTP_HEADER = 12
+APTX_VENDOR_ID = 0x0000004F           # APT Ltd. (Qualcomm)
+APTX_CODEC_ID = 0x0001
+APTX_HD_VENDOR_ID = 0x000000D7        # Qualcomm Technologies International
+APTX_HD_CODEC_ID = 0x0024
+VENDOR_CODECS = {
+    (LDAC_VENDOR_ID, LDAC_CODEC_ID): "LDAC",
+    (APTX_VENDOR_ID, APTX_CODEC_ID): "aptX",
+    (APTX_HD_VENDOR_ID, APTX_HD_CODEC_ID): "aptX HD",
+    (0x000000D7, 0x00AD): "aptX Adaptive",
+    (0x0000000A, 0x0002): "aptX Low Latency",
+}
+# Preferred codec first, then the next ones (same order as Android's codec priority)
+CODEC_CHAIN = ["ldac", "aptx_hd", "aptx", "aac", "sbc"]
+CODEC_NAMES = {"ldac": "LDAC", "aptx_hd": "aptX HD", "aptx": "aptX", "aac": "AAC", "sbc": "SBC"}
 AAC_FRAME = 1024                      # samples per AAC access unit (one RTP packet)
 AAC_LATM_OVERHEAD = 16                # StreamMuxConfig + PayloadLengthInfo, rounded up
 SSRC = 0x534F4E54                     # "SONT"
@@ -118,6 +132,14 @@ class CodecLib:
             L.sont_aac_encode.restype = ctypes.c_int
             L.sont_aac_encode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
                                           ctypes.c_uint, ctypes.c_char_p, ctypes.c_uint]
+        self.has_aptx = hasattr(L, "sont_aptx_create")  # codec version >= 4
+        if self.has_aptx:
+            L.sont_aptx_create.restype = ctypes.c_void_p
+            L.sont_aptx_create.argtypes = [ctypes.c_uint]
+            L.sont_aptx_destroy.argtypes = [ctypes.c_void_p]
+            L.sont_aptx_encode.restype = ctypes.c_int
+            L.sont_aptx_encode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
+                                           ctypes.c_char_p, ctypes.c_uint]
         self.has_gain = hasattr(L, "sont_pcm_gain")   # codec version >= 2
         if self.has_gain:
             L.sont_pcm_gain.restype = None
@@ -244,6 +266,46 @@ class AacEncoder:
     def close(self) -> None:
         if self.handle:
             self.lib.sont_aac_destroy(self.handle)
+            self.handle = None
+
+
+class AptxEncoder:
+    """aptX (4:1 on 16-bit, 384 kbit/s at 48 kHz) or aptX HD (24-bit, 576 kbit/s).
+
+    A2DP framing as in Android and PipeWire: aptX packets carry no RTP header, aptX HD
+    packets do. Pushes of 128 samples are packed up to the MTU."""
+
+    def __init__(self, lib: CodecLib, hd: bool, mtu: int) -> None:
+        if not lib.has_aptx:
+            raise RuntimeError("sonatina_codec.dll is too old for aptX: update it")
+        self.lib = lib.lib
+        self.name = "aptX HD" if hd else "aptX"
+        self.rtp = hd
+        self.handle = self.lib.sont_aptx_create(1 if hd else 0)
+        if not self.handle:
+            raise RuntimeError("aptX encoder init failed")
+        self.push_bytes = PUSH_SAMPLES * (6 if hd else 4) // 4
+        room = mtu - (RTP_HEADER if hd else 0)
+        self.per_packet = max(1, room // self.push_bytes)
+        self.kbps = self.push_bytes * 8 * RATE // PUSH_SAMPLES // 1000
+        self.out = ctypes.create_string_buffer(1024)
+        self.pending: list[bytes] = []
+
+    def push(self, pcm: bytes) -> list[tuple[bytes, int]]:
+        n = self.lib.sont_aptx_encode(self.handle, pcm, PUSH_SAMPLES, self.out, len(self.out))
+        if n != self.push_bytes:
+            raise RuntimeError(f"aptX encode failed ({n})")
+        self.pending.append(self.out.raw[:n])
+        if len(self.pending) < self.per_packet:
+            return []
+        payload = b"".join(self.pending)
+        samples = len(self.pending) * PUSH_SAMPLES
+        self.pending = []
+        return [(payload, samples)]
+
+    def close(self) -> None:
+        if self.handle:
+            self.lib.sont_aptx_destroy(self.handle)
             self.handle = None
 
 
@@ -589,6 +651,7 @@ class MediaPump:
 
     async def _run(self, channel) -> None:
         pcm_bytes = PUSH_SAMPLES * FRAME_BYTES
+        rtp = getattr(self.encoder, "rtp", True)   # aptX (classic) packets have no RTP header
         t0 = time.perf_counter()
         done = 0
         while True:
@@ -610,7 +673,7 @@ class MediaPump:
                     pcm = self.volume.apply(pcm, PUSH_SAMPLES)
                 for payload, samples in self.encoder.push(pcm):
                     header = struct.pack(">BBHII", 0x80, 96, self.seq & 0xFFFF,
-                                         self.timestamp & 0xFFFFFFFF, SSRC)
+                                         self.timestamp & 0xFFFFFFFF, SSRC) if rtp else b""
                     try:
                         channel.write(header + payload)
                     except Exception as error:   # link dropped under us: stop quietly
@@ -633,6 +696,18 @@ def ldac_config() -> MediaCodecCapabilities:
             LDAC_VENDOR_ID, LDAC_CODEC_ID, bytes([0x10, 0x01])  # 48 kHz, stereo
         ),
     )
+
+
+def aptx_config(hd: bool) -> MediaCodecCapabilities:
+    # 48 kHz (0x10) | stereo (0x02); aptX HD adds 4 reserved bytes
+    if hd:
+        info = VendorSpecificMediaCodecInformation(APTX_HD_VENDOR_ID, APTX_HD_CODEC_ID,
+                                                   bytes([0x12, 0, 0, 0, 0]))
+    else:
+        info = VendorSpecificMediaCodecInformation(APTX_VENDOR_ID, APTX_CODEC_ID, bytes([0x12]))
+    return MediaCodecCapabilities(media_type=AVDTP_AUDIO_MEDIA_TYPE,
+                                  media_codec_type=A2DP_NON_A2DP_CODEC_TYPE,
+                                  media_codec_information=info)
 
 
 def sbc_config(max_bitpool: int) -> MediaCodecCapabilities:
@@ -685,8 +760,8 @@ def aac_sink_usable(sink_info) -> bool:
 class Settings:
     transport: str = "usb:0BDA:8771"
     address: str = ""             # preferred headset ("" = the first paired one)
-    codec: str = "ldac"           # preferred codec: ldac | aac | sbc (per headset in `headsets`);
-                                  # unsupported -> the next one (LDAC -> AAC -> SBC)
+    codec: str = "ldac"           # preferred codec: ldac | aptx_hd | aptx | aac | sbc (per headset
+                                  # in `headsets`); unsupported -> the next one in CODEC_CHAIN
     aac_bitrate: int = 256000     # AAC target, lowered to fit the headset MTU and max bitrate
     ldac_quality: str = "sq"      # hq | sq | mq
     sbc_max_bitpool: int = 53
@@ -872,43 +947,17 @@ class SonatinaHost:
             await protocol.discover_remote_endpoints()
 
             mtu_holder = {"mtu": 679}
-            choice = None
             codec, ldac_quality = self.codec_for(peer)
-            if codec == "ldac":
-                sink = protocol.find_remote_sink_by_codec(
-                    AVDTP_AUDIO_MEDIA_TYPE, A2DP_NON_A2DP_CODEC_TYPE, LDAC_VENDOR_ID, LDAC_CODEC_ID)
-                if sink is not None:
-                    eqmid = LDAC_EQMID.get(ldac_quality, 1)
-                    choice = (sink, ldac_config(),
-                              lambda: LdacEncoder(self.lib, eqmid, mtu_holder["mtu"]))
-                else:
-                    log.warning("headset has no LDAC sink: trying AAC")
-                    codec = "aac"
-            if choice is None and codec == "aac":
-                sink = protocol.find_remote_sink_by_codec(
-                    AVDTP_AUDIO_MEDIA_TYPE, A2DP_MPEG_2_4_AAC_CODEC_TYPE)
-                sink_info = self._codec_info(sink)
-                if sink is None or not aac_sink_usable(sink_info):
-                    log.warning("headset has no usable AAC sink (%s): falling back to SBC", sink_info)
-                elif not self.lib.has_aac:
-                    log.warning("sonatina_codec.dll without AAC: falling back to SBC")
-                else:
-                    config = aac_config(sink_info, self.s.aac_bitrate)
-                    bitrate = config.media_codec_information.bitrate
-                    choice = (sink, config,
-                              lambda: AacEncoder(self.lib, bitrate, mtu_holder["mtu"]))
+            log.info("headset codecs: %s", ", ".join(self._sink_names(protocol)) or "?")
+            choice = None
+            for candidate in CODEC_CHAIN[CODEC_CHAIN.index(codec) if codec in CODEC_CHAIN else 0:]:
+                choice = self._choose(protocol, candidate, ldac_quality, mtu_holder)
+                if choice is not None:
+                    break
+                log.info("%s not usable with this headset, trying the next codec",
+                         CODEC_NAMES[candidate])
             if choice is None:
-                sink = protocol.find_remote_sink_by_codec(AVDTP_AUDIO_MEDIA_TYPE, A2DP_SBC_CODEC_TYPE)
-                if sink is None:
-                    raise RuntimeError("no SBC sink on the headset")
-                remote_max = 53
-                for cap in sink.capabilities:
-                    if isinstance(cap, MediaCodecCapabilities) and isinstance(
-                            cap.media_codec_information, SbcMediaCodecInformation):
-                        remote_max = cap.media_codec_information.maximum_bitpool_value
-                bitpool = max(2, min(self.s.sbc_max_bitpool, remote_max))
-                choice = (sink, sbc_config(bitpool),
-                          lambda: SbcEncoder(self.lib, bitpool, mtu_holder["mtu"]))
+                raise RuntimeError("no usable sink on the headset (not even SBC)")
 
             sink, config, make_encoder = choice
             delay_reporting = any(
@@ -937,6 +986,67 @@ class SonatinaHost:
                 await connection.disconnect()
             except Exception:
                 pass
+
+    def _choose(self, protocol, codec: str, ldac_quality: str, mtu_holder: dict):
+        """(sink, configuration, encoder factory) for `codec`, or None if not usable."""
+        mtu = lambda: mtu_holder["mtu"]  # noqa: E731 - known only once the stream is open
+        if codec == "ldac":
+            sink = protocol.find_remote_sink_by_codec(
+                AVDTP_AUDIO_MEDIA_TYPE, A2DP_NON_A2DP_CODEC_TYPE, LDAC_VENDOR_ID, LDAC_CODEC_ID)
+            if sink is None:
+                return None
+            eqmid = LDAC_EQMID.get(ldac_quality, 1)
+            return sink, ldac_config(), lambda: LdacEncoder(self.lib, eqmid, mtu())
+        if codec in ("aptx_hd", "aptx"):
+            hd = codec == "aptx_hd"
+            vendor, codec_id = (APTX_HD_VENDOR_ID, APTX_HD_CODEC_ID) if hd else (APTX_VENDOR_ID,
+                                                                                APTX_CODEC_ID)
+            sink = protocol.find_remote_sink_by_codec(
+                AVDTP_AUDIO_MEDIA_TYPE, A2DP_NON_A2DP_CODEC_TYPE, vendor, codec_id)
+            info = self._codec_info(sink)
+            value = bytes(getattr(info, "value", b"") or b"")
+            if sink is None or not self.lib.has_aptx:
+                return None
+            if value and (value[0] & 0x12) != 0x12:   # 48 kHz + stereo
+                log.info("%s sink without 48 kHz stereo (0x%02X)", CODEC_NAMES[codec], value[0])
+                return None
+            return sink, aptx_config(hd), lambda: AptxEncoder(self.lib, hd, mtu())
+        if codec == "aac":
+            sink = protocol.find_remote_sink_by_codec(AVDTP_AUDIO_MEDIA_TYPE,
+                                                      A2DP_MPEG_2_4_AAC_CODEC_TYPE)
+            info = self._codec_info(sink)
+            if sink is None or not aac_sink_usable(info) or not self.lib.has_aac:
+                return None
+            config = aac_config(info, self.s.aac_bitrate)
+            bitrate = config.media_codec_information.bitrate
+            return sink, config, lambda: AacEncoder(self.lib, bitrate, mtu())
+        sink = protocol.find_remote_sink_by_codec(AVDTP_AUDIO_MEDIA_TYPE, A2DP_SBC_CODEC_TYPE)
+        if sink is None:
+            return None
+        info = self._codec_info(sink)
+        remote_max = info.maximum_bitpool_value if isinstance(info, SbcMediaCodecInformation) else 53
+        bitpool = max(2, min(self.s.sbc_max_bitpool, remote_max))
+        return sink, sbc_config(bitpool), lambda: SbcEncoder(self.lib, bitpool, mtu())
+
+    @staticmethod
+    def _sink_names(protocol) -> list[str]:
+        """Codecs the headset offers, for the log (helps when adding headsets)."""
+        names = []
+        for endpoint in protocol.remote_endpoints.values():
+            for cap in endpoint.capabilities:
+                if not isinstance(cap, MediaCodecCapabilities):
+                    continue
+                info = cap.media_codec_information
+                if cap.media_codec_type == A2DP_SBC_CODEC_TYPE:
+                    names.append("SBC")
+                elif cap.media_codec_type == A2DP_MPEG_2_4_AAC_CODEC_TYPE:
+                    names.append("AAC")
+                elif isinstance(info, VendorSpecificMediaCodecInformation):
+                    key = (info.vendor_id, info.codec_id)
+                    names.append(VENDOR_CODECS.get(key, f"vendor 0x{key[0]:04X}/0x{key[1]:04X}"))
+                else:
+                    names.append(f"type 0x{cap.media_codec_type:02X}")
+        return names
 
     @staticmethod
     def _codec_info(sink):
@@ -1187,7 +1297,7 @@ def main() -> None:
                     f"Options not given come from {SETTINGS_PATH}.")
     parser.add_argument("--transport")
     parser.add_argument("--address", help="headset to connect (AA:BB:CC:DD:EE:FF)")
-    parser.add_argument("--codec", choices=["ldac", "aac", "sbc"])
+    parser.add_argument("--codec", choices=CODEC_CHAIN)
     parser.add_argument("--ldac-quality", choices=["hq", "sq", "mq"])
     parser.add_argument("--sbc-bitpool", type=int)
     parser.add_argument("--capture", help="capture device name (substring)")
