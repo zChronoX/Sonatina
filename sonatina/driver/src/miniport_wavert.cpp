@@ -578,6 +578,28 @@ CMiniportWaveRTStreamSonatina::~CMiniportWaveRTStreamSonatina()
     }
 }
 
+/* Non-paged: takes the PCM source spin lock (DISPATCH_LEVEL). Paged callers
+ * must never hold a spin lock themselves, since their own code may be paged out. */
+#pragma code_seg()
+static DECLSPEC_NOINLINE VOID
+SontPcmSourceSetFormat(
+    _In_opt_ PSONT_PCM_SOURCE Source,
+    _In_ ULONG SampleRate,
+    _In_ ULONG Channels
+)
+{
+    KIRQL oldIrql;
+
+    if (Source == NULL)
+    {
+        return;
+    }
+    KeAcquireSpinLock(&Source->Lock, &oldIrql);
+    Source->StreamSampleRate = SampleRate;
+    Source->StreamChannels = Channels;
+    KeReleaseSpinLock(&Source->Lock, oldIrql);
+}
+
 #pragma code_seg("PAGE")
 NTSTATUS
 CMiniportWaveRTStreamSonatina::Init(
@@ -608,15 +630,9 @@ CMiniportWaveRTStreamSonatina::Init(
     m_SampleRate = WaveFormat->nSamplesPerSec;
     m_Channels = WaveFormat->nChannels;
 
-    if (m_PcmSource != NULL)
-    {
-        PSONT_PCM_SOURCE src = m_PcmSource;
-        KIRQL oldIrql;
-        KeAcquireSpinLock(&src->Lock, &oldIrql);
-        src->StreamSampleRate = m_SampleRate;
-        src->StreamChannels = m_Channels;
-        KeReleaseSpinLock(&src->Lock, oldIrql);
-    }
+    /* Not inline: holding a spin lock raises to DISPATCH_LEVEL, and this
+     * function lives in the PAGE section (Driver Verifier bugcheck 0xD1). */
+    SontPcmSourceSetFormat(m_PcmSource, m_SampleRate, m_Channels);
 
     (VOID)KeQueryPerformanceCounter(&m_QpcFrequency);
     if (m_QpcFrequency.QuadPart <= 0)

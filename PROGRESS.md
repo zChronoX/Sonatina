@@ -145,6 +145,18 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
   avviata dal driver (outgoing) al primo tentativo. Restano da provare: pausa lunga,
   riconnessione avviata dalla cuffia, multipoint/chiamate, riavvio, Driver Verifier.
 
+## Driver Verifier (2026-11-19)
+
+- Primo avvio con `verifier /standard /driver SonatinaAudio.sys`: bugcheck 0xD1
+  DRIVER_IRQL_NOT_LESS_OR_EQUAL in `CMiniportWaveRTStreamSonatina::Init` (riga 613),
+  processo audiodg.exe all'apertura dello stream. Causa: `Init` sta nella sezione
+  PAGE e acquisiva lo spin lock della PCM source; a DISPATCH_LEVEL il suo stesso
+  codice puo' essere paginato (Verifier lo forza).
+- Fix: helper non paginato e non inline `SontPcmSourceSetFormat`; lo stream mette
+  in cache `m_PcmSource` e non chiama l'accessor del miniport a DISPATCH_LEVEL;
+  il pacchetto VM include ora `symbols\SonatinaAudio.pdb`.
+- Controllo statico: nessun'altra funzione PAGE acquisisce spin lock.
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
 - Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.
