@@ -93,7 +93,17 @@ jobs:
           foreach ($f in 'rtl8761bu_fw.bin','rtl8761bu_config.bin') {
             Invoke-WebRequest "$env:FW_URL/$f" -OutFile "build/firmware/$f"
           }
-          Invoke-WebRequest "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/LICENCE.rtlwifi_firmware.txt" -OutFile build/firmware/LICENCE.rtlwifi_firmware.txt
+          # Licence text (non fatal: the file has moved around in linux-firmware)
+          $lic = 'build/firmware/LICENCE.rtlwifi_firmware.txt'
+          $got = $false
+          foreach ($u in 'https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/LICENCE.rtlwifi_firmware.txt',
+                         'https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/licenses/LICENCE.rtlwifi_firmware.txt',
+                         'https://raw.githubusercontent.com/endlessm/linux-firmware/master/LICENCE.rtlwifi_firmware.txt') {
+            try { Invoke-WebRequest $u -OutFile $lic -ErrorAction Stop; $got = $true; break } catch { Write-Host "not at $u" }
+          }
+          if (-not $got) {
+            Set-Content $lic "Realtek Bluetooth firmware from linux-firmware (rtl_bt), redistributable under LICENCE.rtlwifi_firmware.txt: https://gitlab.com/kernel-firmware/linux-firmware"
+          }
           Get-ChildItem build/firmware
 
       # ---- Sonatina.exe (PyInstaller, no Python needed on the PC)
