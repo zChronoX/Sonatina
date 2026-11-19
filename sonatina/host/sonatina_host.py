@@ -82,7 +82,9 @@ LDAC_KBPS = {0: 990, 1: 660, 2: 330}
 LDAC_DELAY_MS = 15                    # estimate: libldac look-ahead + 2-3 frames per packet
 NORMAL_TARGET_MS = 20                 # jitter buffer: safety margin kept at the worst moment
 LOW_LATENCY_TARGET_MS = 8
-LOW_LATENCY_PACKET_MS = 8             # SBC / aptX packets at most this long in low latency
+LOW_LATENCY_PACKET_MS = 0             # packet cap in low latency (0 = fill the MTU). 8 ms saved
+                                      # ~4 ms but doubled the packet rate: pops on the Air5's
+                                      # second earbud (true-wireless relay), 2026-11-19
 RTP_HEADER = 12
 APTX_VENDOR_ID = 0x0000004F           # APT Ltd. (Qualcomm)
 APTX_CODEC_ID = 0x0001

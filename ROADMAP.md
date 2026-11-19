@@ -618,8 +618,10 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
   target and the media clock is trimmed (PI, at most +-0.2 %), so VB-CABLE/Windows clock
   drift never fills the buffer (latency creep) nor empties it (gaps). After an underrun the
   target grows by 5 ms (max 60). Targets: 20 ms normal, 8 ms in "Low latency".
-- Low latency (tray): target 8 ms and SBC/aptX packets of at most 8 ms (audio waits until its
-  packet is full). Best codecs for it: aptX or SBC (AAC adds ~55 ms of encoder delay).
+- Low latency (tray): jitter target 8 ms. Best codecs for it: aptX or SBC (AAC adds ~55 ms
+  of encoder delay). Packets still fill the MTU: capping aptX packets at 8 ms (125 packets/s
+  instead of 62) saved ~4 ms but caused pops on the Air5's second earbud (hardware test
+  2026-11-19: ours 31 ms + Air5 game mode 70 ms = ~101 ms, no underruns, drift < 70 ppm).
 - Estimated delay (ours + headset report) in the tray tooltip and in the stats log line.
 - Limit: Windows apps cannot compensate automatically (VB-CABLE reports its own small
   latency; only a kernel audio driver could report the real one). Players with an audio
