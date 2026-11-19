@@ -33,5 +33,7 @@ async def main():
     # B drops the link while streaming
     conn=list(devs[2].connections.values())[0]; await conn.disconnect(); await asyncio.sleep(0.5)
     print('after drop', host.state, 'unhandled errors', errors)
+    assert host.s.address == addrs[2] and host.state == 'idle' and not errors
+    print('SWITCH OK')
     tone.stop()
 asyncio.run(main())

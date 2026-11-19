@@ -44,6 +44,9 @@ async def main():
     found={addrs[1]:'Fake Headphones'}
     ok=await host.pair(addrs[1], found.get(addrs[1])); print('pair ok', ok, 'paired', host.paired, 'preferred', host.s.address, 'saved', saved[-1:] )
     await asyncio.sleep(2); print('state', host.state, 'rx', len(rx), 'summary', host.summary())
+    assert ok and host.state == 'streaming' and len(rx) > 50 and host.s.address == addrs[1]
     await host.forget(addrs[1]); await asyncio.sleep(0.5); print('after forget', host.paired, repr(host.s.address), host.state)
+    assert not host.paired and host.s.address == ''
+    print('PAIR OK')
     tone.stop()
 asyncio.run(main())

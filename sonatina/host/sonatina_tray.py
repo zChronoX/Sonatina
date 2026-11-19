@@ -22,11 +22,12 @@ log = logging.getLogger("sonatina")
 
 APP_DIR = sh.APP_DIR
 LOG_PATH = os.path.join(APP_DIR, "sonatina.log")
+tr = sh.tr
 CODEC_CHOICES = [  # (label, codec, ldac quality)
-    ("LDAC 990 kbit/s (massima qualita')", "ldac", "hq"),
+    (tr("LDAC 990 kbit/s (massima qualita')", "LDAC 990 kbit/s (best quality)"), "ldac", "hq"),
     ("LDAC 660 kbit/s", "ldac", "sq"),
-    ("LDAC 330 kbit/s (connessione debole)", "ldac", "mq"),
-    ("SBC (compatibile con tutte)", "sbc", None),
+    (tr("LDAC 330 kbit/s (connessione debole)", "LDAC 330 kbit/s (weak link)"), "ldac", "mq"),
+    (tr("SBC (compatibile con tutte)", "SBC (works with all headphones)"), "sbc", None),
 ]
 RETRY_S = 5.0
 
@@ -81,6 +82,7 @@ class TrayApp:
         self.dongle_ok = False
         self.icon = None
         self.found: dict[str, str] = {}   # discovered, not yet paired
+        self.first_run_search = False
 
     # -- host thread ----------------------------------------------------------
     def _on_host(self, host: sh.SonatinaHost) -> None:
@@ -137,7 +139,8 @@ class TrayApp:
     # -- tray -----------------------------------------------------------------
     def status(self) -> tuple[str, str]:
         if self.host is None:
-            return "error", "Sonatina: chiavetta non trovata" if not self.dongle_ok else "Sonatina: avvio..."
+            return "error", (tr("Sonatina: chiavetta non trovata", "Sonatina: adapter not found")
+                             if not self.dongle_ok else tr("Sonatina: avvio...", "Sonatina: starting..."))
         state = self.host.state
         key = "streaming" if state == "streaming" else ("error" if state == "error" else "idle")
         return key, self.host.summary()
@@ -145,6 +148,13 @@ class TrayApp:
     def refresher(self) -> None:
         last = None
         while not self.quitting:
+            host = self.host
+            if (not self.first_run_search and host is not None and host.state == "idle"
+                    and getattr(host, "ready", False) and not host.paired
+                    and self.loop is not None):
+                self.first_run_search = True   # no headset yet: start pairing right away
+                time.sleep(2)
+                self.on_search()
             key, text = self.status()
             if self.icon is not None and (key, text) != last:
                 last = (key, text)
@@ -158,16 +168,19 @@ class TrayApp:
         host = self.host
         if host is None or host.discovering:
             return
-        self.notify("Metti le cuffie in modalita' abbinamento: ricerca per 12 secondi...")
+        self.notify(tr("Metti le cuffie in modalita' abbinamento: ricerca per 12 secondi...",
+                       "Put the headphones in pairing mode: searching for 12 seconds..."))
 
         async def search():
             found = await host.discover(12)
             new = {a: n for a, n in found.items() if a not in host.paired}
             self.found = new
             if new:
-                self.notify("Trovate: " + ", ".join(new.values()) + ". Scegli in Cuffie > Abbina.")
+                self.notify(tr("Trovate: ", "Found: ") + ", ".join(new.values()) +
+                            tr(". Scegli in Cuffie > Abbina.", ". Choose Headphones > Pair."))
             else:
-                self.notify("Nessuna cuffia nuova trovata. Sono in modalita' abbinamento?")
+                self.notify(tr("Nessuna cuffia nuova trovata. Sono in modalita' abbinamento?",
+                               "No new headphones found. Are they in pairing mode?"))
 
         self.run_coro(search())
 
@@ -180,7 +193,8 @@ class TrayApp:
             async def pair():
                 ok = await host.pair(address, name)
                 self.found.pop(address, None)
-                self.notify(f"{name}: abbinate" if ok else f"{name}: abbinamento non riuscito")
+                self.notify(f"{name}: " + (tr("abbinate", "paired") if ok
+                                            else tr("abbinamento non riuscito", "pairing failed")))
 
             self.run_coro(pair())
         return action
@@ -212,7 +226,7 @@ class TrayApp:
 
         host = self.host
         if host is None:
-            yield pystray.MenuItem("Chiavetta non pronta", None, enabled=False)
+            yield pystray.MenuItem(tr("Chiavetta non pronta", "Adapter not ready"), None, enabled=False)
             return
         for address in sorted(host.paired):
             yield pystray.MenuItem(
@@ -220,14 +234,15 @@ class TrayApp:
                 checked=lambda _i, a=address: self.host is not None and self.host.s.address == a,
                 radio=True)
         if not host.paired:
-            yield pystray.MenuItem("Nessuna cuffia abbinata", None, enabled=False)
+            yield pystray.MenuItem(tr("Nessuna cuffia abbinata", "No paired headphones"), None, enabled=False)
         yield pystray.Menu.SEPARATOR
-        yield pystray.MenuItem("Cerca nuove cuffie...", self.on_search, enabled=not host.discovering)
+        yield pystray.MenuItem(tr("Cerca nuove cuffie...", "Search for new headphones..."), self.on_search,
+                               enabled=not host.discovering)
         for address, name in sorted(self.found.items(), key=lambda kv: kv[1]):
-            yield pystray.MenuItem(f"Abbina: {name}", self._pair_action(address, name))
+            yield pystray.MenuItem(tr("Abbina: ", "Pair: ") + name, self._pair_action(address, name))
         if host.s.address:
             yield pystray.Menu.SEPARATOR
-            yield pystray.MenuItem(f"Dimentica {host.headset_name(host.s.address)}",
+            yield pystray.MenuItem(tr("Dimentica ", "Forget ") + host.headset_name(host.s.address),
                                    self._forget_action(host.s.address))
 
     def codec_menu(self):
@@ -258,12 +273,12 @@ class TrayApp:
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: self.status()[1], None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Cuffie", pystray.Menu(self.headsets_menu)),
-            pystray.MenuItem("Qualita' audio", pystray.Menu(self.codec_menu)),
+            pystray.MenuItem(tr("Cuffie", "Headphones"), pystray.Menu(self.headsets_menu)),
+            pystray.MenuItem(tr("Qualita' audio", "Audio quality"), pystray.Menu(self.codec_menu)),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Riavvia connessione", self.on_restart),
-            pystray.MenuItem("Apri log", self.open_log),
-            pystray.MenuItem("Esci", self.on_quit),
+            pystray.MenuItem(tr("Riavvia connessione", "Restart connection"), self.on_restart),
+            pystray.MenuItem(tr("Apri log", "Open log"), self.open_log),
+            pystray.MenuItem(tr("Esci", "Exit"), self.on_quit),
         )
         self.icon = pystray.Icon("Sonatina", make_icon(COLORS["idle"]), "Sonatina", menu)
         self.icon.run()
@@ -271,11 +286,30 @@ class TrayApp:
 
 def main() -> None:
     setup_logging()
+    if getattr(sys, "frozen", False):
+        # Installed build: the Realtek firmware ships next to Sonatina.exe.
+        firmware = os.path.join(os.path.dirname(sys.executable), "firmware")
+        if os.path.isdir(firmware):
+            os.environ.setdefault("BUMBLE_RTK_FIRMWARE_DIR", firmware)
+    if "--set-default-output" in sys.argv:   # used once by the installer
+        try:
+            log.info("default output: %s", sh.set_default_output())
+        except Exception as error:
+            log.error("cannot set the default output: %r", error)
+        return
     if not single_instance():
         log.info("another SonatinaHost is already running")
         return
     log.info("SonatinaHost tray starting")
-    TrayApp(sh.load_settings(sh.SETTINGS_PATH)).run()
+    settings = sh.load_settings(sh.SETTINGS_PATH)
+    if not settings.audio_configured:   # first run: Windows plays to VB-CABLE
+        try:
+            log.info("default output: %s", sh.set_default_output())
+            settings.audio_configured = True
+            sh.save_settings(settings, sh.SETTINGS_PATH)
+        except Exception as error:
+            log.warning("cannot set the default output yet: %r", error)
+    TrayApp(settings).run()
     log.info("SonatinaHost tray stopped")
     os._exit(0)  # do not wait for the USB thread
 

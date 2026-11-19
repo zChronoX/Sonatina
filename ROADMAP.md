@@ -590,7 +590,9 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Note: while the mic is in use the headset switches to HFP (mono, 16 kHz),
   as with any Bluetooth Classic source.
 
-### U4. One-click installer `[ ]` (next)
+### U4. One-click installer `[~]` (written 2026-11-19, first CI build pending)
+- Files: `sonatina/installer/sonatina.iss`, `sonatina/installer/sonatina-setup.ps1`,
+  `.github/workflows/host.yml` (tests on push; installer on `v*` tags or manual run).
 - Goal: like the commercial A2DP drivers, one `SonatinaSetup.exe` does everything; nothing to
   install by hand (today: Python, pip packages, Zadig, firmware download, VB-CABLE, script).
 - Build in GitHub Actions (windows runner) on tags: PyInstaller (onedir) bundle of
@@ -606,7 +608,7 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Supported adapters list in the README (tested: Realtek RTL8761BUV `0BDA:8771`; Barrot
   `33FA:0012` needs the extra-byte quirk first).
 
-### U5. README for GitHub `[ ]`
+### U5. README for GitHub `[x]` (root `README.md`, English)
 - Install / first pairing / tray menu / switching headsets / codecs / uninstall /
   troubleshooting (log path) / limits (no mic yet) / codec licences.
 

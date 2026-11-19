@@ -1,10 +1,7 @@
 name: Sonatina CI (Python + A1 Host + A2 Driver)
 
+# Kernel driver (archived since phase U): manual runs only, to save CI minutes.
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:

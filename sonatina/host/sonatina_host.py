@@ -47,7 +47,24 @@ from bumble.pairing import PairingConfig
 
 log = logging.getLogger("sonatina")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+
+def _ui_is_italian() -> bool:
+    try:
+        if sys.platform == "win32":
+            return (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF) == 0x10
+        return os.environ.get("LANG", "").lower().startswith("it")
+    except Exception:
+        return False
+
+
+UI_ITALIAN = _ui_is_italian()
+
+
+def tr(italian: str, english: str) -> str:
+    """User-facing text in the Windows display language (Italian or English)."""
+    return italian if UI_ITALIAN else english
+
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))  # PyInstaller-aware
 RATE = 48000
 CHANNELS = 2
 FRAME_BYTES = 2 * CHANNELS            # int16 stereo
@@ -363,6 +380,23 @@ class EndpointVolume:
         return buf.raw
 
 
+def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
+    """Makes the VB-CABLE playback endpoint the Windows default output (all roles)."""
+    from pycaw.constants import DEVICE_STATE, EDataFlow, ERole
+    from pycaw.pycaw import AudioUtilities
+
+    enumerator = AudioUtilities.GetDeviceEnumerator()
+    endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+    for i in range(endpoints.GetCount()):
+        dev = endpoints.Item(i)
+        name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
+        if match.lower() in name.lower() and "16ch" not in name.lower():
+            AudioUtilities.SetDefaultDevice(
+                dev.GetId(), roles=[ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
+            return name
+    raise RuntimeError(f'no playback endpoint matching "{match}" (is VB-CABLE installed?)')
+
+
 # ----------------------------------------------------------------------------- media pump
 class MediaPump:
     """Paces encoding on the monotonic clock (like the kernel driver's media clock),
@@ -478,11 +512,12 @@ class Settings:
     tone: bool = False
     stats: bool = True
     allow_unknown: bool = False   # accept connections from headsets we never paired
+    audio_configured: bool = False  # VB-CABLE already made the default output once
     headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "capture",
-                "volume_endpoint", "headsets")
+                "volume_endpoint", "headsets", "audio_configured")
 
 
 def load_settings(path: str) -> Settings:
@@ -534,6 +569,7 @@ class SonatinaHost:
         self.discovering = False
         self.discovered: dict[str, str] = {}  # address -> name
         self.on_change = None                 # called after settings changed (save)
+        self.ready = False                    # True once powered on and keys loaded
 
     # -- settings ---------------------------------------------------------------
     def headset_name(self, address: str | None) -> str:
@@ -573,6 +609,7 @@ class SonatinaHost:
         await self.device.set_discoverable(False)
         await self.device.set_connectable(True)
         await self.refresh_paired()
+        self.ready = True
 
     # -- device setup ---------------------------------------------------------
     @staticmethod
@@ -829,14 +866,17 @@ class SonatinaHost:
         p = self.pump
         if self.state == "streaming" and p is not None and p.encoder is not None:
             vol = "" if self.volume.last is None else (
-                " · muto" if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
+                tr(" · muto", " · muted") if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
             return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
         if self.discovering:
-            return "Sonatina: ricerca cuffie..."
+            return tr("Sonatina: ricerca cuffie...", "Sonatina: looking for headphones...")
         if self.pairing_target:
-            return f"Sonatina: abbinamento con {self.headset_name(self.pairing_target)}..."
-        return {"idle": "Sonatina: in attesa delle cuffie", "securing": "Sonatina: connessione...",
-                "negotiating": "Sonatina: connessione...", "error": "Sonatina: errore (vedi log)"
+            return tr("Sonatina: abbinamento con ", "Sonatina: pairing with ") + \
+                f"{self.headset_name(self.pairing_target)}..."
+        return {"idle": tr("Sonatina: in attesa delle cuffie", "Sonatina: waiting for the headphones"),
+                "securing": tr("Sonatina: connessione...", "Sonatina: connecting..."),
+                "negotiating": tr("Sonatina: connessione...", "Sonatina: connecting..."),
+                "error": tr("Sonatina: errore (vedi log)", "Sonatina: error (see the log)"),
                 }.get(self.state, f"Sonatina: {self.state}")
 
     async def print_stats(self, interval: float = 5.0, to_log: bool = False) -> None:

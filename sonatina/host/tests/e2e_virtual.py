@@ -53,6 +53,9 @@ async def run(codec, with_ldac=True, seconds=3.0):
           f'pkts/s={len(rx)/seconds:.1f} max_payload={max(sizes) if sizes else 0} ts_steps={sorted(set(b-a for a,b in zip(ts,ts[1:])))[:5]} '
           f'seq_ok={seqs==list(range(seqs[0],seqs[0]+len(seqs))) if seqs else None} underruns={host.ring.underruns} skips={p.skips if p else None} max_late={p.max_late_ms if p else 0:.1f}')
     if rx: print('first payload hdr', bytes(rx[0].payload)[:4].hex())
+    assert host.state == 'streaming' and len(rx) > 50 and seqs == list(range(seqs[0], seqs[0] + len(seqs))), 'stream check failed'
+    expected = 'LDAC' if (codec == 'ldac' and with_ldac) else 'SBC'
+    assert p.encoder.name == expected, (p.encoder.name, expected)
     if rx:
         open(f'rx_{codec}_{with_ldac}.bin','wb').write(b''.join(bytes(x.payload)[1:] for x in rx))
 
@@ -61,3 +64,4 @@ async def main():
     await run('sbc')
     await run('ldac', with_ldac=False)
 asyncio.run(main())
+print('E2E OK')
