@@ -20,3 +20,6 @@ sonatina/build/
 *.sys
 *.cat
 *.cer
+
+# local notes / inventories (not committed)
+local/

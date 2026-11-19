@@ -82,6 +82,11 @@ class CodecLib:
         L.sont_sbc_encode.restype = ctypes.c_int
         L.sont_sbc_encode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
                                       ctypes.c_char_p, ctypes.c_uint]
+        self.has_gain = hasattr(L, "sont_pcm_gain")   # codec version >= 2
+        if self.has_gain:
+            L.sont_pcm_gain.restype = None
+            L.sont_pcm_gain.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint,
+                                        ctypes.c_int, ctypes.c_int]
 
 
 class LdacEncoder:
@@ -280,6 +285,83 @@ class CableCapture:
         self.stream.stop()
 
 
+# ----------------------------------------------------------------------------- volume
+class EndpointVolume:
+    """Follows the Windows volume and mute of the VB-CABLE playback endpoint.
+
+    VB-CABLE ignores its own volume slider (the signal on "CABLE Output" is always
+    full scale), so the gain is applied here, before encoding. Later AVRCP absolute
+    volume (U2) can move it to the headset instead."""
+
+    UNITY = 65536
+
+    def __init__(self, lib: CodecLib, match: str) -> None:
+        self.lib = lib.lib
+        self.gain = self.UNITY      # applied at the end of the last block (Q16)
+        self.target = self.UNITY    # from Windows
+        self.endpoint = None
+        self.name = None
+        self.last = None
+        if sys.platform != "win32":
+            return
+        if not lib.has_gain:
+            log.warning("sonatina_codec.dll is too old for volume control: update it")
+            return
+        try:
+            self._open(match)
+        except Exception as error:
+            log.warning("Windows volume not followed (%r). pip install pycaw", error)
+
+    def _open(self, match: str) -> None:
+        from ctypes import POINTER, cast
+
+        from comtypes import CLSCTX_ALL
+        from pycaw.constants import DEVICE_STATE, EDataFlow
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+        enumerator = AudioUtilities.GetDeviceEnumerator()
+        endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+        for i in range(endpoints.GetCount()):
+            dev = endpoints.Item(i)
+            name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
+            if match.lower() in name.lower() and "16ch" not in name.lower():
+                interface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                self.endpoint = cast(interface, POINTER(IAudioEndpointVolume))
+                self.name = name
+                log.info("volume: following \"%s\"", name)
+                self.poll()
+                return
+        raise RuntimeError(f'no playback endpoint matching "{match}"')
+
+    def poll(self) -> None:
+        if self.endpoint is None:
+            return
+        try:
+            mute = bool(self.endpoint.GetMute())
+            scalar = float(self.endpoint.GetMasterVolumeLevelScalar())
+            db = float(self.endpoint.GetMasterVolumeLevel())
+        except Exception as error:
+            log.debug("volume poll: %r", error)
+            return
+        if mute or scalar <= 0.0:
+            self.target = 0
+        else:
+            self.target = min(self.UNITY, int(self.UNITY * 10 ** (db / 20)))
+        state = (mute, round(scalar * 100))
+        if state != self.last:
+            self.last = state
+            log.info("volume %d%%%s", state[1], " (muted)" if mute else "")
+
+    def apply(self, pcm: bytes, frames: int) -> bytes:
+        g0, g1 = self.gain, self.target
+        if g0 == self.UNITY and g1 == self.UNITY:
+            return pcm
+        buf = ctypes.create_string_buffer(pcm, len(pcm))
+        self.lib.sont_pcm_gain(buf, frames, CHANNELS, g0, g1)
+        self.gain = g1
+        return buf.raw
+
+
 # ----------------------------------------------------------------------------- media pump
 class MediaPump:
     """Paces encoding on the monotonic clock (like the kernel driver's media clock),
@@ -289,8 +371,9 @@ class MediaPump:
     LEAD_S = 0.020
     MAX_BACKLOG_S = 0.200
 
-    def __init__(self, ring: PcmRing, make_encoder) -> None:
+    def __init__(self, ring: PcmRing, make_encoder, volume: EndpointVolume | None = None) -> None:
         self.ring = ring
+        self.volume = volume
         self.make_encoder = make_encoder
         self.encoder = None
         self.task: asyncio.Task | None = None
@@ -335,7 +418,10 @@ class MediaPump:
             if late_ms > self.max_late_ms:
                 self.max_late_ms = late_ms
             while target - done >= PUSH_SAMPLES:
-                for payload, samples in self.encoder.push(self.ring.read(pcm_bytes)):
+                pcm = self.ring.read(pcm_bytes)
+                if self.volume is not None:
+                    pcm = self.volume.apply(pcm, PUSH_SAMPLES)
+                for payload, samples in self.encoder.push(pcm):
                     header = struct.pack(">BBHII", 0x80, 96, self.seq & 0xFFFF,
                                          self.timestamp & 0xFFFFFFFF, SSRC)
                     channel.write(header + payload)
@@ -383,6 +469,7 @@ class Settings:
     ldac_quality: str = "sq"      # hq | sq | mq
     sbc_max_bitpool: int = 53
     capture: str = "CABLE Output"
+    volume_endpoint: str = "VB-Audio Virtual Cable"
     tone: bool = False
     stats: bool = True
     extra: dict = field(default_factory=dict)
@@ -393,6 +480,7 @@ class SonatinaHost:
         self.s = settings
         self.lib = codec_lib or CodecLib()
         self.ring = PcmRing()
+        self.volume = EndpointVolume(self.lib, settings.volume_endpoint)
         self.connection: Connection | None = None
         self.session_task: asyncio.Task | None = None
         self.pump: MediaPump | None = None
@@ -475,7 +563,7 @@ class SonatinaHost:
             sink, config, make_encoder = choice
             delay_reporting = any(
                 c.service_category == AVDTP_DELAY_REPORTING_SERVICE_CATEGORY for c in sink.capabilities)
-            self.pump = MediaPump(self.ring, make_encoder)
+            self.pump = MediaPump(self.ring, make_encoder, self.volume)
             source = protocol.add_source(config, self.pump, delay_reporting)
             source.on("delay_report", lambda d: log.info("headset delay %.1f ms", d / 10))
             stream = await protocol.create_stream(source, sink)
@@ -511,6 +599,11 @@ class SonatinaHost:
                     log.info("connect failed (%s), retry in %.0f s", type(error).__name__, backoff)
                     backoff = min(backoff * 1.5, 20.0)
             await asyncio.sleep(backoff if self.connection is None else 2.0)
+
+    async def follow_volume(self) -> None:
+        while True:
+            self.volume.poll()
+            await asyncio.sleep(0.1)
 
     async def print_stats(self) -> None:
         while True:
@@ -558,7 +651,8 @@ async def amain(settings: Settings) -> None:
               f"codec={settings.codec}" + (f"/{settings.ldac_quality}" if settings.codec == "ldac" else ""),
               flush=True)
         source.start()
-        tasks = [asyncio.create_task(host.keep_connected())]
+        tasks = [asyncio.create_task(host.keep_connected()),
+                 asyncio.create_task(host.follow_volume())]
         if settings.stats:
             tasks.append(asyncio.create_task(host.print_stats()))
         try:
@@ -577,6 +671,8 @@ def main() -> None:
     parser.add_argument("--ldac-quality", choices=["hq", "sq", "mq"], default=Settings.ldac_quality)
     parser.add_argument("--sbc-bitpool", type=int, default=Settings.sbc_max_bitpool)
     parser.add_argument("--capture", default=Settings.capture, help="capture device name (substring)")
+    parser.add_argument("--volume-endpoint", default=Settings.volume_endpoint,
+                        help="playback endpoint whose Windows volume is followed (substring)")
     parser.add_argument("--tone", action="store_true", help="1 kHz test tone instead of VB-CABLE")
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -594,7 +690,7 @@ def main() -> None:
 
     settings = Settings(transport=args.transport, address=args.address, codec=args.codec,
                         ldac_quality=args.ldac_quality, sbc_max_bitpool=args.sbc_bitpool,
-                        capture=args.capture, tone=args.tone)
+                        capture=args.capture, volume_endpoint=args.volume_endpoint, tone=args.tone)
     try:
         asyncio.run(amain(settings))
     except KeyboardInterrupt:

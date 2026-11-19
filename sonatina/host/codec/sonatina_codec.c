@@ -10,7 +10,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 1; }
+SONT_API int sont_codec_version(void) { return 2; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -93,4 +93,29 @@ SONT_API int sont_sbc_encode(void *h, const int16_t *pcm, unsigned samples_per_c
         return -1;
     }
     return (int)w;
+}
+
+/* ------------------------------------------------------------------ volume */
+
+/* Software volume for interleaved int16 PCM, gain in Q16 (65536 = 0 dB), ramped
+ * linearly from g0 to g1 over the block to avoid zipper noise. Saturating. */
+SONT_API void sont_pcm_gain(int16_t *pcm, unsigned frames, unsigned channels,
+                            int g0_q16, int g1_q16)
+{
+    unsigned i, c;
+    if (pcm == NULL || frames == 0 || channels == 0) {
+        return;
+    }
+    for (i = 0; i < frames; i++) {
+        int64_t g = (int64_t)g0_q16 + ((int64_t)(g1_q16 - g0_q16) * (int64_t)i) / (int64_t)frames;
+        for (c = 0; c < channels; c++) {
+            int64_t v = ((int64_t)pcm[i * channels + c] * g) >> 16;
+            if (v > 32767) {
+                v = 32767;
+            } else if (v < -32768) {
+                v = -32768;
+            }
+            pcm[i * channels + c] = (int16_t)v;
+        }
+    }
 }
