@@ -79,6 +79,10 @@ LDAC_VENDOR_ID = 0x0000012D           # Sony
 LDAC_CODEC_ID = 0x00AA
 LDAC_EQMID = {"hq": 0, "sq": 1, "mq": 2}
 LDAC_KBPS = {0: 990, 1: 660, 2: 330}
+LDAC_DELAY_MS = 15                    # estimate: libldac look-ahead + 2-3 frames per packet
+NORMAL_TARGET_MS = 20                 # jitter buffer: safety margin kept at the worst moment
+LOW_LATENCY_TARGET_MS = 8
+LOW_LATENCY_PACKET_MS = 8             # SBC / aptX packets at most this long in low latency
 RTP_HEADER = 12
 APTX_VENDOR_ID = 0x0000004F           # APT Ltd. (Qualcomm)
 APTX_CODEC_ID = 0x0001
@@ -97,6 +101,13 @@ CODEC_NAMES = {"ldac": "LDAC", "aptx_hd": "aptX HD", "aptx": "aptX", "aac": "AAC
 AAC_FRAME = 1024                      # samples per AAC access unit (one RTP packet)
 AAC_LATM_OVERHEAD = 16                # StreamMuxConfig + PayloadLengthInfo, rounded up
 SSRC = 0x534F4E54                     # "SONT"
+
+
+def pushes_for(max_packet_ms: int) -> int:
+    """How many 128-sample pushes fit in max_packet_ms (0 = no limit)."""
+    if max_packet_ms <= 0:
+        return 1 << 30
+    return max(1, max_packet_ms * RATE // 1000 // PUSH_SAMPLES)
 
 
 # ----------------------------------------------------------------------------- codec dll
@@ -162,6 +173,7 @@ class LdacEncoder:
         self.eqmid = eqmid
         self.max_payload = mtu - RTP_HEADER
         self.kbps = LDAC_KBPS[eqmid]
+        self.delay_ms = LDAC_DELAY_MS
 
     def push(self, pcm: bytes) -> list[tuple[bytes, int]]:
         frames = self.lib.sont_ldac_encode(self.handle, pcm, self.out, 1024, ctypes.byref(self.written))
@@ -185,14 +197,16 @@ class SbcEncoder:
 
     name = "SBC"
 
-    def __init__(self, lib: CodecLib, bitpool: int, mtu: int) -> None:
+    def __init__(self, lib: CodecLib, bitpool: int, mtu: int, max_packet_ms: int = 0) -> None:
         self.lib = lib.lib
         self.bitpool = bitpool
         self.handle = self.lib.sont_sbc_create(RATE, 3, 16, 8, 1, bitpool)
         if not self.handle:
             raise RuntimeError("SBC encoder init failed")
         self.frame_bytes = self.lib.sont_sbc_frame_bytes(RATE, 3, 16, 8, 1, bitpool)
-        self.per_packet = max(1, min(15, (mtu - RTP_HEADER - 1) // self.frame_bytes))
+        self.per_packet = max(1, min(15, (mtu - RTP_HEADER - 1) // self.frame_bytes,
+                                     pushes_for(max_packet_ms)))
+        self.delay_ms = self.per_packet * PUSH_SAMPLES * 1000 // RATE
         self.out = ctypes.create_string_buffer(512)
         self.pending: list[bytes] = []
         self.kbps = self.frame_bytes * 8 * RATE // 128 // 1000
@@ -237,6 +251,7 @@ class AacEncoder:
         self.bitrate = self.lib.sont_aac_get(self.handle, 0)
         self.peak = self.lib.sont_aac_get(self.handle, 1)
         self.kbps = self.bitrate // 1000
+        self.delay_ms = (self.lib.sont_aac_get(self.handle, 2) + AAC_FRAME) * 1000 // RATE
         self.pcm = bytearray()
         self.out = ctypes.create_string_buffer(8192)
         self.oversize = 0
@@ -275,7 +290,7 @@ class AptxEncoder:
     A2DP framing as in Android and PipeWire: aptX packets carry no RTP header, aptX HD
     packets do. Pushes of 128 samples are packed up to the MTU."""
 
-    def __init__(self, lib: CodecLib, hd: bool, mtu: int) -> None:
+    def __init__(self, lib: CodecLib, hd: bool, mtu: int, max_packet_ms: int = 0) -> None:
         if not lib.has_aptx:
             raise RuntimeError("sonatina_codec.dll is too old for aptX: update it")
         self.lib = lib.lib
@@ -286,7 +301,8 @@ class AptxEncoder:
             raise RuntimeError("aptX encoder init failed")
         self.push_bytes = PUSH_SAMPLES * (6 if hd else 4) // 4
         room = mtu - (RTP_HEADER if hd else 0)
-        self.per_packet = max(1, room // self.push_bytes)
+        self.per_packet = max(1, min(room // self.push_bytes, pushes_for(max_packet_ms)))
+        self.delay_ms = self.per_packet * PUSH_SAMPLES * 1000 // RATE + 2   # + 90-sample codec delay
         self.kbps = self.push_bytes * 8 * RATE // PUSH_SAMPLES // 1000
         self.out = ctypes.create_string_buffer(1024)
         self.pending: list[bytes] = []
@@ -321,6 +337,17 @@ class PcmRing:
         self.playing = False
         self.underruns = 0
         self.dropped = 0
+        self.min_level = None          # lowest fill after a read since take_min(), bytes
+
+    def set_prefill(self, ms: int) -> None:
+        with self.lock:
+            self.prefill = RATE * ms // 1000 * FRAME_BYTES
+
+    def take_min_ms(self) -> float | None:
+        """Lowest fill seen by the reader since the last call (the safety margin left)."""
+        with self.lock:
+            low, self.min_level = self.min_level, None
+        return None if low is None else low * 1000 / (RATE * FRAME_BYTES)
 
     def write(self, data: bytes) -> None:
         with self.lock:
@@ -343,6 +370,8 @@ class PcmRing:
                 return bytes(nbytes)
             out = bytes(self.buf[:nbytes])
             del self.buf[:nbytes]
+            if self.min_level is None or len(self.buf) < self.min_level:
+                self.min_level = len(self.buf)
             return out
 
     def reset(self) -> None:
@@ -359,16 +388,17 @@ class PcmRing:
 
 # ----------------------------------------------------------------------------- capture
 class ToneSource:
-    def __init__(self, ring: PcmRing, freq: float = 1000.0) -> None:
+    def __init__(self, ring: PcmRing, freq: float = 1000.0, speed: float = 1.0) -> None:
         self.ring = ring
         self.freq = freq
+        self.speed = speed          # != 1: simulates a capture clock that drifts (tests)
         self.task: asyncio.Task | None = None
 
     async def run(self) -> None:
         n = 0
         t0 = time.perf_counter()
         while True:
-            due = int((time.perf_counter() - t0) * RATE)
+            due = int((time.perf_counter() - t0) * RATE * self.speed)
             chunk = []
             while n < due:
                 v = int(6000 * math.sin(2 * math.pi * self.freq * n / RATE))
@@ -612,12 +642,24 @@ def not_silent(pcm: bytes) -> bool:
 class MediaPump:
     """Paces encoding on the monotonic clock (like the kernel driver's media clock),
     builds RTP packets with timestamps in samples and writes them to the channel.
-    Duck-typed for bumble.avdtp.LocalSource (start/stop)."""
+    Duck-typed for bumble.avdtp.LocalSource (start/stop).
+
+    Clock servo: the capture side (VB-CABLE, Windows audio clock) and our clock never run
+    at exactly the same rate, so the jitter buffer would slowly fill up (more latency) or
+    run dry (gaps). Once a second the lowest buffer level is compared with the target and
+    our media clock is sped up or slowed down by a few hundred ppm at most, inaudible and
+    well inside what headsets accept. The target is the safety margin left at the worst
+    moment; after an underrun it grows by 5 ms (Windows was late), up to 60 ms."""
 
     LEAD_S = 0.020
     MAX_BACKLOG_S = 0.200
+    GAIN = 0.0001          # rate change per ms of level error (10 ms -> 0.1 %)
+    GAIN_I = 0.000003      # per ms of error, per second (critically damped with GAIN)
+    MAX_RATE = 0.002       # +-0.2 %
+    MAX_TARGET_MS = 60
 
-    def __init__(self, ring: PcmRing, make_encoder, volume: EndpointVolume | None = None) -> None:
+    def __init__(self, ring: PcmRing, make_encoder, volume: EndpointVolume | None = None,
+                 target_ms: int = 20) -> None:
         self.ring = ring
         self.volume = volume
         self.make_encoder = make_encoder
@@ -629,9 +671,15 @@ class MediaPump:
         self.skips = 0
         self.max_late_ms = 0.0
         self.last_audio = 0.0     # monotonic time of the last non-silent block (AVRCP status)
+        self.target_ms = target_ms
+        self.rate = 1.0           # media clock speed vs. perf_counter
+        self.drift = 0.0          # learned clock offset (integral term)
+        self.margin_ms: float | None = None
+        self.capture_ms = 10      # capture block (CableCapture)
 
     async def start(self, rtp_channel) -> None:
         await self.stop()
+        self.ring.set_prefill(self.target_ms + self.capture_ms)
         self.ring.reset()
         self.encoder = self.make_encoder()
         self.task = asyncio.get_running_loop().create_task(self._run(rtp_channel))
@@ -649,14 +697,43 @@ class MediaPump:
             self.encoder.close()
             self.encoder = None
 
+    def latency_ms(self) -> int:
+        """Our part of the delay: capture block + jitter buffer + codec/packet."""
+        level = self.ring.level_ms()
+        return self.capture_ms + level + (self.encoder.delay_ms if self.encoder else 0)
+
+    def _servo(self) -> None:
+        low = self.ring.take_min_ms()
+        if low is None:
+            return
+        self.margin_ms = low
+        error = low - self.target_ms
+        # PI: the proportional part reacts, the integral learns the steady clock offset
+        self.drift = max(-self.MAX_RATE, min(self.MAX_RATE, self.drift + error * self.GAIN_I))
+        self.rate = 1.0 + max(-self.MAX_RATE, min(self.MAX_RATE, self.drift + error * self.GAIN))
+
+    def _on_underrun(self) -> None:
+        if self.target_ms < self.MAX_TARGET_MS:
+            self.target_ms = min(self.MAX_TARGET_MS, self.target_ms + 5)
+            self.ring.set_prefill(self.target_ms + self.capture_ms)
+            log.info("audio arrived late: jitter buffer raised to %d ms", self.target_ms)
+
     async def _run(self, channel) -> None:
         pcm_bytes = PUSH_SAMPLES * FRAME_BYTES
         rtp = getattr(self.encoder, "rtp", True)   # aptX (classic) packets have no RTP header
-        t0 = time.perf_counter()
+        last = time.perf_counter()
+        media = 0.0                 # media time in seconds (runs at self.rate)
+        next_servo = last + 1.0
+        underruns = self.ring.underruns
         done = 0
         while True:
             now = time.perf_counter()
-            target = int((now - t0 + self.LEAD_S) * RATE)
+            media += (now - last) * self.rate
+            last = now
+            if now >= next_servo:
+                next_servo = now + 1.0
+                self._servo()
+            target = int((media + self.LEAD_S) * RATE)
             backlog = target - done
             if backlog > self.MAX_BACKLOG_S * RATE:
                 skip = backlog - int(self.LEAD_S * RATE)
@@ -667,6 +744,9 @@ class MediaPump:
                 self.max_late_ms = late_ms
             while target - done >= PUSH_SAMPLES:
                 pcm = self.ring.read(pcm_bytes)
+                if self.ring.underruns != underruns:
+                    underruns = self.ring.underruns
+                    self._on_underrun()
                 if not_silent(pcm):
                     self.last_audio = now
                 if self.volume is not None:
@@ -683,8 +763,9 @@ class MediaPump:
                     self.timestamp += samples
                     self.packets += 1
                 done += PUSH_SAMPLES
-            next_due = t0 + (done + PUSH_SAMPLES) / RATE - self.LEAD_S
-            await asyncio.sleep(max(0.0005, next_due - time.perf_counter()))
+            next_media = (done + PUSH_SAMPLES) / RATE - self.LEAD_S
+            wait = (next_media - media) / self.rate
+            await asyncio.sleep(max(0.0005, wait))
 
 
 # ----------------------------------------------------------------------------- A2DP session
@@ -772,13 +853,14 @@ class Settings:
     allow_unknown: bool = False   # accept connections from headsets we never paired
     audio_configured: bool = False  # VB-CABLE already made the default output once
     absolute_volume: bool = True  # AVRCP: volume on the headset when it supports it
+    low_latency: bool = False     # smaller jitter buffer and packets (games, video)
     media_keys: bool = True       # AVRCP: headset buttons -> Windows media keys
     headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "aac_bitrate",
                 "capture",
-                "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys")
+                "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys", "low_latency")
 
 
 def load_settings(path: str) -> Settings:
@@ -830,6 +912,7 @@ class SonatinaHost:
         self.pairing_done.set()
         self.discovering = False
         self.discovered: dict[str, str] = {}  # address -> name
+        self.headset_delay_ms: float | None = None
         self.on_change = None                 # called after settings changed (save)
         self.ready = False                    # True once powered on and keys loaded
 
@@ -906,6 +989,17 @@ class SonatinaHost:
         self.remote.start(connection)
         self.session_task = loop.create_task(self._session(connection, peer))
 
+    def _on_delay_report(self, delay: int) -> None:
+        """AVDTP delay report, in 1/10 ms: the headset's own buffer + decoding."""
+        self.headset_delay_ms = delay / 10
+        log.info("headset delay %.1f ms", self.headset_delay_ms)
+
+    def latency_ms(self) -> int | None:
+        """Estimated delay from Windows to the ears (None while not streaming)."""
+        if self.state != "streaming" or self.pump is None or self.pump.encoder is None:
+            return None
+        return self.pump.latency_ms() + int(self.headset_delay_ms or 0)
+
     def _on_disconnection(self, reason) -> None:
         log.info("disconnected (reason 0x%02X)", reason)
         self.connection = None
@@ -962,9 +1056,10 @@ class SonatinaHost:
             sink, config, make_encoder = choice
             delay_reporting = any(
                 c.service_category == AVDTP_DELAY_REPORTING_SERVICE_CATEGORY for c in sink.capabilities)
-            self.pump = MediaPump(self.ring, make_encoder, self.volume)
+            self.pump = MediaPump(self.ring, make_encoder, self.volume, self.jitter_target_ms())
+            self.headset_delay_ms = None
             source = protocol.add_source(config, self.pump, delay_reporting)
-            source.on("delay_report", lambda d: log.info("headset delay %.1f ms", d / 10))
+            source.on("delay_report", self._on_delay_report)
             stream = await protocol.create_stream(source, sink)
             await stream.open()
             if stream.rtp_channel is not None:
@@ -1010,7 +1105,8 @@ class SonatinaHost:
             if value and (value[0] & 0x12) != 0x12:   # 48 kHz + stereo
                 log.info("%s sink without 48 kHz stereo (0x%02X)", CODEC_NAMES[codec], value[0])
                 return None
-            return sink, aptx_config(hd), lambda: AptxEncoder(self.lib, hd, mtu())
+            cap = self.max_packet_ms()
+            return sink, aptx_config(hd), lambda: AptxEncoder(self.lib, hd, mtu(), cap)
         if codec == "aac":
             sink = protocol.find_remote_sink_by_codec(AVDTP_AUDIO_MEDIA_TYPE,
                                                       A2DP_MPEG_2_4_AAC_CODEC_TYPE)
@@ -1026,7 +1122,15 @@ class SonatinaHost:
         info = self._codec_info(sink)
         remote_max = info.maximum_bitpool_value if isinstance(info, SbcMediaCodecInformation) else 53
         bitpool = max(2, min(self.s.sbc_max_bitpool, remote_max))
-        return sink, sbc_config(bitpool), lambda: SbcEncoder(self.lib, bitpool, mtu())
+        cap = self.max_packet_ms()
+        return sink, sbc_config(bitpool), lambda: SbcEncoder(self.lib, bitpool, mtu(), cap)
+
+    def max_packet_ms(self) -> int:
+        """Audio waits until its packet is full: smaller packets in low-latency mode."""
+        return LOW_LATENCY_PACKET_MS if self.s.low_latency else 0
+
+    def jitter_target_ms(self) -> int:
+        return LOW_LATENCY_TARGET_MS if self.s.low_latency else NORMAL_TARGET_MS
 
     @staticmethod
     def _sink_names(protocol) -> list[str]:
@@ -1161,10 +1265,10 @@ class SonatinaHost:
             await self.connection.disconnect()   # renegotiates with the new codec
 
     async def set_option(self, name: str, value: bool) -> None:
-        """absolute_volume needs a reconnection to take effect, media_keys does not."""
+        """absolute_volume and low_latency need a reconnection to take effect, media_keys not."""
         setattr(self.s, name, value)
         self._changed()
-        if name == "absolute_volume" and self.connection is not None:
+        if name in ("absolute_volume", "low_latency") and self.connection is not None:
             await self.connection.disconnect()
 
     async def forget(self, address: str) -> None:
@@ -1198,7 +1302,10 @@ class SonatinaHost:
         p = self.pump
         return (f"[{self.state}] ring={self.ring.level_ms()} ms underruns={self.ring.underruns} "
                 f"dropped={self.ring.dropped // FRAME_BYTES} smp"
-                + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms" if p else ""))
+                + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms"
+                   f" margin={p.margin_ms if p.margin_ms is None else round(p.margin_ms, 1)} ms"
+                   f" target={p.target_ms} ms rate={(p.rate - 1) * 1e6:+.0f} ppm"
+                   f" latency={self.latency_ms()} ms" if p else ""))
 
     def summary(self) -> str:
         """One line for the tray tooltip."""
@@ -1208,6 +1315,9 @@ class SonatinaHost:
                 tr(" · muto", " · muted") if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
             if self.remote.absolute and vol:
                 vol += tr(" (cuffie)", " (headset)")
+            latency = self.latency_ms()
+            if latency is not None and self.headset_delay_ms is not None:
+                vol += tr(" · ritardo ~", " · delay ~") + f"{latency} ms"
             return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
         if self.discovering:
             return tr("Sonatina: ricerca cuffie...", "Sonatina: looking for headphones...")

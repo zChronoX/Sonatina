@@ -37,6 +37,7 @@ jobs:
           python pair_virtual.py
           python switch_virtual.py
           python avrcp_virtual.py
+          python latency_virtual.py
 
   installer:
     needs: tests

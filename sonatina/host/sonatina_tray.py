@@ -264,7 +264,7 @@ class TrayApp:
         return action
 
     def _option_checked(self, name: str):
-        return lambda _item: self.host is not None and bool(getattr(self.host.s, name, True))
+        return lambda _item: self.host is not None and bool(getattr(self.host.s, name, False))
 
     def open_log(self, *_args) -> None:
         if sys.platform == "win32":
@@ -292,6 +292,9 @@ class TrayApp:
             pystray.MenuItem(tr("Volume regolato dalle cuffie", "Volume handled by the headphones"),
                              self._option_action("absolute_volume"),
                              checked=self._option_checked("absolute_volume")),
+            pystray.MenuItem(tr("Bassa latenza (giochi, video)", "Low latency (games, video)"),
+                             self._option_action("low_latency"),
+                             checked=self._option_checked("low_latency")),
             pystray.MenuItem(tr("Tasti delle cuffie (play/pausa, brani)",
                                 "Headphone buttons (play/pause, tracks)"),
                              self._option_action("media_keys"),

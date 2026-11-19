@@ -610,6 +610,21 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Tray: "Volume handled by the headphones" and "Headphone buttons" switches
   (settings `absolute_volume`, `media_keys`). Test: `tests/avrcp_virtual.py`.
 
+### U2b. Latency and A/V sync `[~]` (code + virtual test done, hardware test pending)
+- Delay chain: app -> VB-CABLE -> WASAPI capture (10 ms blocks) -> jitter buffer -> codec /
+  packet -> radio -> headset buffer (AVDTP delay report: Air5 240 ms, 70 ms in its game mode).
+  The headset buffer dominates; our part was about 60-90 ms.
+- Clock servo in MediaPump: once a second the lowest jitter-buffer level is compared with a
+  target and the media clock is trimmed (PI, at most +-0.2 %), so VB-CABLE/Windows clock
+  drift never fills the buffer (latency creep) nor empties it (gaps). After an underrun the
+  target grows by 5 ms (max 60). Targets: 20 ms normal, 8 ms in "Low latency".
+- Low latency (tray): target 8 ms and SBC/aptX packets of at most 8 ms (audio waits until its
+  packet is full). Best codecs for it: aptX or SBC (AAC adds ~55 ms of encoder delay).
+- Estimated delay (ours + headset report) in the tray tooltip and in the stats log line.
+- Limit: Windows apps cannot compensate automatically (VB-CABLE reports its own small
+  latency; only a kernel audio driver could report the real one). Players with an audio
+  offset (VLC, mpv, MPC-HC) can use the tooltip value. Test: `tests/latency_virtual.py`.
+
 ### U3. Microphone (HFP) `[ ]` — harder, later
 - HFP Audio Gateway over RFCOMM (Bumble has HFP) + SCO/eSCO audio (CVSD or
   mSBC). Over USB, SCO uses the ISOCHRONOUS endpoints: needs WinUSB isoch

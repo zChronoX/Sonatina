@@ -54,6 +54,7 @@ Right-click menu:
 | Headphones | switch between paired headphones, search and pair new ones, forget the current ones |
 | Audio quality | LDAC 990 / 660 / 330 kbit/s, aptX HD, aptX, AAC or SBC, remembered per headphones |
 | Volume handled by the headphones | the Windows volume moves the headphones' own volume and their volume buttons move the Windows slider (AVRCP absolute volume, when supported) |
+| Low latency (games, video) | smaller buffers and packets; the tooltip shows the estimated delay to your ears |
 | Headphone buttons | play/pause, next and previous control the current player (Spotify, browsers, Media Player...) |
 | Restart connection | reconnects the headphones |
 | Open log | `%LOCALAPPDATA%\Sonatina\sonatina.log` |
@@ -74,6 +75,9 @@ no longer need it, and pick your normal output in the sound settings.
 - **Red icon**: the adapter is unplugged or another program owns it. Re-plug it, then *Restart
   connection*. The installer log is `C:\Program Files\Sonatina\install.log`.
 - **Headphones do not connect**: switch them off and on; if needed *Forget* them and pair again.
+- **Video ahead of the sound**: Bluetooth headphones add their own buffer (often 150-250 ms;
+  many have a game mode that cuts it). Turn on *Low latency*, prefer aptX or SBC, and if your
+  player has an audio delay setting (VLC, mpv) use the delay shown in the tooltip.
 - **Choppy sound at LDAC 990**: choose LDAC 660 or 330 (weak radio link) in *Audio quality*.
 - Attach `sonatina.log` when reporting a problem.
 
