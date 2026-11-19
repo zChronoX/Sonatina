@@ -2,3 +2,4 @@
 *.aac
 *.bin
 .venv/
+*.log

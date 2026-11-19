@@ -1,0 +1,2 @@
+bumble>=0.0.236
+sounddevice>=0.4.6

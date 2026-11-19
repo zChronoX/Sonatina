@@ -548,9 +548,12 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
   - authenticate BEFORE encrypt on reconnect (encrypt alone hangs);
   - CMF caps to our stack: SBC bitpool 2..39 (Windows got 2..27), AAC-LC
     44.1/48 kHz VBR <= 262144 bit/s, LDAC 44.1/48/96 kHz; media MTU 679;
-  - AAC: one frame per RTP packet must fit the MTU. ffmpeg 256k frames
-    exceed 679 bytes half of the time (choppy, pops). Encoder needs a peak
-    bitrate / max frame size cap (FDK-AAC `AACENC_PEAK_BITRATE`, as Android);
+  - AAC via `bumble-player`: choppy with pops at 256k AND at 128k (all
+    frames < MTU), so not only frame size. The demo player writes RTP
+    timestamps in milliseconds (must be samples) and paces packets with
+    asyncio sleeps (~15.6 ms granularity on Windows). U1 rules: media pump
+    in a dedicated thread with a high-resolution timer, RTP timestamps in
+    samples, AAC frames capped to the MTU (FDK-AAC `AACENC_PEAK_BITRATE`);
   - the headset reconnects to us by itself (incoming connection, we are
     PERIPHERAL): accept incoming as well as paging.
 - Bumble (Google, Apache-2.0, Python) as the host stack, WinUSB via Zadig.
@@ -560,7 +563,13 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Done when: the dongle answers HCI reset/version, pairs with the CMF, and an
   SBC tone plays from a Bumble A2DP source script.
 
-### U1. SonatinaHost (headless) `[ ]`
+### U1. SonatinaHost (headless) `[~]`
+- 2026-11-19 first hardware run OK: `sonatina/host/sonatina_host.py` + `codec/sonatina_codec.dll`
+  (mingw-w64), VB-CABLE capture (WASAPI) -> LDAC SQ 660 kbit/s -> CMF, exactly 125 packets/s,
+  0 underruns, pump never late, audio "perfect". Works both when the headset connects to us and
+  when we page it. Still to do: autostart + tray, accept AVDTP (PSM 25) / AVRCP (PSM 23) from the
+  headset (now refused: "No server for PSM 25/23"), long-run drift handling (capture clock vs
+  monotonic clock: today bounded by drop/underrun).
 - Reuse: AVDTP session logic, SBC/LDAC encoders, RTP, ABR, jitter buffer
   (portable C, already host-compiled) as `sonatina_core.dll`; Python or C#
   host for Bumble + WASAPI capture of VB-CABLE.
