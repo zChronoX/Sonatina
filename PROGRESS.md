@@ -157,6 +157,14 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
   il pacchetto VM include ora `symbols\SonatinaAudio.pdb`.
 - Controllo statico: nessun'altra funzione PAGE acquisisce spin lock.
 
+- Test con dongle Ugreen (BT 6.0) nella VM 4 core / 6 GB: streaming SBC 48 kHz, 0 errori, ma
+  `underruns=19` in ~22 s (pop udibili), tx max 138 ms (stall della VM) e bitpool negoziato 27
+  (con il dongle precedente era 39; ABR 0 step, quindi e' il valore offerto dalle cuffie).
+  Interventi: jitter buffer adattivo (`SontPcmPullEnableAdaptive`: prefill 30 ms, +10 ms a ogni
+  underrun fino a 70 ms, -10 ms dopo 20 s puliti) e log DebugView dei parametri SBC negoziati.
+- `install-driver.ps1`: `pnputil /add-driver` con exit code 259 (pacchetto gia' presente) o 3010
+  non e' piu' trattato come errore.
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
 - Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.

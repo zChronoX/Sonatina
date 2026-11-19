@@ -82,6 +82,14 @@ typedef struct _SONT_PCM_PULL {
     uint32_t max_frames;       /* backlog above this is dropped to bound latency */
     uint32_t underruns;
     uint64_t dropped_frames;
+    /* Adaptive prefill (SontPcmPullEnableAdaptive): grows after an underrun, shrinks
+     * back to the base level after a long clean run. grow_step_frames == 0: fixed. */
+    uint32_t base_prefill_frames;
+    uint32_t ceil_prefill_frames;
+    uint32_t grow_step_frames;
+    uint64_t decay_out_frames; /* clean output frames needed before one shrink step */
+    uint64_t clean_out_frames;
+    uint32_t prefill_grows;
 } SONT_PCM_PULL;
 
 void SontResamplerInit(SONT_RESAMPLER *rs, uint32_t in_rate, unsigned in_channels,
@@ -94,6 +102,11 @@ size_t SontResamplerPull(SONT_RESAMPLER *rs, SONT_PCM_RING *ring,
 void SontPcmPullInit(SONT_PCM_PULL *pull, uint32_t in_rate, unsigned in_channels,
                      uint32_t out_rate, unsigned out_channels,
                      uint32_t prefill_ms, uint32_t max_ms);
+/* Jitter buffer that adapts to a jittery host (VM, loaded PC): every underrun raises the
+ * prefill by `step_ms` up to `ceil_ms` (never above max_ms / 2); after `decay_ms` of
+ * playback without underruns it falls back one step at a time to the initial level. */
+void SontPcmPullEnableAdaptive(SONT_PCM_PULL *pull, uint32_t ceil_ms, uint32_t step_ms,
+                               uint32_t decay_ms);
 /* Always writes `out_frames` frames (silence where no audio is available) and
  * returns how many of them carry real audio. */
 size_t SontPcmPull(SONT_PCM_PULL *pull, SONT_PCM_RING *ring,

@@ -475,6 +475,40 @@ static void RunUnitAssertions(void)
         assert(pull.dropped_frames > 0);
         assert(SontPcmRingAvailable(&ring) / 4 <= 960);
 
+        /* Adaptive prefill: grows after each underrun up to the ceiling, shrinks after a clean run */
+        SontPcmRingReset(&ring);
+        SontPcmPullInit(&pull, 48000, 2, 48000, 2, 20, 100);      /* base 960 frames, max 4800 */
+        SontPcmPullEnableAdaptive(&pull, 40, 10, 40);             /* ceiling 1920, step 480, decay 1920 out frames */
+        assert(pull.prefill_frames == 960 && pull.ceil_prefill_frames == 1920);
+        for (i = 0; i < 4800; i++) { in[2 * i] = 500; in[2 * i + 1] = 500; }
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 1000 * 4);
+        assert(SontPcmPull(&pull, &ring, out, 512) == 512 && pull.playing);
+        assert(SontPcmPull(&pull, &ring, out, 512) <  512 && !pull.playing);   /* underrun #1 */
+        assert(pull.underruns == 1 && pull.prefill_frames == 1440 && pull.prefill_grows == 1);
+        SontPcmRingReset(&ring);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 1500 * 4);
+        (void)SontPcmPull(&pull, &ring, out, 512); (void)SontPcmPull(&pull, &ring, out, 512);
+        (void)SontPcmPull(&pull, &ring, out, 512); (void)SontPcmPull(&pull, &ring, out, 512);
+        assert(pull.underruns == 2 && pull.prefill_frames == 1920);            /* capped at the ceiling */
+        SontPcmRingReset(&ring);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 1920 * 4);
+        (void)SontPcmPull(&pull, &ring, out, 512); (void)SontPcmPull(&pull, &ring, out, 512);
+        (void)SontPcmPull(&pull, &ring, out, 512); (void)SontPcmPull(&pull, &ring, out, 512);
+        assert(pull.underruns == 3 && pull.prefill_frames == 1920 && pull.prefill_grows == 2);
+        /* Clean run: one shrink step per `decay` of uninterrupted playback */
+        SontPcmRingReset(&ring);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 4800 * 4);
+        for (i = 0; i < 4; i++) (void)SontPcmPull(&pull, &ring, out, 512);     /* 2048 >= 1920 out frames */
+        assert(pull.prefill_frames == 1440 && pull.underruns == 3);
+        for (i = 0; i < 4; i++) (void)SontPcmPull(&pull, &ring, out, 512);
+        assert(pull.prefill_frames == 960 && pull.underruns == 3);             /* back to the base level */
+        /* Without EnableAdaptive the buffer stays fixed (previous behaviour) */
+        SontPcmRingReset(&ring);
+        SontPcmPullInit(&pull, 48000, 2, 48000, 2, 20, 100);
+        SontPcmRingWrite(&ring, (const uint8_t *)in, 1000 * 4);
+        (void)SontPcmPull(&pull, &ring, out, 512); (void)SontPcmPull(&pull, &ring, out, 512);
+        assert(pull.underruns == 1 && pull.prefill_frames == 960);
+
         /* Stereo -> mono downmix at equal rate */
         SontPcmRingReset(&ring);
         SontPcmPullInit(&pull, 48000, 2, 48000, 1, 0, 100);

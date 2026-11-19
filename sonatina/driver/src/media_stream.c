@@ -224,6 +224,29 @@ void SontPcmPullInit(SONT_PCM_PULL *pull, uint32_t in_rate, unsigned in_channels
     if (pull->max_frames < pull->prefill_frames * 2u) {
         pull->max_frames = pull->prefill_frames * 2u;
     }
+    pull->base_prefill_frames = pull->prefill_frames;
+    pull->ceil_prefill_frames = pull->prefill_frames;
+}
+
+void SontPcmPullEnableAdaptive(SONT_PCM_PULL *pull, uint32_t ceil_ms, uint32_t step_ms,
+                               uint32_t decay_ms)
+{
+    uint32_t ceil_frames;
+
+    if (pull == NULL || pull->rs.in_rate == 0u) {
+        return;
+    }
+    ceil_frames = (uint32_t)(((uint64_t)pull->rs.in_rate * ceil_ms) / 1000u);
+    if (ceil_frames > pull->max_frames / 2u) {
+        ceil_frames = pull->max_frames / 2u;     /* keep room for the jitter itself */
+    }
+    if (ceil_frames < pull->base_prefill_frames) {
+        ceil_frames = pull->base_prefill_frames;
+    }
+    pull->ceil_prefill_frames = ceil_frames;
+    pull->grow_step_frames = (uint32_t)(((uint64_t)pull->rs.in_rate * step_ms) / 1000u);
+    pull->decay_out_frames = ((uint64_t)pull->rs.out_rate * decay_ms) / 1000u;
+    pull->clean_out_frames = 0u;
 }
 
 size_t SontPcmPull(SONT_PCM_PULL *pull, SONT_PCM_RING *ring,
@@ -255,6 +278,21 @@ size_t SontPcmPull(SONT_PCM_PULL *pull, SONT_PCM_RING *ring,
         if (got < out_frames) {
             pull->playing = false;
             pull->underruns++;
+            pull->clean_out_frames = 0u;
+            if (pull->grow_step_frames != 0u && pull->prefill_frames < pull->ceil_prefill_frames) {
+                uint32_t next = pull->prefill_frames + pull->grow_step_frames;
+                pull->prefill_frames = (next > pull->ceil_prefill_frames) ? pull->ceil_prefill_frames
+                                                                          : next;
+                pull->prefill_grows++;
+            }
+        } else if (pull->grow_step_frames != 0u && pull->prefill_frames > pull->base_prefill_frames) {
+            pull->clean_out_frames += out_frames;
+            if (pull->clean_out_frames >= pull->decay_out_frames) {
+                pull->clean_out_frames = 0u;
+                pull->prefill_frames = (pull->prefill_frames > pull->base_prefill_frames + pull->grow_step_frames)
+                                           ? pull->prefill_frames - pull->grow_step_frames
+                                           : pull->base_prefill_frames;
+            }
         }
     }
     if (got < out_frames) {

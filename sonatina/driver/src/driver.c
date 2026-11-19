@@ -47,6 +47,9 @@
 #define SONT_MEDIA_LEAD_US           20000u  /* send-ahead */
 #define SONT_MEDIA_PREFILL_MS        30u     /* jitter buffer on the WaveRT tap */
 #define SONT_MEDIA_MAX_BUFFER_MS     150u
+#define SONT_MEDIA_PREFILL_CEIL_MS   70u     /* adaptive: grows after underruns up to this (<= max/2) */
+#define SONT_MEDIA_PREFILL_STEP_MS   10u
+#define SONT_MEDIA_PREFILL_DECAY_MS  20000u  /* clean playback before one shrink step */
 #define SONT_MEDIA_MAX_BURST         24u
 #define SONT_MEDIA_MAX_WAIT_MS       10u
 #define SONT_MEDIA_MAX_TX_FAILURES   16u     /* consecutive failed completions = link gone */
@@ -788,6 +791,12 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
     DbgPrint("Sonatina: streaming %s %lu Hz, %lu ch, MTU %u\n",
              (e->Codec == SONT_AVDTP_CODEC_LDAC) ? "LDAC" : "SBC",
              e->Rate, e->Channels, (unsigned)mtu);
+    if (e->Codec == SONT_AVDTP_CODEC_SBC) {
+        DbgPrint("Sonatina: SBC negotiated mode=%u blocks=%u subbands=%u alloc=%u bitpool=%u..%u\n",
+                 (unsigned)cfg->sbc.channel_mode, (unsigned)cfg->sbc.blocks,
+                 (unsigned)cfg->sbc.subbands, (unsigned)cfg->sbc.allocation,
+                 (unsigned)cfg->sbc.min_bitpool, (unsigned)cfg->sbc.max_bitpool);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -806,6 +815,8 @@ static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
             SontPcmPullInit(&e->Pull, src->StreamSampleRate, src->StreamChannels,
                             e->Rate, e->Channels,
                             SONT_MEDIA_PREFILL_MS, SONT_MEDIA_MAX_BUFFER_MS);
+            SontPcmPullEnableAdaptive(&e->Pull, SONT_MEDIA_PREFILL_CEIL_MS,
+                                      SONT_MEDIA_PREFILL_STEP_MS, SONT_MEDIA_PREFILL_DECAY_MS);
             e->PullInRate = src->StreamSampleRate;
             e->PullInChannels = src->StreamChannels;
         }

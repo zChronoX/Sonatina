@@ -103,7 +103,9 @@ try {
     }
 
     $pnpOut = (& pnputil /add-driver $infPath /install 2>&1)
-    if ($LASTEXITCODE -ne 0) {
+    # 0 = ok, 3010 = reboot required, 259 (ERROR_NO_MORE_ITEMS) = package already in the
+    # driver store / no device needed updating: not a failure (-Force binds explicitly below).
+    if ($LASTEXITCODE -notin 0, 259, 3010) {
         throw ("pnputil /add-driver failed ({0}): {1}" -f $LASTEXITCODE, ($pnpOut -join "`n"))
     }
     $joined = $pnpOut -join "`n"
