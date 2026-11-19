@@ -119,6 +119,7 @@ class TrayApp:
         await sh.amain(self.settings, on_host=self._on_host, stats_to_log=True)
 
     def host_thread(self) -> None:
+        sh.com_init()   # pycaw (volume) runs on this thread
         while not self.quitting:
             try:
                 asyncio.run(self._run_once())

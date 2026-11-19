@@ -304,6 +304,19 @@ class CableCapture:
 
 
 # ----------------------------------------------------------------------------- volume
+def com_init() -> None:
+    """Initialises COM on the calling thread. pycaw needs it in every thread that
+    touches the audio endpoints; comtypes only does it for the thread that first
+    imports it, which in the frozen tray app is not the host thread."""
+    if sys.platform != "win32":
+        return
+    import comtypes
+    try:
+        comtypes.CoInitialize()
+    except OSError as error:    # RPC_E_CHANGED_MODE: already initialised as MTA, fine
+        log.debug("CoInitialize: %r", error)
+
+
 class EndpointVolume:
     """Follows the Windows volume and mute of the VB-CABLE playback endpoint.
 
@@ -334,6 +347,8 @@ class EndpointVolume:
         from ctypes import POINTER, cast
 
         from comtypes import CLSCTX_ALL
+
+        com_init()
         from pycaw.constants import DEVICE_STATE, EDataFlow
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
@@ -385,6 +400,7 @@ def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
     from pycaw.constants import DEVICE_STATE, EDataFlow, ERole
     from pycaw.pycaw import AudioUtilities
 
+    com_init()
     enumerator = AudioUtilities.GetDeviceEnumerator()
     endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
     for i in range(endpoints.GetCount()):
