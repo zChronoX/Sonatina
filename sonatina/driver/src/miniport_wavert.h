@@ -78,6 +78,7 @@ private:
     ULONGLONG m_PlayOffset;
     ULONGLONG m_WriteOffset;
     ULONGLONG m_LinearPosition;
+    ULONGLONG m_CopiedLinear;   /* bytes already copied to the PCM ring (lags m_LinearPosition) */
     ULONG m_ContentId;
 
     friend EXT_CALLBACK SontTimerNotifyCallback;

@@ -11,6 +11,7 @@
 #define SONT_WAVERT_POOLTAG 'anOS'
 #define SONT_HNS_PER_SECOND 10000000ULL
 #define SONT_HNS_PER_MS     10000LL
+#define SONT_COPY_LAG_MS    20UL   /* ring feed lags the play cursor by this much */
 
 typedef struct _SONT_NOTIFICATION_ENTRY {
     LIST_ENTRY ListEntry;
@@ -534,6 +535,7 @@ CMiniportWaveRTStreamSonatina::CMiniportWaveRTStreamSonatina(
       m_PlayOffset(0),
       m_WriteOffset(0),
       m_LinearPosition(0),
+      m_CopiedLinear(0),
       m_ContentId(0)
 {
     PAGED_CODE();
@@ -1011,7 +1013,6 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
 
     PVOID dma = m_DmaBuffer;
     ULONG dmaSize = m_DmaBufferSize;
-    ULONG oldPlayOffset = (ULONG)m_PlayOffset;
 
     m_LinearPosition += bytes;
     m_PlayOffset = (m_PlayOffset + bytes) % m_DmaBufferSize;
@@ -1022,28 +1023,53 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
         m_ElapsedNotifyHns += deltaHns;
     }
 
+    /*
+     * The ring is fed from a cursor that LAGS the reported play position by
+     * SONT_COPY_LAG_MS. The audio engine writes into the DMA buffer ahead of
+     * the play cursor; if it is a few ms late we would otherwise copy stale
+     * data (audible pop). The lag gives it that margin; Bluetooth latency
+     * makes the extra delay irrelevant.
+     */
     PSONT_PCM_SOURCE src = m_PcmSource;
-    if (src != NULL && dma != NULL && dmaSize > 0 && bytes > 0)
+    if (src != NULL && dma != NULL && dmaSize > 0)
     {
-        ULONG copyLen = (bytes > (ULONGLONG)dmaSize) ? dmaSize : (ULONG)bytes;
-        ULONG startOffset = (bytes > (ULONGLONG)dmaSize)
-            ? (ULONG)((m_PlayOffset + dmaSize - copyLen) % dmaSize)
-            : oldPlayOffset;
-        ULONG tail = dmaSize - startOffset;
-        ULONG first = (copyLen < tail) ? copyLen : tail;
-        const UCHAR *dmaBytes = (const UCHAR *)dma;
+        ULONGLONG lag = ((ULONGLONG)m_AvgBytesPerSec * SONT_COPY_LAG_MS) / 1000ULL;
+        if (lag > dmaSize / 4)
+        {
+            lag = dmaSize / 4;
+        }
+        if (m_BlockAlign > 1)
+        {
+            lag -= lag % m_BlockAlign;
+        }
+        ULONGLONG target = (m_LinearPosition > lag) ? (m_LinearPosition - lag) : 0;
+        if (target > m_CopiedLinear)
+        {
+            ULONGLONG want = target - m_CopiedLinear;
+            if (want > (ULONGLONG)dmaSize)
+            {
+                m_CopiedLinear = target - dmaSize;  /* fell too far behind: keep the newest */
+                want = dmaSize;
+            }
+            ULONG copyLen = (ULONG)want;
+            ULONG startOffset = (ULONG)(m_CopiedLinear % dmaSize);
+            ULONG tail = dmaSize - startOffset;
+            ULONG first = (copyLen < tail) ? copyLen : tail;
+            const UCHAR *dmaBytes = (const UCHAR *)dma;
 
-        KeAcquireSpinLockAtDpcLevel(&src->Lock);
-        (void)SontPcmRingWrite(&src->Ring, dmaBytes + startOffset, first);
-        if (copyLen > first)
-        {
-            (void)SontPcmRingWrite(&src->Ring, dmaBytes, copyLen - first);
+            KeAcquireSpinLockAtDpcLevel(&src->Lock);
+            (void)SontPcmRingWrite(&src->Ring, dmaBytes + startOffset, first);
+            if (copyLen > first)
+            {
+                (void)SontPcmRingWrite(&src->Ring, dmaBytes, copyLen - first);
+            }
+            if (SontPcmRingAvailable(&src->Ring) >= 512)
+            {
+                KeSetEvent(&src->DataEvent, IO_NO_INCREMENT, FALSE);
+            }
+            KeReleaseSpinLockFromDpcLevel(&src->Lock);
+            m_CopiedLinear = target;
         }
-        if (SontPcmRingAvailable(&src->Ring) >= 512)
-        {
-            KeSetEvent(&src->DataEvent, IO_NO_INCREMENT, FALSE);
-        }
-        KeReleaseSpinLockFromDpcLevel(&src->Lock);
     }
 }
 
@@ -1112,6 +1138,7 @@ CMiniportWaveRTStreamSonatina::SetState(
             m_PlayOffset = 0;
             m_WriteOffset = 0;
             m_LinearPosition = 0;
+            m_CopiedLinear = 0;
             m_ElapsedNotifyHns = 0;
             m_ByteRemainderHns = 0;
             m_LastDmaHns = 0;
@@ -1151,6 +1178,7 @@ CMiniportWaveRTStreamSonatina::SetState(
             {
                 m_LastDmaHns = KSCONVERT_PERFORMANCE_TIME(m_QpcFrequency.QuadPart, qpc);
             }
+            m_CopiedLinear = m_LinearPosition;
             m_State = KSSTATE_RUN;
             if (m_PcmSource != NULL)
             {
@@ -1183,6 +1211,8 @@ CMiniportWaveRTStreamSonatina::SetState(
     else if (startTimer && m_NotificationTimer)
     {
         ExSetTimer(m_NotificationTimer, -SONT_HNS_PER_MS, SONT_HNS_PER_MS, NULL);
+        DbgPrint("Sonatina: WaveRT RUN dma=%lu bytes notif=%lu x %llu hns copylag=%lu ms\n",
+                 m_DmaBufferSize, m_NotificationsPerBuffer, m_NotificationIntervalHns, SONT_COPY_LAG_MS);
     }
 
     return STATUS_SUCCESS;

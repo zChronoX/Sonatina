@@ -812,6 +812,10 @@ static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
     PSONT_PCM_SOURCE src = &ext->PcmSource;
     size_t frames = e->SamplesPerPush;
     KIRQL old_irql;
+    uint32_t underruns_before = 0;
+    BOOLEAN log_underrun = FALSE;
+    uint32_t log_prefill = 0;
+    size_t log_avail = 0;
 
     KeAcquireSpinLock(&src->Lock, &old_irql);
     if (src->BackingBuffer != NULL && src->StreamRunning &&
@@ -825,7 +829,13 @@ static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
             e->PullInRate = src->StreamSampleRate;
             e->PullInChannels = src->StreamChannels;
         }
+        underruns_before = e->Pull.underruns;
         (void)SontPcmPull(&e->Pull, &src->Ring, scratch->pcm_frame, frames);
+        if (e->Pull.underruns != underruns_before) {
+            log_underrun = TRUE;
+            log_prefill = e->Pull.prefill_frames;
+            log_avail = SontPcmRingAvailable(&src->Ring);
+        }
         if (SontPcmRingAvailable(&src->Ring) == 0) {
             KeClearEvent(&src->DataEvent);
         }
@@ -834,6 +844,10 @@ static VOID SontMediaPullPcm(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRATCH
         e->Pull.playing = false;  /* refill the jitter buffer when audio resumes */
     }
     KeReleaseSpinLock(&src->Lock, old_irql);
+    if (log_underrun) {
+        DbgPrint("Sonatina: PCM underrun #%lu ring=%lu bytes prefill=%lu frames\n",
+                 (ULONG)e->Pull.underruns, (ULONG)log_avail, (ULONG)log_prefill);
+    }
 }
 
 /* Collects finished transfers: completion latency and failures. Returns an
