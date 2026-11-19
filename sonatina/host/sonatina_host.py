@@ -339,15 +339,24 @@ class EndpointVolume:
         self.last = None
         self.scalar: float | None = None   # Windows slider 0..1
         self.hardware = False               # volume done by the headset (AVRCP)
+        self.match = match
+        self.retry_at = 0.0                 # next attempt to find the endpoint
+        self.warned = False
         if sys.platform != "win32":
             return
         if not lib.has_gain:
             log.warning("sonatina_codec.dll is too old for volume control: update it")
             return
+        self.reopen()
+
+    def reopen(self) -> None:
+        self.retry_at = time.monotonic() + 5.0
         try:
-            self._open(match)
+            self._open(self.match)
         except Exception as error:
-            log.warning("Windows volume not followed (%r). pip install pycaw", error)
+            if not self.warned:   # retried every 5 s, logged once
+                self.warned = True
+                log.warning("Windows volume not followed yet (%r)", error)
 
     def _open(self, match: str) -> None:
         from ctypes import POINTER, cast
@@ -359,18 +368,28 @@ class EndpointVolume:
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
         enumerator = AudioUtilities.GetDeviceEnumerator()
+        try:
+            default_id = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender.value, 1).GetId()
+        except Exception:
+            default_id = None
         endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+        candidates, names = [], []
         for i in range(endpoints.GetCount()):
             dev = endpoints.Item(i)
             name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
-            if match.lower() in name.lower() and "16ch" not in name.lower():
-                interface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                self.endpoint = cast(interface, POINTER(IAudioEndpointVolume))
-                self.name = name
-                log.info("volume: following \"%s\"", name)
-                self.poll()
-                return
-        raise RuntimeError(f'no playback endpoint matching "{match}"')
+            names.append(name)
+            if match.lower() in name.lower():
+                # the Windows default output first, then "CABLE Input", then "CABLE In 16ch"
+                rank = (0 if dev.GetId() == default_id else 1, 1 if "16ch" in name.lower() else 0)
+                candidates.append((rank, i, name, dev))
+        if not candidates:
+            raise RuntimeError(f'no active playback endpoint matching "{match}" among {names}')
+        _rank, _i, name, dev = min(candidates, key=lambda c: (c[0], c[1]))
+        interface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        self.endpoint = cast(interface, POINTER(IAudioEndpointVolume))
+        self.name = name
+        log.info("volume: following \"%s\"", name)
+        self.poll()
 
     def _read(self) -> tuple[bool, float, float] | None:
         """(mute, slider 0..1, level in dB) of the endpoint, None if not available."""
@@ -396,6 +415,11 @@ class EndpointVolume:
         self.poll()
 
     def poll(self) -> None:
+        if (self.endpoint is None and sys.platform == "win32" and self.retry_at
+                and time.monotonic() >= self.retry_at):
+            self.reopen()   # VB-CABLE installed/enabled later
+            if self.endpoint is None:
+                return
         try:
             state = self._read()
         except Exception as error:

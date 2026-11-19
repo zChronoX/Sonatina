@@ -88,7 +88,11 @@ class _Delegate(avrcp.Delegate):
             self.remote.on_key(key)
 
     async def get_playback_status(self) -> avrcp.PlayStatus:
-        return self.remote.play_status()
+        status = self.remote.play_status()
+        if not self.remote.status_asked:
+            self.remote.status_asked = True
+            log.info("AVRCP: the headset follows the play status (now %s)", status.name)
+        return status
 
 
 class RemoteControl:
@@ -110,6 +114,7 @@ class RemoteControl:
         self.status = avrcp.PlayStatus.STOPPED
         self.last_play_pause = 0.0
         self.connected_at = 0.0
+        self.status_asked = False      # the headset follows our play status
 
     # -- wiring ----------------------------------------------------------------
     def listen(self, device: Device) -> None:
@@ -155,6 +160,10 @@ class RemoteControl:
         self.protocol = None
         self.connection = None
         self.status = avrcp.PlayStatus.STOPPED
+        self.level = None
+        self.want = None
+        self.sent.clear()
+        self.status_asked = False
 
     def _spawn(self, coro) -> None:
         self.tasks = [t for t in self.tasks if not t.done()]
@@ -214,6 +223,8 @@ class RemoteControl:
             status = self.play_status()
             if status != self.status:
                 self.status = status
+                if self.status_asked:
+                    log.info("AVRCP: play status -> %s", status.name)
                 try:
                     protocol.notify_playback_status_changed(status)
                 except Exception as error:
@@ -239,7 +250,8 @@ class RemoteControl:
                 return
             self.level = level
         self._set_absolute(True)
-        log.info("absolute volume on: the headset follows Windows (%s/127)", self.level)
+        log.info("absolute volume on: %s", f"the headset follows Windows ({level}/127)"
+                 if level is not None else "Windows volume unknown, the headset keeps its own")
         await self._monitor(protocol)
 
     async def _monitor(self, protocol: avrcp.Protocol) -> None:
