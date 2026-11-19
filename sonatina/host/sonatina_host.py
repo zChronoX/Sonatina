@@ -396,7 +396,7 @@ class MediaPump:
             self.task.cancel()
             try:
                 await self.task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
             self.task = None
         if self.encoder:
@@ -425,7 +425,11 @@ class MediaPump:
                 for payload, samples in self.encoder.push(pcm):
                     header = struct.pack(">BBHII", 0x80, 96, self.seq & 0xFFFF,
                                          self.timestamp & 0xFFFFFFFF, SSRC)
-                    channel.write(header + payload)
+                    try:
+                        channel.write(header + payload)
+                    except Exception as error:   # link dropped under us: stop quietly
+                        log.debug("media channel closed: %r", error)
+                        return
                     self.seq += 1
                     self.timestamp += samples
                     self.packets += 1
@@ -677,6 +681,9 @@ class SonatinaHost:
                 log.info("media channel MTU %d", mtu_holder["mtu"])
             await stream.start()
             self.state = "streaming"
+            if self.s.address != peer:   # the headset in use becomes the active one
+                self.s.address = peer
+                self._changed()
             await asyncio.get_running_loop().create_future()  # until disconnection
         except asyncio.CancelledError:
             pass
