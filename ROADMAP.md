@@ -160,10 +160,20 @@ reconnects the headset with the new parameters.
   VM test pending.
 
 ### D7. Additional codecs `[~]`
-- **Why**: parity beyond SBC. Technical work only; licensing decides the rest.
-- **Do**: LDAC from AOSP Apache-2.0 (`[x]` vendored in fixed-point mode `_32BIT_FIXED_POINT` + AVDTP vendor ID `2D 01 00 00 / AA 00` + RTP framing + Python stack + T2 UDP loopback), AAC (needs a Fraunhofer FDK licence `[ ]`),
-  aptX/HD/LL (needs a Qualcomm licence `[ ]`).
-- **Done**: LDAC selectable, negotiated, host-encoded, and verified over T2 UDP loopback (`375 pkts, lost=0, errors=0, rms=0.573`); real headset runtime pending VM tests. AAC/aptX remain unimplemented due to commercial licensing.
+- **Why**: parity beyond SBC. Sonatina is for the owner's personal use only
+  (decision 2026-11-19), so codecs are chosen on technical merit; nothing is
+  redistributed.
+- **Done**: LDAC (AOSP Apache-2.0, fixed-point `_32BIT_FIXED_POINT`, vendor ID
+  `2D 01 00 00 / AA 00`) verified on hardware: CMF Headphone Pro, 48 kHz
+  660 kbit/s, quality on par with the Microsoft driver.
+- **Next, in this order**:
+  1. **AAC** `[ ]` (AirPods, Soundpeats Air5, most headsets): FDK-AAC
+     (fixed-point, AAC-LC, A2DP AAC caps + LATM/MPEG-4 framing as in AOSP
+     `a2dp_aac_encoder`), VBR off, 256-320 kbit/s.
+  2. **aptX** `[ ]` and **aptX HD** `[ ]`: libfreeaptx (LGPL-2.1+, integer
+     only), A2DP vendor IDs Qualcomm `4F 00 00 00 / 01 00` (aptX) and
+     `D7 00 00 00 / 24 00` (aptX HD).
+  - Not possible: aptX Adaptive / Lossless (no open encoder).
 
 ### D8. Signing, installer and QA `[~]`
 - **Why**: an unsigned kernel driver does not load with Secure Boot.
@@ -229,6 +239,31 @@ reconnects the headset with the new parameters.
 - **Done**: `-CheckOnly` selftest green locally and in CI; standalone
   `sonatina/dist/SonatinaConfig.exe` built with PyInstaller and `--selftest`
   smoke-test verified locally (exit 0).
+
+### G3. Native control panel ("dashboard") `[ ]`
+- **When**: after the driver is stable (long-pause, reconnect and sleep tests
+  passed). Mockups can come earlier.
+- **Why**: the Tkinter panel is a developer tool; a public release needs a
+  modern, native-feeling app. Must NOT resemble the studied commercial
+  package (clean-room rule 4): own layout, strings and icons.
+- **Stack (proposal)**: WinUI 3 / Windows App SDK (C#). Mica + Acrylic are the
+  native Windows 11 "glass" materials (real blur, low power, follow the
+  system light/dark theme automatically). Talks to the service/driver through
+  the existing registry contract + `IOCTL_SONATINA_GET_STATE`.
+- **Type**: Segoe UI Variable (the Windows system font, closest to Apple's
+  feel). SF Pro is NOT allowed: Apple's licence limits it to Apple
+  platforms. Inter (SIL OFL) is the fallback if a bundled font is wanted.
+- **Design rules (no "AI slop")**: every number on screen is real driver
+  state (codec, sample rate, bitrate/EQMID, MTU, jitter buffer, TX latency,
+  underruns, link state); no decorative sparklines, fake stats, avatars,
+  purple gradients or emoji icons; one accent colour; Fluent System Icons;
+  generous spacing, few cards, clear hierarchy; keyboard + screen reader
+  accessible; light and dark both designed, not inverted.
+- **Screens**: device list (paired A2DP sinks, which ones Sonatina drives),
+  device page (codec + quality, "reconnect", live status), diagnostics (event
+  log, export for bug reports), settings/about (version, licences).
+- **Done**: installs with the MSI, replaces `SonatinaConfig.exe`, works on a
+  clean Windows 11 with the signed driver.
 
 ---
 
@@ -383,8 +418,9 @@ build target.
 |---|---|---|---|
 | SBC | AOSP `external/bluetooth/sbc` | Apache-2.0 | yes |
 | LDAC | AOSP | Apache-2.0 | yes |
-| AAC | Fraunhofer FDK or own | commercial | only with an agreement |
-| aptX / HD / LL | Qualcomm | proprietary/NDA | only with an agreement |
+| AAC | FDK-AAC | Fraunhofer FDK licence (no patent grant) | personal use only: planned (D7.1) |
+| aptX / aptX HD | libfreeaptx | LGPL-2.1+ (main patent considered expired) | personal use only: planned (D7.2) |
+| aptX Adaptive / Lossless | Qualcomm | proprietary | no open encoder: not possible |
 
 Consequence: "100% parity" for AAC/aptX is a business decision. The engineering
 plan targets SBC then LDAC first.
@@ -430,7 +466,7 @@ Distribution: EV certificate + Partner Center attestation (or WHQL).
 2. Use the study above only for **interface facts** (binding, endpoints,
    registry value names, service side effects). Never transcribe disassembly
    into source.
-3. OSS components keep their licence and attribution (SysVAD MIT, AOSP SBC/LDAC
+3. OSS components keep their licence and attribution (SysVAD MS-PL, AOSP SBC/LDAC
    Apache-2.0).
 4. No strings, icons, binaries or resources from the studied package.
 5. `NOTICE.md` remains the separate provenance record.
@@ -445,3 +481,37 @@ Distribution: EV certificate + Partner Center attestation (or WHQL).
    appear in Sound settings.
 3. **D3**: hit a real headset with Discover/GetCapabilities and compare the
    bytes with `sonatina/`.
+
+---
+
+## 13. Phase R — public release on GitHub (ON HOLD)
+
+On hold since 2026-11-19: Sonatina is for personal use only (EV certificate
+costs are not justified). Kept for reference.
+
+### R1. Signing (blocker) `[ ]`
+- Users cannot be asked to enable test signing / disable Secure Boot
+  (it also breaks anti-cheat games). Needed: EV code-signing certificate,
+  Microsoft Partner Center (Hardware Dev Center) account, attestation
+  signing of the driver package for x64 + ARM64. Budget and lead time first.
+
+### R2. Licences and provenance `[ ]`
+- Add a top-level `LICENSE` for our code (MIT or Apache-2.0, compatible with
+  the Apache-2.0 SBC/LDAC code). Files derived from SysVAD stay under MS-PL
+  with their notice. `THIRD_PARTY_NOTICES.md` listing libsbc, libldac,
+  SysVAD. Codec table in section 8 stays the rule: no AAC/aptX code.
+- Trademarks: "Bluetooth", "LDAC" are third-party marks; describe
+  compatibility, do not use logos. No name, string, icon or screenshot of
+  the studied commercial package anywhere in the repo (including history).
+
+### R3. Repository hygiene `[ ]`
+- README for users (what it is, supported headsets, install/uninstall,
+  rollback, known limits), CONTRIBUTING (exists in `driver/`), SECURITY.md
+  (kernel driver: how to report), issue templates asking for
+  `driver-status` + DebugView logs.
+- Remove dev-only files from the release tree (HANDOFF, local logs); CI
+  builds signed release artefacts + MSI on tags.
+
+### R4. Release QA `[ ]`
+- T3 (Verifier + soak) and T5 (install/upgrade/uninstall matrix) green;
+  tested on at least two headsets and two Bluetooth controllers.
