@@ -120,7 +120,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signtool failed on $f" }
           }
           Copy-Item sonatina\service\build\SonatinaSvc.exe "$out\"
-          Copy-Item sonatina\scripts\install-driver.ps1, sonatina\scripts\uninstall-driver.ps1, sonatina\scripts\driver-status.ps1 "$out\scripts\"
+          Copy-Item sonatina\scripts\install-driver.ps1, sonatina\scripts\uninstall-driver.ps1, sonatina\scripts\driver-status.ps1, sonatina\scripts\vm-prepare.ps1 "$out\scripts\"
           Get-ChildItem $out -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Upload VM package

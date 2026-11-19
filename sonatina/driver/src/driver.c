@@ -791,6 +791,11 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
     DbgPrint("Sonatina: streaming %s %lu Hz, %lu ch, MTU %u\n",
              (e->Codec == SONT_AVDTP_CODEC_LDAC) ? "LDAC" : "SBC",
              e->Rate, e->Channels, (unsigned)mtu);
+    if (scratch->session.peer_sbc_valid) {
+        const uint8_t *o = scratch->session.peer_sbc_raw;
+        DbgPrint("Sonatina: peer SBC caps raw=%02X %02X %02X %02X (freq/mode, blocks/subbands/alloc, min bp, max bp)\n",
+                 (unsigned)o[0], (unsigned)o[1], (unsigned)o[2], (unsigned)o[3]);
+    }
     if (e->Codec == SONT_AVDTP_CODEC_SBC) {
         DbgPrint("Sonatina: SBC negotiated mode=%u blocks=%u subbands=%u alloc=%u bitpool=%u..%u\n",
                  (unsigned)cfg->sbc.channel_mode, (unsigned)cfg->sbc.blocks,

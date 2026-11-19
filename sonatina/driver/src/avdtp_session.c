@@ -360,6 +360,10 @@ static SONT_AVDTP_STEP_RESULT SontHandleGetCapsAccept(SONT_AVDTP_SESSION *sessio
     SONT_MEMSET(&chosen, 0, sizeof(chosen));
     if (SontAvdtpParseCapabilities(msg->payload, msg->payload_len, &caps)) {
         chosen.codec = caps.codec;
+        if (caps.codec == SONT_AVDTP_CODEC_SBC && caps.has_raw_sbc) {
+            SONT_MEMCPY(session->peer_sbc_raw, caps.raw_sbc, 4);
+            session->peer_sbc_valid = true;
+        }
         if (caps.codec == session->preferred_codec) {
             bool matched = false;
             if (caps.codec == SONT_AVDTP_CODEC_SBC) {

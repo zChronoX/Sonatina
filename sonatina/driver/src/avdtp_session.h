@@ -78,6 +78,8 @@ typedef struct _SONT_AVDTP_SESSION {
     size_t fallback_index;
     SONT_CAPABILITIES fallback_cfg;
 
+    uint8_t peer_sbc_raw[4];      /* SBC capability octets last advertised by the remote (diagnostics) */
+    bool peer_sbc_valid;
     uint8_t selected_acp_seid;    /* remote SEP of the stream */
     uint8_t configured_local_seid;/* local SEP of the stream, 0 when none */
     bool remote_initiated;        /* the remote configured the stream */

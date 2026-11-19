@@ -165,6 +165,12 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
 - `install-driver.ps1`: `pnputil /add-driver` con exit code 259 (pacchetto gia' presente) o 3010
   non e' piu' trattato come errore.
 
+- Prova sul PC principale (Ugreen, senza Verifier): streaming SBC 48 kHz, 0 errori, underruns=2 in ~64 s,
+  tx max 3.7 ms: trasporto sano. Restano qualita' percepita inferiore al driver Microsoft (bitpool 27,
+  222 kbit/s) e qualche pop. Prima ipotesi: l'endpoint accettava 44.1/48/88.2/96 kHz e il driver
+  convertiva con ricampionatore lineare; ora l'endpoint e' fisso a 48 kHz (conversione a carico
+  del motore audio di Windows). Da verificare: bitpool massimo offerto dalle cuffie (log DebugView).
+
 ## Open issues
 - AAC/aptX: provare con FFmpeg installato (`winget install --id Gyan.FFmpeg -e`) e aggiungere test di round-trip reale.
 - Primo test su cuffia reale (VM con chiavetta USB passata alla VM, oppure PC di test) ancora da fare.

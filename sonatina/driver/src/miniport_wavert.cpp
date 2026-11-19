@@ -32,8 +32,8 @@ static KSDATARANGE_AUDIO SontWavePinDataRangesStream[] =
         2,      /* MaximumChannels */
         16,     /* MinimumBitsPerSample */
         16,     /* MaximumBitsPerSample */
-        44100,  /* MinimumSampleFrequency */
-        96000   /* MaximumSampleFrequency */
+        48000,  /* MinimumSampleFrequency: SBC/LDAC run at 48 kHz, so the Windows audio */
+        48000   /* MaximumSampleFrequency: engine (good SRC) converts, not our linear one */
     }
 };
 
@@ -184,10 +184,7 @@ SontValidatePcmFormat(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (wfx->nSamplesPerSec != 44100 &&
-        wfx->nSamplesPerSec != 48000 &&
-        wfx->nSamplesPerSec != 88200 &&
-        wfx->nSamplesPerSec != 96000)
+    if (wfx->nSamplesPerSec != 48000)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -342,8 +339,8 @@ CMiniportWaveRTSonatina::DataRangeIntersection(
             return STATUS_NO_MATCH;
         }
 
-        ULONG lowFreq = max(44100UL, clientAudio->MinimumSampleFrequency);
-        ULONG highFreq = min(96000UL, clientAudio->MaximumSampleFrequency);
+        ULONG lowFreq = max(48000UL, clientAudio->MinimumSampleFrequency);
+        ULONG highFreq = min(48000UL, clientAudio->MaximumSampleFrequency);
         if (lowFreq > highFreq)
         {
             return STATUS_NO_MATCH;
