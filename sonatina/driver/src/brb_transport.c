@@ -290,14 +290,14 @@ BOOLEAN SontTransportTakeIncoming(PSONT_TRANSPORT transport, PSONT_INCOMING inco
 
 static USHORT SontNegotiatedMtu(USHORT out_mtu, USHORT in_mtu)
 {
-    /* We advertise a large local MTU, so the smaller of the two negotiated
-     * values is the headset's receive MTU, whichever field carries it. */
-    USHORT mtu = 0;
-    if (out_mtu != 0 && in_mtu != 0) {
-        mtu = (out_mtu < in_mtu) ? out_mtu : in_mtu;
-    } else {
-        mtu = (out_mtu != 0) ? out_mtu : in_mtu;
-    }
+    /* OutResults is the OUTBOUND half (bthddi.h: ConfigOut.Mtu negotiates "the
+     * size of the outbound half"), i.e. the largest SDU the headset accepts.
+     * InResults is what WE receive (our ConfigIn preference, 672). The old
+     * min(out, in) therefore always returned our own 672, whatever the headset
+     * allows: too small for LDAC's 674-byte packets. */
+    USHORT mtu = (out_mtu != 0) ? out_mtu : in_mtu;
+    DbgPrint("Sonatina: L2CAP MTU out(send)=%u in(recv)=%u -> using %u\n",
+             (unsigned)out_mtu, (unsigned)in_mtu, (unsigned)mtu);
     if (mtu < L2CAP_MIN_MTU) {
         mtu = SONT_L2CAP_DEFAULT_MTU;
     }

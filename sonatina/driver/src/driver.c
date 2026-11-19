@@ -717,11 +717,14 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
 
     if (cfg->codec == SONT_AVDTP_CODEC_SBC) {
         const SONT_SBC_PARAMS *sbc = &cfg->sbc;
+        /* SBC keeps the verified 672-byte packets (~20 ms of audio each) even
+         * when the headset accepts more: bigger packets only add burstiness. */
+        USHORT sbc_mtu = (mtu > SONT_L2CAP_DEFAULT_MTU) ? (USHORT)SONT_L2CAP_DEFAULT_MTU : mtu;
         e->Rate = sbc->sampling;
         e->Channels = SontSbcChannels(sbc);
         e->SamplesPerPush = SontSbcSamplesPerFrame(sbc);
         if (e->SamplesPerPush == 0 || e->SamplesPerPush > SONT_MEDIA_MAX_SAMPLES ||
-            !SontMediaInit(&scratch->media, sbc, sbc->max_bitpool, mtu, 0x534F4E54u)) {
+            !SontMediaInit(&scratch->media, sbc, sbc->max_bitpool, sbc_mtu, 0x534F4E54u)) {
             RtlZeroMemory(e, sizeof(*e));
             return STATUS_UNSUCCESSFUL;
         }
@@ -737,8 +740,14 @@ static NTSTATUS SontMediaStart(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SCRAT
         }
     } else if (cfg->codec == SONT_AVDTP_CODEC_LDAC) {
         USHORT ldac_mtu = (USHORT)((mtu > SONT_RTP_HEADER_LEN + 1u) ? mtu - SONT_RTP_HEADER_LEN - 1u : 0u);
+        /* libldac (2-DH5 table) emits up to 661 bytes of frames per packet
+         * whatever MTU it is given (>= 679 required): RTP + media header make
+         * that 674 bytes on the L2CAP channel. */
+        if (mtu < SONT_RTP_HEADER_LEN + 1u + 661u) {
+            DbgPrint("Sonatina: WARNING headset MTU %u < 674: LDAC packets will not fit\n",
+                     (unsigned)mtu);
+        }
         if (ldac_mtu < 679u) {
-            DbgPrint("Sonatina: headset MTU %u is small for LDAC\n", (unsigned)mtu);
             ldac_mtu = 679u;
         }
         if (ldac_mtu > 1023u) {
@@ -1278,8 +1287,10 @@ static NTSTATUS SontRunConnection(PSONT_DEVICE_EXTENSION ext, PSONT_SIGNALING_SC
                 break;
             }
             now = SontNowMs(ext);
-            wait_ms = SontMediaClockUsUntilNext(&scratch->engine.Clock, SontQueryTimestampUs(ext),
-                                                scratch->engine.SamplesPerPush) / 1000u;
+            /* Round UP: truncating made every sub-millisecond wait a zero
+             * timeout, i.e. a busy loop until the next frame was due. */
+            wait_ms = (SontMediaClockUsUntilNext(&scratch->engine.Clock, SontQueryTimestampUs(ext),
+                                                 scratch->engine.SamplesPerPush) + 999u) / 1000u;
             if (wait_ms > SONT_MEDIA_MAX_WAIT_MS) {
                 wait_ms = SONT_MEDIA_MAX_WAIT_MS;
             }

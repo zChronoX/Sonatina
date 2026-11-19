@@ -11,7 +11,6 @@
 #define SONT_WAVERT_POOLTAG 'anOS'
 #define SONT_HNS_PER_SECOND 10000000ULL
 #define SONT_HNS_PER_MS     10000LL
-#define SONT_COPY_LAG_MS    20UL   /* ring feed lags the play cursor by this much */
 
 typedef struct _SONT_NOTIFICATION_ENTRY {
     LIST_ENTRY ListEntry;
@@ -524,8 +523,8 @@ CMiniportWaveRTStreamSonatina::CMiniportWaveRTStreamSonatina(
       m_DmaBuffer(NULL),
       m_DmaBufferSize(0),
       m_NotificationsPerBuffer(0),
-      m_NotificationIntervalHns(0),
-      m_ElapsedNotifyHns(0),
+      m_NotificationPacketBytes(0),
+      m_NotifiedPackets(0),
       m_AvgBytesPerSec(0),
       m_BlockAlign(0),
       m_SampleRate(0),
@@ -739,7 +738,8 @@ CMiniportWaveRTStreamSonatina::AllocateAudioBuffer(
     m_DmaBuffer = mapped;
     m_DmaBufferSize = RequestedSize;
     m_NotificationsPerBuffer = 0;
-    m_NotificationIntervalHns = 0;
+    m_NotificationPacketBytes = 0;
+    m_NotifiedPackets = 0;
     KeReleaseSpinLock(&m_Lock, oldIrql);
 
     *AudioBufferMdl = mdl;
@@ -766,7 +766,8 @@ CMiniportWaveRTStreamSonatina::FreeAudioBuffer(
     m_DmaBuffer = NULL;
     m_DmaBufferSize = 0;
     m_NotificationsPerBuffer = 0;
-    m_NotificationIntervalHns = 0;
+    m_NotificationPacketBytes = 0;
+    m_NotifiedPackets = 0;
     KeReleaseSpinLock(&m_Lock, oldIrql);
 
     if (AudioBufferMdl)
@@ -797,7 +798,7 @@ CMiniportWaveRTStreamSonatina::AllocateBufferWithNotification(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (NotificationCount == 0 || (RequestedSize % NotificationCount) != 0)
+    if (NotificationCount == 0)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -808,6 +809,11 @@ CMiniportWaveRTStreamSonatina::AllocateBufferWithNotification(
     }
 
     RequestedSize -= RequestedSize % m_BlockAlign;
+    if ((RequestedSize % NotificationCount) != 0 ||
+        ((RequestedSize / NotificationCount) % m_BlockAlign) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     PHYSICAL_ADDRESS highAddress;
     highAddress.HighPart = 0;
@@ -826,21 +832,13 @@ CMiniportWaveRTStreamSonatina::AllocateBufferWithNotification(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ULONGLONG intervalHns =
-        ((ULONGLONG)RequestedSize * SONT_HNS_PER_SECOND) /
-        ((ULONGLONG)m_AvgBytesPerSec * (ULONGLONG)NotificationCount);
-    if (intervalHns < (ULONGLONG)SONT_HNS_PER_MS)
-    {
-        intervalHns = (ULONGLONG)SONT_HNS_PER_MS;
-    }
-
     KIRQL oldIrql;
     KeAcquireSpinLock(&m_Lock, &oldIrql);
     m_DmaBuffer = mapped;
     m_DmaBufferSize = RequestedSize;
     m_NotificationsPerBuffer = NotificationCount;
-    m_NotificationIntervalHns = intervalHns;
-    m_ElapsedNotifyHns = 0;
+    m_NotificationPacketBytes = RequestedSize / NotificationCount;
+    m_NotifiedPackets = m_LinearPosition / m_NotificationPacketBytes;
     KeReleaseSpinLock(&m_Lock, oldIrql);
 
     *AudioBufferMdl = mdl;
@@ -1023,37 +1021,28 @@ CMiniportWaveRTStreamSonatina::UpdatePositionLocked(
     m_PlayOffset = (m_PlayOffset + bytes) % m_DmaBufferSize;
     m_WriteOffset = m_PlayOffset;
 
-    if (m_NotificationIntervalHns > 0)
-    {
-        m_ElapsedNotifyHns += deltaHns;
-    }
-
     /*
-     * The ring is fed from a cursor that LAGS the reported play position by
-     * SONT_COPY_LAG_MS. The audio engine writes into the DMA buffer ahead of
-     * the play cursor; if it is a few ms late we would otherwise copy stale
-     * data (audible pop). The lag gives it that margin; Bluetooth latency
-     * makes the extra delay irrelevant.
+     * Copy exactly what a DAC would have played: the bytes the play cursor has
+     * just passed, and nothing behind that. Region behind the cursor belongs to
+     * the audio engine again as soon as we signal the packet notification (it
+     * refills the half that was just played), so reading it late, as the old
+     * 20 ms "copy lag" did, returned audio from the NEXT buffer lap (garbled,
+     * metallic sound). Notifications are signalled by the caller AFTER this
+     * copy, under the same lock, so the engine can never overwrite bytes we
+     * have not copied yet.
      */
     PSONT_PCM_SOURCE src = m_PcmSource;
     if (src != NULL && dma != NULL && dmaSize > 0)
     {
-        ULONGLONG lag = ((ULONGLONG)m_AvgBytesPerSec * SONT_COPY_LAG_MS) / 1000ULL;
-        if (lag > dmaSize / 4)
-        {
-            lag = dmaSize / 4;
-        }
-        if (m_BlockAlign > 1)
-        {
-            lag -= lag % m_BlockAlign;
-        }
-        ULONGLONG target = (m_LinearPosition > lag) ? (m_LinearPosition - lag) : 0;
+        ULONGLONG target = m_LinearPosition;
         if (target > m_CopiedLinear)
         {
             ULONGLONG want = target - m_CopiedLinear;
             if (want > (ULONGLONG)dmaSize)
             {
-                m_CopiedLinear = target - dmaSize;  /* fell too far behind: keep the newest */
+                /* Timer stalled longer than the whole buffer: what was in it is
+                 * gone, keep the newest lap. */
+                m_CopiedLinear = target - dmaSize;
                 want = dmaSize;
             }
             ULONG copyLen = (ULONG)want;
@@ -1145,7 +1134,7 @@ CMiniportWaveRTStreamSonatina::SetState(
             m_LinearPosition = 0;
             m_CopiedLinear = 0;
             m_ByteCarry = 0;
-            m_ElapsedNotifyHns = 0;
+            m_NotifiedPackets = 0;
             m_ByteRemainderHns = 0;
             m_LastDmaHns = 0;
             if (m_PcmSource != NULL)
@@ -1218,9 +1207,8 @@ CMiniportWaveRTStreamSonatina::SetState(
     else if (startTimer && m_NotificationTimer)
     {
         ExSetTimer(m_NotificationTimer, -SONT_HNS_PER_MS, SONT_HNS_PER_MS, NULL);
-        DbgPrint("Sonatina: WaveRT RUN dma=%lu bytes notif=%lu x %llu hns copylag=%lu bytes\n",
-                 m_DmaBufferSize, m_NotificationsPerBuffer, m_NotificationIntervalHns,
-                 (ULONG)min((ULONGLONG)m_AvgBytesPerSec * SONT_COPY_LAG_MS / 1000ULL, (ULONGLONG)(m_DmaBufferSize / 4)));
+        DbgPrint("Sonatina: WaveRT RUN dma=%lu bytes notif=%lu x %lu bytes (copy at play cursor)\n",
+                 m_DmaBufferSize, m_NotificationsPerBuffer, m_NotificationPacketBytes);
     }
 
     return STATUS_SUCCESS;
@@ -1263,10 +1251,15 @@ SontTimerNotifyCallback(
         LARGE_INTEGER qpc = KeQueryPerformanceCounter(NULL);
         stream->UpdatePositionLocked(qpc);
 
-        if (stream->m_NotificationIntervalHns > 0 &&
-            stream->m_ElapsedNotifyHns >= stream->m_NotificationIntervalHns)
+        /* Like a hardware interrupt: fire when the play position crosses a
+         * packet boundary (not on a separate wall-clock count, which drifted
+         * against the position and released buffer halves we had not copied). */
+        ULONGLONG packets = (stream->m_NotificationPacketBytes > 0)
+            ? stream->m_LinearPosition / stream->m_NotificationPacketBytes
+            : 0;
+        if (stream->m_NotificationPacketBytes > 0 && packets != stream->m_NotifiedPackets)
         {
-            stream->m_ElapsedNotifyHns %= stream->m_NotificationIntervalHns;
+            stream->m_NotifiedPackets = packets;
 
             for (PLIST_ENTRY cur = stream->m_NotificationList.Flink;
                  cur != &stream->m_NotificationList;

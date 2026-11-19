@@ -197,3 +197,10 @@ non li vedevano perche' entrambe le implementazioni sbagliavano allo stesso modo
 - WaveRT: the PCM ring is now fed from a cursor lagging the play position by 20 ms (SONT_COPY_LAG_MS, capped to dma/4), so a late audio-engine write no longer copies stale data (suspected cause of pops). Cursor re-synced on RUN.
 - New logs: "WaveRT RUN dma=.. notif=.. copylag=.." and "PCM underrun #n ring=.. prefill=..".
 - Not verified on MSVC/WDK: CI only.
+
+## Review: copy lag removed, notifications from position (2026-11-19)
+- ROOT CAUSE of the garbled/"metallic" sound: the 20 ms copy lag (b9dde65) read the DMA buffer BEHIND the play cursor, i.e. the half the audio engine refills right after the packet notification -> audio from the next buffer lap. With d6e6868 (clock fixed) the corruption became systematic (before, the 0.7% drift made it intermittent).
+- WaveRT now copies exactly the bytes the play cursor passed, and packet notifications fire when the position crosses a packet boundary (dma/notif bytes), after the copy, under the same lock (was: a separate wall-clock counter that drifted against the position).
+- L2CAP MTU: use OutResults (outbound = headset receive MTU), not min(out,in) which always returned our own ConfigIn 672. New log "L2CAP MTU out(send)=.. in(recv)=..". SBC packets stay capped at 672; LDAC warns only when MTU < 674 (libldac packets are 674 bytes on the channel).
+- Media worker: wait rounded up to the next ms (truncation made sub-ms waits zero -> busy loop).
+- Not verified on MSVC/WDK: CI only.

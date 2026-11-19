@@ -64,8 +64,8 @@ private:
     PVOID m_DmaBuffer;
     ULONG m_DmaBufferSize;
     ULONG m_NotificationsPerBuffer;
-    ULONGLONG m_NotificationIntervalHns;
-    ULONGLONG m_ElapsedNotifyHns;
+    ULONG m_NotificationPacketBytes;  /* dma size / notifications (0 = no events) */
+    ULONGLONG m_NotifiedPackets;      /* packet boundaries already signalled */
 
     ULONG m_AvgBytesPerSec;
     USHORT m_BlockAlign;
@@ -79,7 +79,7 @@ private:
     ULONGLONG m_WriteOffset;
     ULONGLONG m_LinearPosition;
     ULONG m_ByteCarry;          /* bytes not yet a whole block: carried to the next update */
-    ULONGLONG m_CopiedLinear;   /* bytes already copied to the PCM ring (lags m_LinearPosition) */
+    ULONGLONG m_CopiedLinear;   /* bytes already copied to the PCM ring */
     ULONG m_ContentId;
 
     friend EXT_CALLBACK SontTimerNotifyCallback;
