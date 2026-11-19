@@ -1,4 +1,4 @@
-bumble>=0.0.236
+bumble==0.0.236  # pinned: sonatina_avrcp uses Protocol internals
 sounddevice>=0.4.6
 pycaw>=20240210
 pystray>=0.19

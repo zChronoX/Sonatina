@@ -253,6 +253,16 @@ class TrayApp:
             yield pystray.MenuItem(label, self._codec_action(codec, quality),
                                    checked=self._codec_checked(codec, quality), radio=True)
 
+    def _option_action(self, name: str):
+        def action(*_args):
+            host = self.host
+            if host is not None:
+                self.run_coro(host.set_option(name, not getattr(host.s, name)))
+        return action
+
+    def _option_checked(self, name: str):
+        return lambda _item: self.host is not None and bool(getattr(self.host.s, name, True))
+
     def open_log(self, *_args) -> None:
         if sys.platform == "win32":
             os.startfile(LOG_PATH)
@@ -276,6 +286,13 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Cuffie", "Headphones"), pystray.Menu(self.headsets_menu)),
             pystray.MenuItem(tr("Qualita' audio", "Audio quality"), pystray.Menu(self.codec_menu)),
+            pystray.MenuItem(tr("Volume regolato dalle cuffie", "Volume handled by the headphones"),
+                             self._option_action("absolute_volume"),
+                             checked=self._option_checked("absolute_volume")),
+            pystray.MenuItem(tr("Tasti delle cuffie (play/pausa, brani)",
+                                "Headphone buttons (play/pause, tracks)"),
+                             self._option_action("media_keys"),
+                             checked=self._option_checked("media_keys")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Riavvia connessione", "Restart connection"), self.on_restart),
             pystray.MenuItem(tr("Apri log", "Open log"), self.open_log),

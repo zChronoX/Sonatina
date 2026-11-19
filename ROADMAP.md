@@ -578,9 +578,20 @@ Windows apps -> VB-CABLE (signed virtual audio device, renamed e.g. "CMF Headpho
 - Per-headset profile (codec, quality), chosen in the app: only the
   selected headset is driven.
 
-### U2. AVRCP volume + media keys `[ ]`
-- Absolute volume (headset buttons <-> Windows volume of the VB-CABLE
-  endpoint), play/pause/next mapped to Windows media keys.
+### U2. AVRCP volume + media keys `[~]` (code + virtual test done, hardware test pending)
+- `sonatina_avrcp.py`: one Bumble AVRCP Protocol per link (TG + CT on the same
+  AVCTP channel); the headset usually opens it, otherwise we do 2 s after streaming.
+- Absolute volume (if the headset lists EVENT_VOLUME_CHANGED): Windows slider of
+  "CABLE Input" -> SetAbsoluteVolume (0..127); headset buttons -> VOLUME_CHANGED
+  notifications -> Windows slider. Headset volume is set *before* our gain goes to
+  unity (no loud moment); echoes of values we sent are ignored for 1.5 s. Our gain
+  then only mutes. Without absolute volume: software gain as before.
+- Buttons: PLAY/PAUSE -> media play/pause (toggle; PLAY within 3 s of connecting and
+  PAUSE after 3 s of silence are ignored: auto-play, wear sensors), FORWARD/BACKWARD
+  -> next/previous, VOLUME_UP/DOWN/MUTE -> Windows volume keys.
+- Playback status for the headset guessed from audio activity (> -60 dBFS).
+- Tray: "Volume handled by the headphones" and "Headphone buttons" switches
+  (settings `absolute_volume`, `media_keys`). Test: `tests/avrcp_virtual.py`.
 
 ### U3. Microphone (HFP) `[ ]` — harder, later
 - HFP Audio Gateway over RFCOMM (Bumble has HFP) + SCO/eSCO audio (CVSD or

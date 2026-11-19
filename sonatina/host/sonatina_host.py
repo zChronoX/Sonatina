@@ -15,6 +15,7 @@ Usage (from this folder):
 from __future__ import annotations
 
 import argparse
+import array
 import asyncio
 import ctypes
 import json
@@ -44,6 +45,8 @@ from bumble.avdtp import Protocol as AvdtpProtocol
 from bumble.core import AdvertisingData, DeviceClass, PhysicalTransport
 from bumble.device import Connection, Device, DeviceConfiguration
 from bumble.pairing import PairingConfig
+
+import sonatina_avrcp
 
 log = logging.getLogger("sonatina")
 
@@ -321,8 +324,9 @@ class EndpointVolume:
     """Follows the Windows volume and mute of the VB-CABLE playback endpoint.
 
     VB-CABLE ignores its own volume slider (the signal on "CABLE Output" is always
-    full scale), so the gain is applied here, before encoding. Later AVRCP absolute
-    volume (U2) can move it to the headset instead."""
+    full scale), so the gain is applied here, before encoding. When the headset has
+    AVRCP absolute volume, `hardware` is set: the headset does the attenuation and the
+    gain here only mutes."""
 
     UNITY = 65536
 
@@ -333,6 +337,8 @@ class EndpointVolume:
         self.endpoint = None
         self.name = None
         self.last = None
+        self.scalar: float | None = None   # Windows slider 0..1
+        self.hardware = False               # volume done by the headset (AVRCP)
         if sys.platform != "win32":
             return
         if not lib.has_gain:
@@ -366,18 +372,43 @@ class EndpointVolume:
                 return
         raise RuntimeError(f'no playback endpoint matching "{match}"')
 
-    def poll(self) -> None:
+    def _read(self) -> tuple[bool, float, float] | None:
+        """(mute, slider 0..1, level in dB) of the endpoint, None if not available."""
+        if self.endpoint is None:
+            return None
+        return (bool(self.endpoint.GetMute()),
+                float(self.endpoint.GetMasterVolumeLevelScalar()),
+                float(self.endpoint.GetMasterVolumeLevel()))
+
+    def _write(self, scalar: float, unmute: bool) -> None:
         if self.endpoint is None:
             return
+        self.endpoint.SetMasterVolumeLevelScalar(scalar, None)
+        if unmute:
+            self.endpoint.SetMute(False, None)
+
+    def set_scalar(self, scalar: float, unmute: bool = False) -> None:
+        """Moves the Windows slider (volume changed from the headset)."""
         try:
-            mute = bool(self.endpoint.GetMute())
-            scalar = float(self.endpoint.GetMasterVolumeLevelScalar())
-            db = float(self.endpoint.GetMasterVolumeLevel())
+            self._write(max(0.0, min(1.0, scalar)), unmute)
+        except Exception as error:
+            log.debug("volume set: %r", error)
+        self.poll()
+
+    def poll(self) -> None:
+        try:
+            state = self._read()
         except Exception as error:
             log.debug("volume poll: %r", error)
             return
+        if state is None:
+            return
+        mute, scalar, db = state
+        self.scalar = scalar
         if mute or scalar <= 0.0:
             self.target = 0
+        elif self.hardware:
+            self.target = self.UNITY
         else:
             self.target = min(self.UNITY, int(self.UNITY * 10 ** (db / 20)))
         state = (mute, round(scalar * 100))
@@ -414,6 +445,15 @@ def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
 
 
 # ----------------------------------------------------------------------------- media pump
+SILENCE = 32   # about -60 dBFS: paused players send zeros, quiet music stays above this
+
+
+def not_silent(pcm: bytes) -> bool:
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    return bool(samples) and (max(samples) > SILENCE or min(samples) < -SILENCE)
+
+
 class MediaPump:
     """Paces encoding on the monotonic clock (like the kernel driver's media clock),
     builds RTP packets with timestamps in samples and writes them to the channel.
@@ -433,6 +473,7 @@ class MediaPump:
         self.packets = 0
         self.skips = 0
         self.max_late_ms = 0.0
+        self.last_audio = 0.0     # monotonic time of the last non-silent block (AVRCP status)
 
     async def start(self, rtp_channel) -> None:
         await self.stop()
@@ -470,6 +511,8 @@ class MediaPump:
                 self.max_late_ms = late_ms
             while target - done >= PUSH_SAMPLES:
                 pcm = self.ring.read(pcm_bytes)
+                if not_silent(pcm):
+                    self.last_audio = now
                 if self.volume is not None:
                     pcm = self.volume.apply(pcm, PUSH_SAMPLES)
                 for payload, samples in self.encoder.push(pcm):
@@ -529,11 +572,13 @@ class Settings:
     stats: bool = True
     allow_unknown: bool = False   # accept connections from headsets we never paired
     audio_configured: bool = False  # VB-CABLE already made the default output once
+    absolute_volume: bool = True  # AVRCP: volume on the headset when it supports it
+    media_keys: bool = True       # AVRCP: headset buttons -> Windows media keys
     headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "capture",
-                "volume_endpoint", "headsets", "audio_configured")
+                "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys")
 
 
 def load_settings(path: str) -> Settings:
@@ -573,6 +618,7 @@ class SonatinaHost:
         self.lib = codec_lib or CodecLib()
         self.ring = PcmRing()
         self.volume = EndpointVolume(self.lib, settings.volume_endpoint)
+        self.remote = sonatina_avrcp.RemoteControl(self)
         self.connection: Connection | None = None
         self.session_task: asyncio.Task | None = None
         self.pump: MediaPump | None = None
@@ -631,13 +677,15 @@ class SonatinaHost:
     @staticmethod
     def configure_device(device: Device) -> None:
         device.sdp_service_records = {
-            0x00010001: make_audio_source_service_sdp_records(0x00010001)
+            0x00010001: make_audio_source_service_sdp_records(0x00010001),
+            **sonatina_avrcp.sdp_records(0x00010002, 0x00010003),
         }
         device.pairing_config_factory = lambda connection: PairingConfig(mitm=False)
 
     def attach(self, device: Device) -> None:
         self.device = device
         self.configure_device(device)
+        self.remote.listen(device)
         device.on("connection", self._on_connection)
 
     def _on_connection(self, connection: Connection) -> None:
@@ -655,6 +703,7 @@ class SonatinaHost:
         self.connection = connection
         self.peer = peer
         connection.on("disconnection", self._on_disconnection)
+        self.remote.start(connection)
         self.session_task = loop.create_task(self._session(connection, peer))
 
     def _on_disconnection(self, reason) -> None:
@@ -662,6 +711,7 @@ class SonatinaHost:
         self.connection = None
         self.peer = None
         self.state = "idle"
+        self.remote.stop()
         if self.pump:
             asyncio.get_running_loop().create_task(self.pump.stop())
         if self.session_task and not self.session_task.done():
@@ -734,6 +784,7 @@ class SonatinaHost:
                 log.info("media channel MTU %d", mtu_holder["mtu"])
             await stream.start()
             self.state = "streaming"
+            self.remote.on_streaming()
             if self.s.address != peer:   # the headset in use becomes the active one
                 self.s.address = peer
                 self._changed()
@@ -851,6 +902,13 @@ class SonatinaHost:
         if self.connection is not None and self.peer == norm_addr(address):
             await self.connection.disconnect()   # renegotiates with the new codec
 
+    async def set_option(self, name: str, value: bool) -> None:
+        """absolute_volume needs a reconnection to take effect, media_keys does not."""
+        setattr(self.s, name, value)
+        self._changed()
+        if name == "absolute_volume" and self.connection is not None:
+            await self.connection.disconnect()
+
     async def forget(self, address: str) -> None:
         address = norm_addr(address)
         if self.connection is not None and self.peer == address:
@@ -866,9 +924,16 @@ class SonatinaHost:
         self._changed()
         log.info("forgot %s", address)
 
+    def audio_age(self) -> float:
+        """Seconds since non-silent audio was streamed (AVRCP play/pause logic)."""
+        if self.pump is None or not self.pump.last_audio:
+            return 1e9
+        return time.perf_counter() - self.pump.last_audio
+
     async def follow_volume(self) -> None:
         while True:
             self.volume.poll()
+            self.remote.on_windows_volume()
             await asyncio.sleep(0.1)
 
     def stats_line(self) -> str:
@@ -883,6 +948,8 @@ class SonatinaHost:
         if self.state == "streaming" and p is not None and p.encoder is not None:
             vol = "" if self.volume.last is None else (
                 tr(" · muto", " · muted") if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
+            if self.remote.absolute and vol:
+                vol += tr(" (cuffie)", " (headset)")
             return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
         if self.discovering:
             return tr("Sonatina: ricerca cuffie...", "Sonatina: looking for headphones...")
