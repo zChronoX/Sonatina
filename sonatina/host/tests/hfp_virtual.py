@@ -508,6 +508,17 @@ def unit_checks():
     print('parser:', audio.stats())
     # zeros = link not sending (empty, concealed), junk = sync lost
     assert audio.frames_ok == 9 and audio.frames_empty == 1 and audio.sync_lost == 1, audio.stats()
+    # a frame that never arrives (lost USB/air packets, no zeros): the H2 sequence number
+    # tells, and it is concealed so that the microphone keeps its timing
+    got.clear()
+    miss = shfp.ScoAudio(lib.lib, 'msbc', Ring(), None, got.append, 0.0, lambda b: None)
+    stream = b''.join(frames[:4]) + b''.join(frames[5:])
+    for i in range(0, len(stream), 24):
+        miss.on_packet(hci.HCI_SynchronousDataPacket(connection_handle=1, packet_status=0,
+                                                     data_total_length=len(stream[i:i + 24]), data=stream[i:i + 24]))
+    pcm_out = sum(len(b) for b in got)
+    assert miss.frames_missing == 1 and miss.frames_ok == 9 and pcm_out == 10 * 120 * 3 * 4, (miss.stats(), pcm_out)
+    print('missing frame concealed:', miss.frames_missing)
     # capture device: the Hi-Fi Cable must not be taken for VB-CABLE (pops, 2026-11-20)
     apis = [{'name': 'MME'}, {'name': 'Windows WASAPI'}]
     devs = [{'name': 'CABLE Output (VB-Audio Virtual Cable)', 'max_input_channels': 2, 'hostapi': 0},
@@ -528,6 +539,75 @@ def unit_checks():
     print(f'limiter: quiet {quiet} (x{quiet / 3000:.2f}), shout {shout}, limited {loud.limited}')
     assert 5600 < quiet < 6400 and shout <= 29500 and loud.limited > 0
     assert shfp.transport_spec('usb:0BDA:8771', 2) == 'usb:0BDA:8771+sco=2'
+    # call clock servo: 150 ms left at call start are cut at once, then Windows running
+    # 0.4 % fast must not make the ring grow again. Driven like the link: a fixed amount
+    # of encoded audio every 10 ms (taking more samples per pull alone changes nothing:
+    # the 2026-11-20 call sat at +5000 ppm with the ring stuck at 35-70 ms)
+    assert shfp.fit_frames(bytes(range(40)), 10, 8) == bytes(range(12)) + bytes(range(16, 24)) + bytes(range(28, 40))
+    assert len(shfp.fit_frames(bytes(40), 10, 12)) == 48
+    for codec, n in (('cvsd', 160), ('msbc', 80)):
+        ring = sh.PcmRing(prefill_ms=0, max_ms=400)
+        ring.write(bytes(48 * 150 * 4))
+        servo = shfp.ScoAudio(lib.lib, codec, ring, None, got.append, 0.0, lambda b: None)
+        levels = []
+        for k in range(6000):                 # 60 s of 10 ms
+            ring.write(bytes(482 * 4))
+            if k % 100 == 0:
+                servo.tx_servo_at = 0         # "one second later"
+            servo._produce(n)                 # what the link takes in 10 ms
+            levels.append(ring.level_ms())
+        late = max(levels[4000:])
+        print(f'call servo ({codec}): {servo.tx_ppm:+.0f} ppm, ring max {max(levels)} ms, '
+              f'last 20 s max {late} ms, trims {servo.tx_trims}, underruns {ring.underruns}')
+        assert late <= 45 and servo.tx_trims == 1 and ring.underruns == 0 and 3000 < servo.tx_ppm <= 5000
+    # volume in a call: AVRCP absolute volume does not reach the voice channel, so the
+    # Windows volume must be applied in software while the call lasts (2026-11-20)
+    vol = sh.EndpointVolume(lib, 'CABLE')
+    vol.hardware, vol.reading = True, (False, 0.3, -20.0)
+    vol._update_target()
+    assert vol.target == vol.UNITY
+    vol.set_in_call(True)
+    assert vol.target == int(vol.UNITY * 0.1), vol.target
+    vol.set_in_call(False)
+    assert vol.target == vol.UNITY
+    print('volume in call: software gain -20 dB, back to the headset afterwards')
+    # tx gaps: one packet out per packet in; during a gap in what arrives the USB lane asks
+    # for packets itself, and late packets are held back once the lane is full (2026-11-20)
+    clock = [1000.0]
+    real_monotonic = shfp.time.monotonic
+    shfp.time.monotonic = lambda: clock[0]
+
+    class Lane:
+        def __init__(self):
+            self.pending, self.on_idle = [], None
+
+        def backlog(self):
+            return len(self.pending)
+    try:
+        lane, sent = Lane(), []
+        gap = shfp.ScoAudio(lib.lib, 'msbc', Ring(), None, got.append, 0.0, sent.append, lane=lane)
+        assert lane.on_idle == gap._idle_packet
+
+        def arrive():
+            gap.on_packet(hci.HCI_SynchronousDataPacket(connection_handle=2, packet_status=0,
+                                                        data_total_length=24, data=bytes(24)))
+        arrive()
+        assert len(sent) == 1 and lane.on_idle() is None        # just received: no gap
+        clock[0] += 0.05
+        made = lane.on_idle()
+        assert made is not None and made[:3] == bytes([2, 0, 24]) and len(made) == 27, made
+        assert gap.topups == 1 and gap.tx_buf == bytearray(gap.tx_buf)
+        lane.pending = [b''] * gap.MAX_BACKLOG
+        arrive()                                                # late burst, lane full
+        assert len(sent) == 1 and gap.held == 1
+        lane.pending = []
+        arrive()
+        assert len(sent) == 2 and lane.on_idle() is None
+        gap.close()
+        assert lane.on_idle is None
+        print(f'tx gaps: lane top-up {gap.topups}, held {gap.held}')
+    finally:
+        shfp.time.monotonic = real_monotonic
     assert shfp.transport_spec('usb:0BDA:8771+sco=1', 2) == 'usb:0BDA:8771+sco=1'
     assert shfp.transport_spec('android-netsim', 2) == 'android-netsim'
 

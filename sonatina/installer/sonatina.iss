@@ -86,7 +86,7 @@ Type: filesandordirs; Name: "{app}\dashboard"
 [Icons]
 Name: "{group}\Sonatina"; Filename: "{app}\Sonatina.exe"
 Name: "{group}\{cm:UninstallProgram,Sonatina}"; Filename: "{uninstallexe}"
-Name: "{userstartup}\Sonatina"; Filename: "{app}\Sonatina.exe"
+Name: "{userstartup}\Sonatina"; Filename: "{app}\Sonatina.exe"; Check: StartupWanted
 
 [Registry]
 Root: HKLM; Subkey: "Software\Sonatina"; ValueType: string; ValueName: "AdapterVid"; ValueData: "{code:GetVid}"; Flags: uninsdeletekey
@@ -216,6 +216,16 @@ begin
   Result := '';
   if (AdapterPage.SelectedValueIndex >= 0) and (AdapterPage.SelectedValueIndex < GetArrayLength(Pids)) then
     Result := Pids[AdapterPage.SelectedValueIndex];
+end;
+
+{ Start with Windows: always on a first install; on an update only if the user kept it on
+  (the Sonatina window and the tray remove Startup\Sonatina.lnk when it is turned off). }
+function StartupWanted(): Boolean;
+begin
+  if RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C2E7A-5B1D-4C55-9C2E-50A7A1A1C0DE}_is1') then
+    Result := FileExists(ExpandConstant('{userstartup}\Sonatina.lnk'))
+  else
+    Result := True;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

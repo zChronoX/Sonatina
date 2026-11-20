@@ -312,6 +312,9 @@ class RemoteControl:
         """Called after every poll of the Windows volume."""
         if not self.absolute:
             return
+        volume = self.host.volume
+        if volume is not None and volume.in_call:
+            return      # the voice channel ignores it; sent when the call ends (level kept)
         level = self.windows_level()
         if level is None or level == self.level:
             return

@@ -1,8 +1,25 @@
 # Sonatina
 
+[![CI](https://github.com/zChronoX/Sonatina/actions/workflows/host.yml/badge.svg)](https://github.com/zChronoX/Sonatina/actions/workflows/host.yml)
+![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
+![Codecs](https://img.shields.io/badge/codecs-LDAC%20%C2%B7%20aptX%20HD%20%C2%B7%20aptX%20%C2%B7%20AAC%20%C2%B7%20SBC-6E40C9)
+![Licence: MIT](https://img.shields.io/badge/licence-MIT-green)
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![C](https://img.shields.io/badge/C-codec%20DLL-A8B9CC?logo=c&logoColor=black)
+![C#](https://img.shields.io/badge/C%23-WinUI%203-512BD4?logo=dotnet&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white)
+![Bumble](https://img.shields.io/badge/Bumble-Bluetooth%20stack-4285F4?logo=bluetooth&logoColor=white)
+![libusb](https://img.shields.io/badge/libusb-WinUSB-555555)
+![PyInstaller](https://img.shields.io/badge/PyInstaller-onedir-555555)
+![Inno Setup](https://img.shields.io/badge/Inno%20Setup-6-264B99)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%20%2B%20release-2088FF?logo=githubactions&logoColor=white)
+
 Sonatina streams the sound of Windows to Bluetooth headphones in **LDAC** (up to 990 kbit/s),
 **aptX HD**, **aptX**, **AAC** or **SBC**, through a **dedicated USB Bluetooth adapter**, without any kernel driver of its own.
 Secure Boot stays on, so anti-cheat software (Riot Vanguard, ...) keeps working.
+
+<p align="center"><img src="docs/images/dashboard-home.png" alt="The Sonatina window (Home, dark theme)" width="820"></p>
 
 ```
 Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LDAC / aptX / AAC / SBC ──► USB adapter (WinUSB) ──► headphones
@@ -155,13 +172,14 @@ a second.
 |---|---|
 | `sonatina/host` | the app: host, tray, AVRCP, HFP, codec DLL (`codec/`), tests (`tests/`), tools |
 | `sonatina/dashboard` | the Sonatina window (C#, WinUI 3) |
+| `docs/images` | screenshots for this page |
 | `sonatina/installer` | Inno Setup script and the adapter setup helper |
 | `.github/workflows/host.yml` | tests and window build on every push, installer on `v*` tags |
 | `archive/` | earlier kernel driver, pure-Python prototype and notes, kept as reference (see `archive/README.md`) |
 
 ## Licences
 
-Sonatina code: see `LICENSE` (to be added). Third-party parts: Bumble (Apache-2.0), libusb (LGPL-2.1), libldac and
+Sonatina code: MIT, see `LICENSE`. Third-party parts: Bumble (Apache-2.0), libusb (LGPL-2.1), libldac and
 libsbc from AOSP (Apache-2.0), Fraunhofer FDK AAC (FDK AAC licence, see
 `sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libfreeaptx
 (LGPL-2.1+), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,

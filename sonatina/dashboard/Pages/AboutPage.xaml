@@ -60,7 +60,7 @@
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="8">
                     <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Componenti open source', En='Open source components'}" />
-                    <TextBlock Style="{StaticResource Secondary}" IsTextSelectionEnabled="True" Text="Bumble (Google) · Apache 2.0&#x0a;libusb · LGPL 2.1&#x0a;libldac (AOSP) · Apache 2.0&#x0a;Fraunhofer FDK AAC · FDK license&#x0a;libfreeaptx · LGPL 2.1&#x0a;SBC (BlueZ) · LGPL 2.1&#x0a;Windows App SDK / WinUI 3 · MIT" />
+                    <TextBlock Style="{StaticResource Secondary}" IsTextSelectionEnabled="True" Text="Bumble (Google) · Apache 2.0&#x0a;libusb · LGPL 2.1&#x0a;libldac (AOSP) · Apache 2.0&#x0a;Fraunhofer FDK AAC · FDK license&#x0a;libfreeaptx · LGPL 2.1&#x0a;libsbc (AOSP) · Apache 2.0&#x0a;Windows App SDK / WinUI 3 · MIT" />
                     <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Il microfono virtuale usa Hi-Fi Cable e la musica VB-CABLE, di VB-Audio (donationware).', En='The virtual microphone uses Hi-Fi Cable and music uses VB-CABLE, by VB-Audio (donationware).'}" />
                 </StackPanel>
             </Border>

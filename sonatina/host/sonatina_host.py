@@ -394,6 +394,16 @@ class PcmRing:
                 self.min_level = len(self.buf)
             return out
 
+    def trim_ms(self, keep_ms: int) -> None:
+        """Drops the oldest audio so that keep_ms are left (latency built up at call start)."""
+        with self.lock:
+            keep = RATE * keep_ms // 1000 * FRAME_BYTES
+            if len(self.buf) > keep:
+                drop = len(self.buf) - keep
+                drop -= drop % FRAME_BYTES
+                del self.buf[:drop]
+                self.dropped += drop
+
     def reset(self) -> None:
         """Drops what was captured while nothing was streaming (stale audio)."""
         with self.lock:
@@ -561,7 +571,8 @@ class EndpointVolume:
     VB-CABLE ignores its own volume slider (the signal on "CABLE Output" is always
     full scale), so the gain is applied here, before encoding. When the headset has
     AVRCP absolute volume, `hardware` is set: the headset does the attenuation and the
-    gain here only mutes."""
+    gain here only mutes. During a call (HFP) AVRCP volume does not reach the voice
+    channel, so `in_call` brings the software gain back."""
 
     UNITY = 65536
 
@@ -574,6 +585,8 @@ class EndpointVolume:
         self.last = None
         self.scalar: float | None = None   # Windows slider 0..1
         self.hardware = False               # volume done by the headset (AVRCP)
+        self.in_call = False                # HFP call: software gain even with `hardware`
+        self.reading: tuple[bool, float, float] | None = None   # last (mute, slider, dB)
         self.match = match
         self.retry_at = 0.0                 # next attempt to find the endpoint
         self.warned = False
@@ -662,18 +675,30 @@ class EndpointVolume:
             return
         if state is None:
             return
+        self.reading = state
         mute, scalar, db = state
         self.scalar = scalar
-        if mute or scalar <= 0.0:
-            self.target = 0
-        elif self.hardware:
-            self.target = self.UNITY
-        else:
-            self.target = min(self.UNITY, int(self.UNITY * 10 ** (db / 20)))
+        self._update_target()
         state = (mute, round(scalar * 100))
         if state != self.last:
             self.last = state
             log.info("volume %d%%%s", state[1], " (muted)" if mute else "")
+
+    def _update_target(self) -> None:
+        if self.reading is None:
+            return
+        mute, scalar, db = self.reading
+        if mute or scalar <= 0.0:
+            self.target = 0
+        elif self.hardware and not self.in_call:
+            self.target = self.UNITY
+        else:
+            self.target = min(self.UNITY, int(self.UNITY * 10 ** (db / 20)))
+
+    def set_in_call(self, on: bool) -> None:
+        """Call mode on/off: the gain follows Windows in software (no COM call here)."""
+        self.in_call = on
+        self._update_target()
 
     def apply(self, pcm: bytes, frames: int) -> bytes:
         g0, g1 = self.gain, self.target

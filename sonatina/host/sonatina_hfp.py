@@ -45,6 +45,7 @@ import dataclasses
 import logging
 import os
 import sys
+import struct
 import threading
 import time
 
@@ -188,6 +189,7 @@ class ScoOutLane:
             self.completed = usb1.TRANSFER_COMPLETED
         except ImportError:
             self.completed = 0
+        self.on_idle = None             # () -> HCI SCO payload or None: fills gaps (ScoAudio)
         self.original_on_packet = sink.on_packet
         self.original_terminate = sink.terminate
         sink.on_packet = self.on_packet
@@ -239,12 +241,24 @@ class ScoOutLane:
                 log.warning("SCO out transfer status %s", status)
         if self.pending:
             self._submit(transfer, self.pending.popleft())
+            return
+        payload = None
+        if self.on_idle is not None:
+            try:
+                payload = self.on_idle()
+            except Exception as error:
+                log.debug("SCO out idle: %r", error)
+        if payload:
+            self._submit(transfer, payload)
         else:
             self.free.append(transfer)
 
     def retarget(self, endpoint) -> None:
         self.address = endpoint.getAddress()
         self.mps = endpoint.getMaxPacketSize()
+
+    def backlog(self) -> int:
+        return len(self.pending)
 
     def stats(self) -> str:
         return (f"usb out {self.sent} done {self.done} failed {self.failed} pending {len(self.pending)}"
@@ -537,6 +551,27 @@ class Resampler:
             self.h = None
 
 
+def fit_frames(block: bytes, have: int, want: int, frame: int = 4) -> bytes:
+    """Drops or repeats single frames, evenly spaced, so that `have` frames become `want`
+    (a few per 480 at most: the clock servo; inaudible after the voice-band filter)."""
+    if have == want or have <= 0:
+        return block
+    n = abs(have - want)
+    cuts = [have * (i + 1) // (n + 1) for i in range(n)]
+    out = bytearray()
+    prev = 0
+    for c in cuts:
+        if have > want:                     # drop frame c
+            out += block[prev * frame:c * frame]
+            prev = c + 1
+        else:                               # repeat frame c
+            out += block[prev * frame:(c + 1) * frame]
+            out += block[c * frame:(c + 1) * frame]
+            prev = c + 1
+    out += block[prev * frame:]
+    return bytes(out)
+
+
 def peak(pcm: bytes) -> int:
     import array
     a = array.array("h")
@@ -607,12 +642,35 @@ class ScoAudio:
 
     rx: SCO payload -> (mSBC frames ->) 8/16 kHz PCM -> 48 kHz stereo -> gain -> mic_sink
     tx: Windows audio ring (48 kHz stereo) -> volume -> 8/16 kHz mono -> (mSBC ->) SCO,
-        exactly as many bytes as were received (the headset paces the link)."""
+        exactly as many bytes as were received (the headset paces the link).
+
+    Clock servo (tx): the headset's SCO clock and the Windows audio clock drift apart, and
+    the call starts with whatever A2DP left in the ring, so without help the ring grew to
+    120 ms during calls (2026-11-20). Once a second the lowest ring level is compared with
+    TX_TARGET_MS (PI control, like the A2DP pump) and the number of Windows samples taken per 10 ms block is changed by up
+    to 0.5 % (a few cents of pitch, inaudible on 8/16 kHz voice). Far above the target
+    (call start) the excess is cut at once.
+
+    Gaps (tx top-up): normally one packet goes out per packet received, which follows the
+    headset clock exactly. Incoming packets are sometimes lost or held back for 50-150 ms
+    (2026-11-20), and then nothing would go out while the headset keeps playing. With the
+    USB lane, when it is about to go idle and nothing has arrived for GAP_S, a packet is
+    made on the spot (paced by the USB frames, the right rate); packets arriving late
+    later are not sent once the lane already holds MAX_BACKLOG of them. A first version
+    that topped up by time over 2 s windows overfilled the lane (370 drops)."""
 
     TX_BLOCK = 480        # 10 ms of 48 kHz pulled from the Windows ring at a time
+    TX_TARGET_MS = 10     # margin aimed at: lowest Windows ring level left after a read
+    TX_PPM_PER_MS = 100   # servo gain: 10 ms of error -> 0.1 %
+    TX_PPM_PER_MS_S = 3   # integral: learns the steady clock offset (critically damped)
+    TX_MAX_PPM = 5000     # +-0.5 %
+    TX_TRIM_MS = 80       # above this the excess is dropped at once
+    GAP_S = 0.030         # nothing received for this long: the lane asks for packets
+    MAX_BACKLOG = 8       # packets queued in the lane beyond the 8 in flight (24 ms)
     LIMIT = 29000         # microphone ceiling after gain (headsets peak at 30000 raw, 2026-11-20)
 
-    def __init__(self, lib, codec: str, ring, volume, mic_sink, mic_gain_db: float, send) -> None:
+    def __init__(self, lib, codec: str, ring, volume, mic_sink, mic_gain_db: float, send,
+                 lane=None) -> None:
         self.lib = lib
         self.codec = codec
         self.ring = ring
@@ -628,6 +686,9 @@ class ScoAudio:
         self.down = Resampler(lib, RATE, self.rate, 2, 1)
         self.msbc = lib.sont_msbc_create() if codec == "msbc" else None
         self.rx_buf = bytearray()
+        self.rx_seq: int | None = None  # mSBC: H2 sequence number expected next (0..3)
+        self.rx_gap_s = 0.0             # silence on the link before the current packet
+        self.frames_missing = 0         # mSBC frames that never arrived (concealed)
         self.tx_buf = bytearray()       # coded bytes ready for the link
         self.tx_pcm = bytearray()       # mSBC: 16 kHz samples waiting for a full frame
         self.rx_packets = 0
@@ -644,12 +705,32 @@ class ScoAudio:
         self.started = time.monotonic()
         self.closed = False
         self.dump: ScoDump | None = None
+        self.tx_ppm = 0.0               # servo: speed of the Windows side vs. the headset
+        self.tx_drift = 0.0             # servo integral term (ppm)
+        self.tx_phase = 0.0             # fractional samples carried between blocks
+        self.tx_underruns = getattr(ring, "underruns", 0)
+        self.tx_trims = 0
+        self.tx_servo_at = time.monotonic() + 1.0
+        self.byte_rate = 8000 if codec == "msbc" else 16000   # SCO air rate, both directions
+        self.lane = lane
+        self.last_rx = time.monotonic()
+        self.packet_len = 0             # size of the incoming packets (= the outgoing ones)
+        self.handle = None
+        self.topups = 0                 # packets made by the lane during gaps
+        self.held = 0                   # packets not sent: the lane was already full
+        if lane is not None:
+            lane.on_idle = self._idle_packet
+        self.silent_pulls = 0           # 10 ms blocks of silence: the Windows ring was empty
+        self.win = self._new_window()
 
     # -- receive ---------------------------------------------------------------
     def on_packet(self, packet) -> None:
         if self.closed:
             return
         data = bytes(packet.data)
+        now = time.monotonic()
+        if data:
+            self.rx_gap_s = max(self.rx_gap_s, now - self.last_rx)
         self.rx_packets += 1
         self.rx_bytes += len(data)
         if self.dump is not None:
@@ -661,7 +742,15 @@ class ScoAudio:
         except Exception as error:   # never let audio errors reach the HCI layer
             log.debug("sco rx: %r", error)
         if data:
-            self._transmit(len(data), getattr(packet, "connection_handle", None))
+            self.last_rx = now
+            self.packet_len = len(data)
+            self.handle = getattr(packet, "connection_handle", None)
+            self.win["rx"] += 1
+            if self.lane is not None and self.lane.backlog() >= self.MAX_BACKLOG:
+                self.held += 1                  # late burst: the gap was already filled
+                self.win["held"] += 1
+            else:
+                self._transmit(len(data), self.handle)
 
     def _receive(self, data: bytes, status: int) -> None:
         if self.codec == "msbc":
@@ -696,6 +785,18 @@ class ScoAudio:
     def lib_has_gain(self) -> bool:
         return hasattr(self.lib, "sont_pcm_gain")
 
+    def _missing_frames(self, seq: int) -> int:
+        """mSBC frames that never arrived before this one: the H2 sequence number says how
+        many modulo 4, the time without packets says how many times 4 more (long gaps)."""
+        expected, self.rx_seq = self.rx_seq, (seq + 1) % 4
+        if expected is None:
+            return 0
+        short = (seq - expected) % 4
+        gap, self.rx_gap_s = self.rx_gap_s, 0.0
+        # packets come in USB bursts ~24 ms apart; beyond that, 30 ms per 4 frames missing
+        laps = max(0, round((gap - 0.024 - short * 0.0075) / 0.030)) if gap > 0.060 else 0
+        return min(short + 4 * laps, 40)
+
     def _decode_msbc(self, data: bytes) -> bytes:
         buf = self.rx_buf
         buf += data
@@ -703,6 +804,10 @@ class ScoAudio:
         pcm = ctypes.create_string_buffer(MSBC_SAMPLES * 2)
         while len(buf) >= MSBC_FRAME:
             if buf[0] == 0x01 and buf[1] in H2_SYNC and buf[2] == 0xAD:
+                for _ in range(self._missing_frames(H2_SYNC.index(buf[1]))):
+                    self.lib.sont_msbc_decode(self.msbc, None, pcm)     # concealment
+                    self.frames_missing += 1
+                    out += pcm.raw
                 ok = self.lib.sont_msbc_decode(self.msbc, bytes(buf[2:59]), pcm) == 0
                 if ok:
                     self.frames_ok += 1
@@ -724,6 +829,8 @@ class ScoAudio:
             if not empty:
                 self.sync_lost += 1
             lost = max(1, round(skipped / MSBC_FRAME)) if skipped >= MSBC_FRAME // 2 else 0
+            if lost and self.rx_seq is not None:
+                self.rx_seq = (self.rx_seq + lost) % 4   # those frames are concealed below
             for _ in range(lost):
                 self.lib.sont_msbc_decode(self.msbc, None, pcm)
                 if empty:
@@ -734,11 +841,85 @@ class ScoAudio:
         return bytes(out)
 
     # -- transmit --------------------------------------------------------------
+    def _idle_packet(self) -> bytes | None:
+        """The USB lane would go idle: during a gap in what arrives, a packet made now
+        (HCI SCO payload: handle, length, data). None otherwise."""
+        if self.closed or self.handle is None or not self.packet_len:
+            return None
+        if time.monotonic() - self.last_rx < self.GAP_S:
+            return None
+        data = self._produce(self.packet_len)
+        self.topups += 1
+        self.win["topups"] += 1
+        return struct.pack("<HB", self.handle & 0x0FFF, len(data)) + data
+
+    @staticmethod
+    def _new_window() -> dict:
+        return {"t0": time.monotonic(), "rx": 0, "topups": 0, "held": 0, "silent": 0,
+                "ring_min": None, "ring_max": 0}
+
+    def window_stats(self) -> str:
+        """What happened since the last call (rates and extremes), for the periodic log."""
+        w, self.win = self.win, self._new_window()
+        secs = max(0.001, time.monotonic() - w["t0"])
+        nominal = self.byte_rate / 24 if self.rx_bytes == 0 else self.byte_rate * self.rx_packets / self.rx_bytes
+        return (f"last {secs:.0f} s: rx {w['rx'] / secs:.0f}/{nominal:.0f} pkt/s, top-ups {w['topups']},"
+                f" held {w['held']},"
+                f" silent blocks {w['silent']}, windows ring {w['ring_min']}-{w['ring_max']} ms")
+
+    def _servo(self) -> None:
+        """Once a second: speed the Windows side up or down to keep its ring near the target."""
+        take_min = getattr(self.ring, "take_min_ms", None)
+        if take_min is None:               # test rings: no servo
+            return
+        now = time.monotonic()
+        if now < self.tx_servo_at:
+            return
+        self.tx_servo_at = now + 1.0
+        low = take_min()                   # lowest fill left after a read: the safety margin
+        underruns = getattr(self.ring, "underruns", 0)
+        if underruns != self.tx_underruns:  # ran dry: no margin at all
+            self.tx_underruns = underruns
+            low = 0.0
+        if low is None:                    # no read yet (first second): the fill itself
+            level = getattr(self.ring, "level_ms", None)
+            if level is None:
+                return
+            low = float(level())
+        trim = getattr(self.ring, "trim_ms", None)
+        if low > self.TX_TRIM_MS and trim is not None:
+            trim(self.TX_TARGET_MS + self.TX_BLOCK * 1000 // RATE)
+            self.tx_trims += 1
+            low = self.TX_TARGET_MS
+        error = low - self.TX_TARGET_MS
+        limit = self.TX_MAX_PPM
+        self.tx_drift = max(-limit, min(limit, self.tx_drift + error * self.TX_PPM_PER_MS_S))
+        self.tx_ppm = max(-limit, min(limit, self.tx_drift + error * self.TX_PPM_PER_MS))
+
     def _pull_windows(self) -> bytes:
-        """10 ms of Windows audio, at the link rate, mono."""
-        block = self.ring.read(self.TX_BLOCK * 4)
+        """About 10 ms of Windows audio (a few samples more or less: servo), at the link
+        rate, mono."""
+        self._servo()
+        self.tx_phase += self.TX_BLOCK * self.tx_ppm / 1e6
+        extra = int(self.tx_phase)
+        self.tx_phase -= extra
+        frames = self.TX_BLOCK + extra
+        block = self.ring.read(frames * 4)
+        if getattr(self.ring, "playing", True) is False:    # empty: silence was returned
+            self.silent_pulls += 1
+            self.win["silent"] += 1
+        level = getattr(self.ring, "level_ms", None)
+        if level is not None:
+            ms = level()
+            w = self.win
+            w["ring_min"] = ms if w["ring_min"] is None else min(w["ring_min"], ms)
+            w["ring_max"] = max(w["ring_max"], ms)
         if self.volume is not None:
-            block = self.volume.apply(block, self.TX_BLOCK)
+            block = self.volume.apply(block, frames)
+        if frames != self.TX_BLOCK:
+            # the link asks for a fixed amount of audio: squeeze the block back to 10 ms,
+            # otherwise taking more samples would only mean fewer pulls (no speed change)
+            block = fit_frames(block, frames, self.TX_BLOCK)
         out = self.down.process(block)
         self._pulls = getattr(self, "_pulls", 0) + 1
         if self._pulls % 8 == 1:
@@ -748,6 +929,15 @@ class ScoAudio:
         return out
 
     def _transmit(self, n: int, handle) -> None:
+        out = self._produce(n)
+        try:
+            self.send(out)
+            self.tx_packets += 1
+        except Exception as error:
+            log.debug("sco tx: %r", error)
+
+    def _produce(self, n: int) -> bytes:
+        """The next n bytes for the link (encoded Windows audio)."""
         if self.codec == "msbc":
             pcm = ctypes.create_string_buffer(MSBC_SAMPLES * 2)
             frame = ctypes.create_string_buffer(MSBC_FRAME)
@@ -766,11 +956,7 @@ class ScoAudio:
         del self.tx_buf[:n]
         if self.dump is not None:
             self.dump.tx(out)
-        try:
-            self.send(out)
-            self.tx_packets += 1
-        except Exception as error:
-            log.debug("sco tx: %r", error)
+        return out
 
     # -- status ----------------------------------------------------------------
     def frame_quality(self) -> float | None:
@@ -786,11 +972,16 @@ class ScoAudio:
         return (f"{self.codec} rx {self.rx_packets / secs:.0f} pkt/s ({self.rx_bytes / secs / 1000:.1f} kB/s)"
                 f" tx {self.tx_packets} bad-status {self.rx_bad_status}"
                 + (f" frames ok {self.frames_ok} lost {self.frames_lost} ({q:.0%}, sync {self.sync_lost},"
-                   f" crc {self.decode_errors}, empty {self.frames_empty})" if q is not None else "")
-                + f" mic peak {self.mic_peak} (limited {self.limited}) out peak {self.tx_peak}")
+                   f" crc {self.decode_errors}, empty {self.frames_empty}, missing {self.frames_missing})"
+                   if q is not None else "")
+                + f" mic peak {self.mic_peak} (limited {self.limited}) out peak {self.tx_peak}"
+                + f" servo {self.tx_ppm:+.0f} ppm trims {self.tx_trims} top-ups {self.topups} held {self.held}"
+                + f" silent blocks {self.silent_pulls}")
 
     def close(self) -> None:
         self.closed = True
+        if self.lane is not None and self.lane.on_idle == self._idle_packet:
+            self.lane.on_idle = None
         if self.dump is not None:
             self.dump.write()
         self.up.close()
@@ -1045,6 +1236,7 @@ class HfpGateway:
         ag.on("slc_complete", lambda: self._slc_complete(ag))
         ag.on("hang_up", self._on_hang_up)
         ag.on("answer", self._on_answer)
+        ag.on("speaker_volume", self._on_speaker_volume)
         self.ag = ag
 
     def _slc_complete(self, ag) -> None:
@@ -1138,6 +1330,15 @@ class HfpGateway:
             log.info("HFP: hung up from the headset: back to music until the app closes the microphone")
             self.dismissed = True
             asyncio.get_running_loop().create_task(self.leave_call())
+
+    def _on_speaker_volume(self, level: int) -> None:
+        """Volume buttons of the headset during a call (AT+VGS, 0..15): moves Windows."""
+        volume = self.host.volume
+        if not self.in_call or volume is None:
+            return
+        level = max(0, min(15, int(level)))
+        log.info("HFP: headset volume %d/15", level)
+        volume.set_scalar(level / 15, unmute=level > 0)
 
     def _on_answer(self) -> None:
         if not self.in_call and self.dismissed:
@@ -1292,9 +1493,12 @@ class HfpGateway:
         handle = link.handle
         self.host.ring.set_prefill(30)
         self.host.ring.reset()
+        if self.host.volume is not None:
+            self.host.volume.set_in_call(True)    # AVRCP volume does not reach the voice channel
         self.audio = ScoAudio(self.lib.lib, codec, self.host.ring, self.host.volume, sink,
                               float(self.s.mic_gain_db),
-                              lambda sdu: host.send_sco_sdu(connection_handle=handle, sdu=sdu))
+                              lambda sdu: host.send_sco_sdu(connection_handle=handle, sdu=sdu),
+                              lane=self.lane)
         seconds = ScoDump.seconds_from_env()
         if seconds > 0:
             self.audio.dump = ScoDump(codec, seconds)
@@ -1326,6 +1530,8 @@ class HfpGateway:
         if self.audio is not None:
             self.audio.close()
             self.audio = None
+        if self.host.volume is not None:
+            self.host.volume.set_in_call(False)
         if self.mic_out is not None:
             self.mic_out.stop()
             self.mic_out = None
@@ -1338,9 +1544,13 @@ class HfpGateway:
         loop = asyncio.get_running_loop()
         next_lookup = 0.0
         msbc_check_at = None
+        previous = loop.time()
         while True:
             await asyncio.sleep(self.WATCH_S)
             now = loop.time()
+            # how late this turn is, including the work of the last one (COM calls...)
+            self._lag_ms = max(getattr(self, "_lag_ms", 0.0), (now - previous - self.WATCH_S) * 1000)
+            previous = now
             if sys.platform == "win32" and now >= getattr(self, "_next_output_check", 0.0):
                 self._next_output_check = now + 30.0
                 try:
@@ -1370,11 +1580,16 @@ class HfpGateway:
                 if self.in_call and self.audio is not None and now >= getattr(self, "_next_stats", 0.0):
                     first = now - self.audio.started < 60
                     if getattr(self, "_stats_shown", False):
-                        log.info("call: %s, %s, windows ring %d ms underruns %d", self.audio.stats(),
+                        log.info("call: %s; %s, %s, windows ring %d ms underruns %d dropped %d smp,"
+                                 " loop lag max %.0f ms", self.audio.window_stats(), self.audio.stats(),
                                  self.lane.stats() if self.lane else "-", self.host.ring.level_ms(),
-                                 self.host.ring.underruns)
+                                 self.host.ring.underruns, self.host.ring.dropped // 4,
+                                 self._take_lag_ms())
+                    else:
+                        self.audio.window_stats()          # start the first window now
+                        self._take_lag_ms()
                     self._stats_shown = True
-                    self._next_stats = now + (10.0 if first else 60.0)
+                    self._next_stats = now + (10.0 if first else 30.0)
                 elif not self.in_call:
                     self._stats_shown = False
                     self._next_stats = 0.0
@@ -1385,6 +1600,11 @@ class HfpGateway:
             except Exception as error:      # keep watching whatever happens
                 log.exception("HFP: %r", error)
                 await asyncio.sleep(2.0)
+
+    def _take_lag_ms(self) -> float:
+        """Worst event loop delay seen since the last call (a stalled loop loses SCO data)."""
+        lag, self._lag_ms = getattr(self, "_lag_ms", 0.0), 0.0
+        return lag
 
     def _wanted(self, now: float) -> bool:
         if self.s.hfp_mode == "on":
