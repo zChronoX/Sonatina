@@ -6,8 +6,6 @@ on:
     paths:
       - 'sonatina/host/**'
       - 'sonatina/installer/**'
-      - 'sonatina/driver/src/codec_*'
-      - 'sonatina/driver/third_party/**'
       - '.github/workflows/host.yml'
     tags: [ 'v*' ]
   workflow_dispatch:

@@ -6,8 +6,9 @@ Nessun driver kernel nostro: Secure Boot resta attivo.
 ## File
 - `sonatina_host.py`: il programma (cattura, jitter buffer, pump media con timer ad alta risoluzione,
   RTP con timestamp in campioni, AVDTP/A2DP via Bumble, riconnessione automatica).
-- `codec/sonatina_codec.dll`: encoder SBC + LDAC (stesso codice C del driver kernel), compilato con
-  mingw-w64 da `codec/build_codec.sh` (`codec/sonatina_codec.c` è l'interfaccia C).
+- `codec/sonatina_codec.dll`: SBC, LDAC, AAC (FDK), aptX, mSBC e ricampionatore, compilato con
+  mingw-w64 da `codec/build_codec.sh` (`codec/sonatina_codec.c` è l'interfaccia C; `codec/src` i
+  wrapper SBC/LDAC nati per il driver kernel, ora in `archive/`; `codec/third_party` le librerie).
 - `tests/e2e_virtual.py`: prova completa in-process con controller virtuali Bumble e "cuffie finte"
   (LDAC SQ: 125 pacchetti/s, payload 661 byte, timestamp +384; SBC decodificato: 1 kHz, SNR 69 dB;
   fallback SBC se manca LDAC; riconnessione dopo disconnessione).

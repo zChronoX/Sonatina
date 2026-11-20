@@ -5,11 +5,11 @@ __pycache__/
 .venv/
 sonatina/out.wav
 
-# Driver build & NuGet packages
-sonatina/driver/build/
-sonatina/driver/packages/
-sonatina/driver/tests/build/
-sonatina/service/build/
+# Archived kernel driver build & NuGet packages
+archive/kernel-driver/driver/build/
+archive/kernel-driver/driver/packages/
+archive/kernel-driver/driver/tests/build/
+archive/kernel-driver/service/build/
 sonatina/dist/
 sonatina/build/
 *.spec
@@ -24,3 +24,7 @@ sonatina/build/
 # local notes / inventories (not committed)
 local/
 /build/
+
+# Claude working files (handoff copies, outputs)
+HANDOFF.md
+Claude outputs/

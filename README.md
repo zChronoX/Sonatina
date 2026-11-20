@@ -11,7 +11,9 @@ Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LD
 - Works with any A2DP headphones: the best codec they support, in this order: LDAC, aptX HD, aptX,
   AAC, SBC.
 - Several headphones: pair them once, Sonatina uses whichever one you switch on.
-- Follows the Windows volume and mute.
+- Follows the Windows volume and mute; headphone buttons control the player.
+- The headphone **microphone** works in Windows apps (Discord, Teams...): when an app opens it,
+  Sonatina switches the headphones to call mode by itself and back to music afterwards.
 - Runs in the notification area and starts with Windows.
 
 ## Requirements
@@ -26,6 +28,9 @@ Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LD
   | UGREEN BT 6.0 | Barrot | `33FA:0012` | not yet (needs a fix) |
 
   Other Realtek RTL8761B/C dongles should work too (the firmware is included).
+- For the microphone (optional): **Hi-Fi Cable** from vb-audio.com/Cable (free,
+  `HiFiCableAsioBridgeSetup`). Set **Hi-Fi Cable Output** as the default microphone; keep
+  **CABLE Input** as the default output. VB-CABLE A+B (paid) or the Steam microphone work too.
 
 ## Install
 
@@ -44,8 +49,8 @@ rename it (Settings → System → Sound → CABLE Input → Rename), for exampl
 
 ## Using it
 
-The icon in the notification area shows the state: **blue** streaming, **grey** waiting for the
-headphones, **red** adapter missing or error. Hover it to see the headphones, codec and volume.
+The icon in the notification area shows the state: **blue** streaming, **green** call mode
+(microphone live), **grey** waiting for the headphones, **red** adapter missing or error. Hover it to see the headphones, codec and volume.
 
 Right-click menu:
 
@@ -54,6 +59,7 @@ Right-click menu:
 | Headphones | switch between paired headphones, search and pair new ones, forget the current ones |
 | Audio quality | LDAC 990 / 660 / 330 kbit/s, aptX HD, aptX, AAC or SBC, remembered per headphones |
 | Volume handled by the headphones | the Windows volume moves the headphones' own volume and their volume buttons move the Windows slider (AVRCP absolute volume, when supported) |
+| Headphone microphone | **Automatic** (call mode while an app uses the microphone), **Always on**, **Off**; HD voice (mSBC) |
 | Low latency (games, video) | smaller buffers and packets; the tooltip shows the estimated delay to your ears |
 | Headphone buttons | play/pause, next and previous control the current player (Spotify, browsers, Media Player...) |
 | Restart connection | reconnects the headphones |
@@ -79,12 +85,17 @@ no longer need it, and pick your normal output in the sound settings.
   many have a game mode that cuts it). Turn on *Low latency*, prefer aptX or SBC, and if your
   player has an audio delay setting (VLC, mpv) use the delay shown in the tooltip.
 - **Choppy sound at LDAC 990**: choose LDAC 660 or 330 (weak radio link) in *Audio quality*.
+- **Pops after installing Hi-Fi Cable**: update to 0.5.0 or later (older versions captured the
+  wrong cable). The Windows output must stay "CABLE Input"; Sonatina puts it back by itself.
+- **Microphone silent in an app**: the app must use "Hi-Fi Cable Output"; the tray icon turns
+  green while the app holds the microphone. The Windows sound settings page does not count.
 - Attach `sonatina.log` when reporting a problem.
 
 ## Limits (for now)
 
-- No microphone / calls (HFP).
-- Headphone buttons (play/pause/next) and headphone-side volume (AVRCP) are not handled yet.
+- In call mode the headphones only get phone-quality sound (Bluetooth HFP): HD voice
+  (mSBC 16 kHz) when the headphones support it, CVSD 8 kHz otherwise. That is a limit of
+  Bluetooth calls, the same on phones.
 - No aptX Adaptive / Lossless (no open encoder). AAC is limited by the headphones' packet size
   (about 220 kbit/s on the CMF, 256 on most).
 - Audio is ~200–300 ms late (Bluetooth + buffers); Windows does not know it, so video lip-sync can
@@ -105,8 +116,19 @@ applies the Windows volume, encodes with `sonatina_codec.dll` (libldac and libsb
 monotonic media clock and sends RTP over AVDTP/L2CAP with [Bumble](https://github.com/google/bumble),
 a user-mode Bluetooth host that drives the adapter through WinUSB.
 
-The repository also contains an earlier **kernel driver** (`sonatina/driver`). It works, but it
-needs test signing with Secure Boot off, so it is kept only as a reference.
+For the microphone, `sonatina_hfp.py` keeps a Hands-Free (HFP Audio Gateway) connection next to
+A2DP; when an app opens the virtual microphone it suspends A2DP, opens an eSCO link over the
+adapter's isochronous USB endpoints and moves voice both ways (CVSD or mSBC, resampled in
+`sonatina_codec.dll`). Notes on the USB details are at the top of that file.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `sonatina/host` | the app: host, tray, AVRCP, HFP, codec DLL (`codec/`), tests (`tests/`), tools |
+| `sonatina/installer` | Inno Setup script and the adapter setup helper |
+| `.github/workflows/host.yml` | tests on every push, installer on `v*` tags |
+| `archive/` | earlier kernel driver, pure-Python prototype and notes, kept as reference (see `archive/README.md`) |
 
 ## Licences
 
@@ -114,5 +136,5 @@ Sonatina code: see `LICENSE` (to be added). Third-party parts: Bumble (Apache-2.
 libsbc from AOSP (Apache-2.0), Fraunhofer FDK AAC (FDK AAC licence, see
 `sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libfreeaptx
 (LGPL-2.1+), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
-redistributable), PyInstaller bootloader (GPL with exception). VB-CABLE is downloaded from
-vb-audio.com and is not part of this project. "Bluetooth", "LDAC", "aptX" and "AAC" are trademarks of their owners.
+redistributable), PyInstaller bootloader (GPL with exception). VB-CABLE and Hi-Fi Cable
+come from vb-audio.com and are not part of this project. "Bluetooth", "LDAC", "aptX" and "AAC" are trademarks of their owners.
