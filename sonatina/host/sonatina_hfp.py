@@ -37,6 +37,7 @@ USB notes (found with tools/hfp_probe.py, 2026-11-20, Realtek RTL8761BUV):
 
 from __future__ import annotations
 
+import array
 import asyncio
 import collections
 import ctypes
@@ -99,6 +100,7 @@ def use_bundled_libusb() -> str | None:
 
 
 _SAFE_ISO = False
+ISO_TRACE: list | None = None     # (time, packet index, status, bytes) of SCO IN packets while dumping
 
 
 def install_safe_iso() -> None:
@@ -130,6 +132,9 @@ def install_safe_iso() -> None:
                     log.warning("iso packet %d: %d bytes > slot %d (clamped)", i, actual, slot)
                 actual = slot
             start = i * slot
+            trace = ISO_TRACE
+            if trace is not None:
+                trace.append((time.monotonic(), i, d.status, d.actual_length, slot))
             yield d.status, bytearray(data[start:start + actual])
 
     usb1.USBTransfer.iterISO = iterISO
@@ -151,7 +156,7 @@ class ScoOutLane:
     """SCO packets to the controller on their own isochronous transfers, several in flight
     (continuous stream), while ACL and commands keep Bumble's queue."""
 
-    IN_FLIGHT = 4
+    IN_FLIGHT = 8             # 24 ms queued in WinUSB: one IN burst; 4 left gaps (drops, 2026-11-20)
     MAX_PENDING = 24          # ~72 ms of 48-byte packets: older ones are dropped
 
     @classmethod
@@ -539,6 +544,63 @@ def peak(pcm: bytes) -> int:
     return max((abs(v) for v in a), default=0)
 
 
+# ----------------------------------------------------------------------------- SCO dump
+class ScoDump:
+    """Raw record of the first seconds of a call, for offline analysis (mSBC debugging).
+    On with the environment variable SONATINA_SCO_DUMP=<seconds>. Text file in the app
+    folder: 'R t status hex' received SCO packets, 'T t hex' sent ones, 'I t index status
+    actual slot' USB isochronous IN packets."""
+
+    def __init__(self, codec: str, seconds: float) -> None:
+        global ISO_TRACE
+        self.codec = codec
+        self.seconds = seconds
+        self.t0 = time.monotonic()
+        self.lines: list[str] = []
+        self.done = False
+        ISO_TRACE = []
+
+    @staticmethod
+    def seconds_from_env() -> float:
+        try:
+            return float(os.environ.get("SONATINA_SCO_DUMP", "0") or 0)
+        except ValueError:
+            return 0.0
+
+    def active(self) -> bool:
+        if self.done:
+            return False
+        if time.monotonic() - self.t0 > self.seconds:
+            self.write()
+            return False
+        return True
+
+    def rx(self, status: int, data: bytes) -> None:
+        if self.active():
+            self.lines.append(f"R {time.monotonic() - self.t0:.4f} {status} {data.hex()}")
+
+    def tx(self, data: bytes) -> None:
+        if self.active():
+            self.lines.append(f"T {time.monotonic() - self.t0:.4f} {data.hex()}")
+
+    def write(self) -> None:
+        global ISO_TRACE
+        if self.done:
+            return
+        self.done = True
+        trace, ISO_TRACE = ISO_TRACE or [], None
+        lines = self.lines + [f"I {t - self.t0:.4f} {i} {st} {n} {slot}" for t, i, st, n, slot in trace
+                              if t >= self.t0]
+        try:
+            import sonatina_host
+            path = os.path.join(sonatina_host.APP_DIR, f"sco_dump_{self.codec}_{time.strftime('%H%M%S')}.txt")
+            with open(path, "w", encoding="ascii") as f:
+                f.write("\n".join(lines) + "\n")
+            log.info("SCO dump: %d lines -> %s", len(lines), path)
+        except Exception as error:
+            log.warning("SCO dump not written: %r", error)
+
+
 # ----------------------------------------------------------------------------- SCO audio
 class ScoAudio:
     """Both directions of an open SCO link.
@@ -548,6 +610,7 @@ class ScoAudio:
         exactly as many bytes as were received (the headset paces the link)."""
 
     TX_BLOCK = 480        # 10 ms of 48 kHz pulled from the Windows ring at a time
+    LIMIT = 29000         # microphone ceiling after gain (headsets peak at 30000 raw, 2026-11-20)
 
     def __init__(self, lib, codec: str, ring, volume, mic_sink, mic_gain_db: float, send) -> None:
         self.lib = lib
@@ -558,6 +621,8 @@ class ScoAudio:
         self.send = send
         self.rate = 16000 if codec == "msbc" else 8000
         self.gain_q16 = int(65536 * 10 ** (mic_gain_db / 20))
+        self.cur_gain = self.gain_q16     # limiter: lowered at once on peaks, back slowly
+        self.limited = 0
         self.up = Resampler(lib, self.rate, RATE, 1, 2)
         self.down = Resampler(lib, RATE, self.rate, 2, 1)
         self.msbc = lib.sont_msbc_create() if codec == "msbc" else None
@@ -574,8 +639,10 @@ class ScoAudio:
         self.sync_lost = 0
         self.decode_errors = 0
         self.mic_peak = 0
+        self.frames_empty = 0           # mSBC: stretches of zeros (link not sending yet)
         self.started = time.monotonic()
         self.closed = False
+        self.dump: ScoDump | None = None
 
     # -- receive ---------------------------------------------------------------
     def on_packet(self, packet) -> None:
@@ -584,6 +651,8 @@ class ScoAudio:
         data = bytes(packet.data)
         self.rx_packets += 1
         self.rx_bytes += len(data)
+        if self.dump is not None:
+            self.dump.rx(getattr(packet, "packet_status", 0), data)
         if getattr(packet, "packet_status", 0):
             self.rx_bad_status += 1
         try:
@@ -601,14 +670,25 @@ class ScoAudio:
         if not pcm:
             return
         out = self.up.process(pcm)
-        if self.gain_q16 != 65536 and self.lib_has_gain():
+        if not out:
+            return
+        samples = array.array("h")
+        samples.frombytes(out)
+        level = max(max(samples), -min(samples))
+        target = self.gain_q16
+        if level * target > self.LIMIT << 16:         # would clip: just enough gain, now
+            target = max(self.gain_q16 // 4, (self.LIMIT << 16) // level)
+            self.limited += 1
+        if target > self.cur_gain:                     # release: about 6 dB in 0.5 s
+            target = min(target, self.cur_gain + max(1, self.cur_gain // 150))
+        if (target != 65536 or self.cur_gain != 65536) and self.lib_has_gain():
             buf = ctypes.create_string_buffer(out, len(out))
-            self.lib.sont_pcm_gain(buf, len(out) // 4, 2, self.gain_q16, self.gain_q16)
+            self.lib.sont_pcm_gain(buf, len(out) // 4, 2, self.cur_gain, target)
             out = buf.raw
-        if self.rx_packets % 16 == 1:      # level for the logs, sampled (Python loop)
-            p = peak(out)
-            if p > self.mic_peak:
-                self.mic_peak = p
+        self.cur_gain = target
+        level = level * target >> 16
+        if level > self.mic_peak:
+            self.mic_peak = level
         self.mic_sink(out)
 
     def lib_has_gain(self) -> bool:
@@ -636,17 +716,18 @@ class ScoAudio:
                 if buf[i] == 0x01 and buf[i + 1] in H2_SYNC and buf[i + 2] == 0xAD:
                     idx = i
                     break
-            if idx < 0:
-                skipped = len(buf) - 2
-                del buf[:skipped]
-            else:
-                skipped = idx
-                del buf[:idx]
-            self.sync_lost += 1
+            skipped = len(buf) - 2 if idx < 0 else idx
+            empty = not any(buf[:skipped])
+            del buf[:skipped]
+            if not empty:
+                self.sync_lost += 1
             lost = max(1, round(skipped / MSBC_FRAME)) if skipped >= MSBC_FRAME // 2 else 0
             for _ in range(lost):
                 self.lib.sont_msbc_decode(self.msbc, None, pcm)
-                self.frames_lost += 1
+                if empty:
+                    self.frames_empty += 1
+                else:
+                    self.frames_lost += 1
                 out += pcm.raw
         return bytes(out)
 
@@ -681,6 +762,8 @@ class ScoAudio:
                 self.tx_buf += self._pull_windows()
         out = bytes(self.tx_buf[:n])
         del self.tx_buf[:n]
+        if self.dump is not None:
+            self.dump.tx(out)
         try:
             self.send(out)
             self.tx_packets += 1
@@ -701,11 +784,13 @@ class ScoAudio:
         return (f"{self.codec} rx {self.rx_packets / secs:.0f} pkt/s ({self.rx_bytes / secs / 1000:.1f} kB/s)"
                 f" tx {self.tx_packets} bad-status {self.rx_bad_status}"
                 + (f" frames ok {self.frames_ok} lost {self.frames_lost} ({q:.0%}, sync {self.sync_lost},"
-                   f" crc {self.decode_errors})" if q is not None else "")
-                + f" mic peak {self.mic_peak} out peak {self.tx_peak}")
+                   f" crc {self.decode_errors}, empty {self.frames_empty})" if q is not None else "")
+                + f" mic peak {self.mic_peak} (limited {self.limited}) out peak {self.tx_peak}")
 
     def close(self) -> None:
         self.closed = True
+        if self.dump is not None:
+            self.dump.write()
         self.up.close()
         self.down.close()
         if self.msbc:
@@ -911,6 +996,7 @@ class HfpGateway:
         self.last_error: str | None = None
         self.lane: ScoOutLane | None = None   # set by amain on USB adapters
         self.usb_alt: UsbScoAlt | None = None
+        self._msbc_window = None
         self.make_watcher = MicWatcher        # tests replace these
         self.make_mic_out = MicOutput
 
@@ -1207,6 +1293,10 @@ class HfpGateway:
         self.audio = ScoAudio(self.lib.lib, codec, self.host.ring, self.host.volume, sink,
                               float(self.s.mic_gain_db),
                               lambda sdu: host.send_sco_sdu(connection_handle=handle, sdu=sdu))
+        seconds = ScoDump.seconds_from_env()
+        if seconds > 0:
+            self.audio.dump = ScoDump(codec, seconds)
+            log.info("SCO dump on for %.0f s", seconds)
         link.sink = self.audio.on_packet
         link.on("disconnection", lambda *_a: self._on_sco_closed(link))
 
@@ -1271,8 +1361,8 @@ class HfpGateway:
                 wanted = self._wanted(now)
                 if wanted and not self.in_call and self.ready and self.sco_failures < 3:
                     if await self.enter_call() and self.codec == "msbc":
-                        msbc_check_at = now + 2.0
-                        self._msbc_window = (0, 0, now)
+                        msbc_check_at = now + 1.5          # warm-up: the link starts with zeros
+                        self._msbc_window = None
                 elif not wanted and self.in_call:
                     await self.leave_call()
                 if self.in_call and self.audio is not None and now >= getattr(self, "_next_stats", 0.0):
@@ -1322,12 +1412,19 @@ class HfpGateway:
         audio = self.audio
         if audio is None or audio.codec != "msbc" or not self.in_call:
             return False
+        if self._msbc_window is None:           # end of the warm-up: start counting here
+            self._msbc_window = (audio.frames_ok, audio.frames_lost, now)
+            return True
         ok0, lost0, started = self._msbc_window
         ok, lost = audio.frames_ok - ok0, audio.frames_lost - lost0
         self._msbc_window = (audio.frames_ok, audio.frames_lost, started)
         total = ok + lost
         expected = 2.0 / 0.0075 * 0.5          # at least half of the frames of 2 s arrived
-        if (total >= expected and ok / total < 0.85) or (audio.rx_packets > 100 and audio.frames_ok == 0):
+        bad = (total >= expected and ok / total < 0.85) or (audio.rx_packets > 300 and audio.frames_ok == 0)
+        if bad and audio.dump is not None:
+            log.warning("mSBC: %d of %d frames good (dump running: no fallback)", ok, total)
+            bad = False
+        if bad:
             log.warning("mSBC does not work here (%d of %d frames good, %s): using CVSD for this "
                         "headset", ok, total, audio.stats())
             if self.host.peer:

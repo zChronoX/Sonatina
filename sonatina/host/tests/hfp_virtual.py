@@ -157,7 +157,7 @@ class LinkEmulator:
                         n += 120
                         frame = ctypes.create_string_buffer(60)
                         self.lib.sont_msbc_encode(enc, pcm, frame)
-                        pending += bytes(60) if self.garbage else frame.raw
+                        pending += bytes([0x55, 0x38, 0x12]) * 20 if self.garbage else frame.raw
                     else:
                         pending += struct.pack('<24h', *[int(8000 * math.sin(2 * math.pi * 440 * (n + i) / rate))
                                                          for i in range(24)])
@@ -501,7 +501,8 @@ def unit_checks():
         audio.on_packet(hci.HCI_SynchronousDataPacket(connection_handle=1, packet_status=0,
                                                       data_total_length=len(stream[i:i + 48]), data=stream[i:i + 48]))
     print('parser:', audio.stats())
-    assert audio.frames_ok == 9 and audio.frames_lost == 1, audio.stats()
+    # zeros = link not sending (empty, concealed), junk = sync lost
+    assert audio.frames_ok == 9 and audio.frames_empty == 1 and audio.sync_lost == 1, audio.stats()
     # capture device: the Hi-Fi Cable must not be taken for VB-CABLE (pops, 2026-11-20)
     apis = [{'name': 'MME'}, {'name': 'Windows WASAPI'}]
     devs = [{'name': 'CABLE Output (VB-Audio Virtual Cable)', 'max_input_channels': 2, 'hostapi': 0},
@@ -510,6 +511,17 @@ def unit_checks():
             {'name': 'CABLE Output (VB-Audio Virtual Cable)', 'max_input_channels': 2, 'hostapi': 1}]
     assert sh.find_capture_device('CABLE Output', devs, apis)[0] == 3
     assert sh.find_capture_device('Hi-Fi Cable Output', devs, apis)[0] == 1
+    # microphone limiter: +6 dB, but a shout near full scale must not clip
+    loud = shfp.ScoAudio(lib.lib, 'cvsd', Ring(), None, got.append, 6.0, lambda b: None)
+    got.clear()
+    for k in range(200):
+        amp = 3000 if k < 100 else 30000
+        pcm = struct.pack('<24h', *[int(amp * math.sin(2 * math.pi * 440 * (24 * k + i) / 8000)) for i in range(24)])
+        loud.on_packet(hci.HCI_SynchronousDataPacket(connection_handle=1, packet_status=0, data_total_length=48, data=pcm))
+    a = array.array('h'); a.frombytes(b''.join(got))
+    quiet, shout = max(abs(v) for v in a[: len(a) // 2 - 2000]), max(abs(v) for v in a[len(a) // 2 + 2000:])
+    print(f'limiter: quiet {quiet} (x{quiet / 3000:.2f}), shout {shout}, limited {loud.limited}')
+    assert 5600 < quiet < 6400 and shout <= 29500 and loud.limited > 0
     assert shfp.transport_spec('usb:0BDA:8771', 2) == 'usb:0BDA:8771+sco=2'
     assert shfp.transport_spec('usb:0BDA:8771+sco=1', 2) == 'usb:0BDA:8771+sco=1'
     assert shfp.transport_spec('android-netsim', 2) == 'android-netsim'
