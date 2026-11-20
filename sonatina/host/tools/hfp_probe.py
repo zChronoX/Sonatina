@@ -47,6 +47,57 @@ def use_bundled_libusb() -> str | None:
     return path
 
 
+def install_safe_iso() -> None:
+    """usb1.USBTransfer.iterISO reads raw addresses (buffer_at) with lengths taken from
+    the iso descriptors. A bad descriptor makes it read outside the buffer: on Windows the
+    access violation is swallowed by ctypes around libusb_handle_events and Python dies
+    with 'Fatal Python error: _PyThreadState_Attach'. Read from the transfer's own Python
+    buffer instead, clamp the lengths, and report what the descriptors contained."""
+    import ctypes
+    import usb1
+    from usb1 import libusb1
+
+    # libusb 1.0.29 (windows_winusb.c, winusbx_copy_transfer_data) rewrites each
+    # descriptor's length as Offset[i+1] - Offset[i]; WinUSB leaves later Offsets at 0,
+    # so those lengths are garbage (e.g. -2401). Packet i is always at i * slot.
+    seen = {"transfers": 0, "with_data": 0, "anomalies": 0}
+
+    def report(text: str) -> None:
+        if seen["anomalies"] < 8:
+            print(f"  [iso] {text}", flush=True)
+        seen["anomalies"] += 1
+
+    def iterISO(self):
+        transfer_p = self._USBTransfer__transfer
+        transfer = transfer_p.contents
+        data = self.getBuffer()
+        size = len(data)
+        count = transfer.num_iso_packets
+        seen["transfers"] += 1
+        if count <= 0 or count > 1024 or size % count:
+            report(f"num_iso_packets {count}, buffer {size}: transfer skipped")
+            return
+        slot = size // count
+        descs = list(libusb1.get_iso_packet_list(transfer_p))
+        actuals = [d.actual_length for d in descs]
+        if any(actuals) and seen["with_data"] < 3:
+            seen["with_data"] += 1
+            full = [i for i, n in enumerate(actuals) if n]
+            sizes = sorted(set(actuals))
+            print(f"  [iso] IN transfer {seen['transfers']}: slot {slot}, packets with data "
+                  f"{len(full)}/{count} (first {full[0]}, last {full[-1]}), sizes {sizes[:6]}, "
+                  f"total {sum(actuals)}", flush=True)
+        for i, d in enumerate(descs):
+            actual = d.actual_length
+            if actual > slot:
+                report(f"packet {i}: actual {actual} > slot {slot}: clamped")
+                actual = slot
+            start = i * slot
+            yield d.status, bytearray(data[start:start + actual])
+
+    usb1.USBTransfer.iterISO = iterISO
+
+
 def legacy_setup_command():
     """HCI Setup Synchronous Connection (7.1.26): not in Bumble, and the Realtek
     RTL8761B does not implement the Enhanced variant."""
@@ -93,6 +144,8 @@ async def run(args) -> int:
     spec = f"{args.transport or settings.transport}+sco={args.alt}"
     lib = use_bundled_libusb()
     step(f"libusb: {lib or 'libusb_package (old, isochronous may fail)'}")
+    if not args.raw_iso:
+        install_safe_iso()
     step(f"opening {spec}")
     async with await open_transport(spec) as (hci_source, hci_sink):
         sh.apply_transport_quirks(spec.split("+")[0], hci_source)
@@ -129,6 +182,14 @@ async def run(args) -> int:
 
         rfcomm_server = rfcomm.Server(device)
         channel = rfcomm_server.listen(on_dlc)
+        headset_mux = asyncio.get_running_loop().create_future()
+
+        def on_mux(multiplexer) -> None:
+            print("  headset opened an RFCOMM session", flush=True)
+            if not headset_mux.done():
+                headset_mux.set_result(multiplexer)
+
+        rfcomm_server.on("start", on_mux)
         device.sdp_service_records = {1: hfp.make_ag_sdp_records(1, channel, ag_config)}
         await device.power_on()
         step(f"controller up: {device.public_address}")
@@ -145,19 +206,39 @@ async def run(args) -> int:
 
         step("HFP service level connection")
         try:
-            ag = await asyncio.wait_for(asyncio.shield(ag_ready), 4.0)
+            ag = await asyncio.wait_for(asyncio.shield(ag_ready), args.wait)
         except asyncio.TimeoutError:
+            ag = None
+        if ag is None and headset_mux.done():
+            # only one RFCOMM session per link: the headset owns it, wait for its HFP
+            print("  waiting for the headset to finish HFP on its session ...", flush=True)
+            try:
+                ag = await asyncio.wait_for(asyncio.shield(ag_ready), 15.0)
+            except asyncio.TimeoutError:
+                print("\nRESULT: SLC NOT WORKING (headset session open, no HFP SLC within 15 s)")
+                return 1
+        if ag is None:
             record = await hfp.find_hf_sdp_record(connection)
             if not record:
                 print("  !!! the headset has no Hands-Free service")
                 return 1
             hf_channel, version, features = record
-            print(f"  HF version {version}, features {features!r}: opening RFCOMM {hf_channel}")
-            multiplexer = await rfcomm.Client(connection).start()
-            dlc = await multiplexer.open_dlc(hf_channel)
-            ag = hfp.AgProtocol(dlc, ag_config)
-            ag.on("slc_complete", lambda: ag_ready.done() or ag_ready.set_result(ag))
-            ag = await asyncio.wait_for(ag_ready, 10.0)
+            print(f"  HF version {version}, features {features!r}: opening RFCOMM {hf_channel}", flush=True)
+            try:
+                multiplexer = await asyncio.wait_for(rfcomm.Client(connection).start(), 10.0)
+                print("  RFCOMM session up", flush=True)
+                dlc = await asyncio.wait_for(multiplexer.open_dlc(hf_channel), 10.0)
+                print(f"  DLC {hf_channel} open", flush=True)
+                proto = hfp.AgProtocol(dlc, ag_config)
+                proto.on("slc_complete", lambda: ag_ready.done() or ag_ready.set_result(proto))
+                ag = await asyncio.wait_for(asyncio.shield(ag_ready), 10.0)
+            except asyncio.TimeoutError:
+                if ag_ready.done():
+                    ag = ag_ready.result()
+                else:
+                    which = "session opened by headset" if headset_mux.done() else "no session"
+                    print(f"\nRESULT: SLC NOT WORKING (RFCOMM/HFP timeout, {which})")
+                    return 1
         codecs = [c.name for c in getattr(ag, "supported_audio_codecs", [])]
         print(f"  SLC up, headset codecs: {codecs or ['CVSD']}", flush=True)
 
@@ -263,9 +344,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--address")
     parser.add_argument("--transport")
-    parser.add_argument("--alt", type=int, default=0, help="USB alternate setting for SCO (0 = auto)")
+    parser.add_argument("--alt", type=int, default=2,
+                        help="USB alternate setting for SCO: 2 = one 16-bit CVSD link (as Linux btusb), 0 = largest")
     parser.add_argument("--seconds", type=float, default=8.0)
+    parser.add_argument("--wait", type=float, default=8.0,
+                        help="seconds to wait for the headset to open HFP itself")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--raw-iso", action="store_true", help="keep usb1's own iterISO (crashes)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING,
                         format="%(asctime)s %(levelname).1s %(name)s: %(message)s", datefmt="%H:%M:%S")
