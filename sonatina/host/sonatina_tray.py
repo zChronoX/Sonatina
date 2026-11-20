@@ -17,6 +17,7 @@ import threading
 import time
 
 import sonatina_host as sh
+import sonatina_ipc
 
 log = logging.getLogger("sonatina")
 
@@ -33,6 +34,68 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
     (tr("SBC (compatibile con tutte)", "SBC (works with all headphones)"), "sbc", None),
 ]
 RETRY_S = 5.0
+OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc")
+STARTUP_LINK = "Sonatina.lnk"
+
+
+def dashboard_path() -> str | None:
+    """SonatinaDashboard.exe: next to Sonatina.exe when installed, the dotnet publish output
+    in a checkout, or SONATINA_DASHBOARD."""
+    candidates = [os.environ.get("SONATINA_DASHBOARD", "")]
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "dashboard", "SonatinaDashboard.exe"))
+    else:
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dashboard", "publish")
+        candidates.append(os.path.join(root, "SonatinaDashboard.exe"))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return None
+
+
+def launch_dashboard() -> bool:
+    path = dashboard_path()
+    if path is None:
+        log.warning("dashboard not found (not built or not installed)")
+        return False
+    import subprocess
+    try:
+        subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True)
+        return True
+    except Exception as error:
+        log.error("cannot start the dashboard: %r", error)
+        return False
+
+
+def startup_folder() -> str:
+    return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
+                        "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+
+
+def autostart_enabled() -> bool:
+    return os.path.isfile(os.path.join(startup_folder(), STARTUP_LINK))
+
+
+def set_autostart(on: bool) -> None:
+    """The same shortcut the installer (and install-host.ps1) puts in the Startup folder."""
+    link = os.path.join(startup_folder(), STARTUP_LINK)
+    if not on:
+        if os.path.isfile(link):
+            os.remove(link)
+        return
+    sh.com_init()
+    import comtypes.client
+    shell = comtypes.client.CreateObject("WScript.Shell", dynamic=True)
+    shortcut = shell.CreateShortcut(link)
+    if getattr(sys, "frozen", False):
+        shortcut.TargetPath = sys.executable
+        shortcut.WorkingDirectory = os.path.dirname(sys.executable)
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        shortcut.TargetPath = pythonw if os.path.isfile(pythonw) else sys.executable
+        shortcut.Arguments = '"' + os.path.abspath(__file__) + '"'
+        shortcut.WorkingDirectory = os.path.dirname(os.path.abspath(__file__))
+    shortcut.Save()
 
 
 def setup_logging() -> None:
@@ -168,6 +231,89 @@ class TrayApp:
                 self.relaunch()      # the adapter did not close: a new process frees it
             if not self.quitting:
                 time.sleep(RETRY_S)
+
+    # -- dashboard channel (sonatina_ipc) ----------------------------------------
+    def snapshot(self) -> dict:
+        host = self.host
+        key, text = self.status()
+        return {
+            "app": {"version": sh.app_version(), "key": key, "tooltip": text,
+                    "adapter": self.dongle_ok, "host": host is not None,
+                    "autostart": autostart_enabled(), "log": LOG_PATH,
+                    "italian": sh.UI_ITALIAN},
+            "host": host.snapshot() if host is not None else None,
+        }
+
+    async def _on_host_loop(self, coro):
+        """Runs a host coroutine on the host thread and waits for it from another loop."""
+        loop = self.loop
+        if loop is None or loop.is_closed() or self.host is None:
+            coro.close()
+            raise RuntimeError("Bluetooth not running")
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
+    async def command(self, name: str, args: dict):
+        host = self.host
+        if name == "open_log":
+            if sys.platform == "win32":
+                os.startfile(LOG_PATH)
+            return True
+        if name == "restart":
+            self.restart()
+            return True
+        if name == "set_autostart":
+            set_autostart(bool(args.get("value")))
+            return autostart_enabled()
+        if name == "set_hfp_mode":
+            mode = str(args.get("mode"))
+            if mode not in ("auto", "on", "off"):
+                raise ValueError("mode")
+            if host is None:
+                self.settings.hfp_mode = mode
+                sh.save_settings(self.settings, sh.SETTINGS_PATH)
+                return "saved"
+            if await self._on_host_loop(host.set_hfp_mode(mode)):
+                log.info("headset microphone %s (dashboard): restarting Sonatina", mode)
+                threading.Thread(target=self.relaunch, daemon=True).start()
+                return "restarting"
+            return "ok"
+        if host is None:
+            raise RuntimeError("Bluetooth not running")
+        if name == "select":
+            await self._on_host_loop(host.select(str(args["address"])))
+        elif name == "set_codec":
+            await self._on_host_loop(host.set_codec(str(args["address"]), str(args["codec"]),
+                                                    args.get("ldac_quality")))
+        elif name == "set_option":
+            option = str(args.get("name"))
+            if option not in OPTION_NAMES:
+                raise ValueError("option")
+            await self._on_host_loop(host.set_option(option, bool(args.get("value"))))
+        elif name == "set_volume":
+            percent = max(0, min(100, int(args.get("percent", 0))))
+            host.volume.set_scalar(percent / 100)
+        elif name == "end_call":
+            async def end():
+                if host.hfp.in_call:
+                    host.hfp.dismissed = True
+                    await host.hfp.leave_call()
+            await self._on_host_loop(end())
+        elif name == "discover":
+            found = await self._on_host_loop(host.discover(float(args.get("seconds", 12))))
+            return [{"address": a, "name": n} for a, n in sorted(found.items()) if a not in host.paired]
+        elif name == "pair":
+            return await self._on_host_loop(host.pair(str(args["address"]), args.get("name")))
+        elif name == "forget":
+            await self._on_host_loop(host.forget(str(args["address"])))
+        else:
+            raise ValueError(f"unknown command {name}")
+        self._refresh_menu()
+        return True
+
+    def open_dashboard(self, *_args) -> None:
+        if not launch_dashboard():
+            self.notify(tr("La dashboard non e' installata in questa copia di Sonatina.",
+                           "The dashboard is not installed in this copy of Sonatina."))
 
     def restart(self) -> None:
         """Cancels the host task once (a second click while it closes is ignored)."""
@@ -399,8 +545,14 @@ class TrayApp:
 
         threading.Thread(target=self.host_thread, name="sonatina-host", daemon=True).start()
         threading.Thread(target=self.refresher, name="sonatina-tray", daemon=True).start()
+        try:
+            self.ipc = sonatina_ipc.IpcServer(self, sh.IPC_PATH, sh.app_version())
+            self.ipc.start_thread()
+        except Exception as error:
+            log.error("dashboard channel not started: %r", error)
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: self.status()[1], None, enabled=False),
+            pystray.MenuItem(tr("Apri Sonatina", "Open Sonatina"), self.open_dashboard, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Cuffie", "Headphones"), pystray.Menu(self.headsets_menu)),
             pystray.MenuItem(tr("Qualita' audio", "Audio quality"), pystray.Menu(self.codec_menu)),
@@ -445,7 +597,9 @@ def main() -> None:
             if ok:
                 break
     if not ok:
-        log.info("another SonatinaHost is already running")
+        log.info("another SonatinaHost is already running: opening the dashboard")
+        if "--relaunched" not in sys.argv:
+            launch_dashboard()    # started again from the Start menu: show the window
         return
     log.info("SonatinaHost tray starting")
     settings = sh.load_settings(sh.SETTINGS_PATH)

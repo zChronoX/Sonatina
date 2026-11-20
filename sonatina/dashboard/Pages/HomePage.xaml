@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="SonatinaDashboard.Pages.HomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:SonatinaDashboard"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel x:Name="Root" Spacing="16" Padding="24,8,24,32" SizeChanged="Root_SizeChanged">
+            <StackPanel Spacing="4" Padding="0,8,0,4">
+                <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Home', En='Home'}" />
+                <TextBlock x:Name="SubTitle" Style="{StaticResource Secondary}" />
+            </StackPanel>
+
+            <InfoBar x:Name="CallBar" IsClosable="False" Severity="Informational">
+                <InfoBar.ActionButton>
+                    <Button Click="EndCall_Click" Content="{l:Tr It='Torna alla musica', En='Back to music'}" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!-- headphones now -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="20">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="56" Height="56" CornerRadius="28" VerticalAlignment="Center"
+                                Background="{ThemeResource AccentFillColorDefaultBrush}">
+                            <FontIcon Glyph="&#xE7F6;" FontSize="26" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock x:Name="HeadsetName" Style="{StaticResource SubtitleTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                <l:Pill x:Name="StatePill" />
+                            </StackPanel>
+                            <TextBlock x:Name="CodecLine" Style="{StaticResource Secondary}" />
+                            <TextBlock x:Name="LatencyLine" Style="{StaticResource Secondary}" />
+                        </StackPanel>
+                        <Button Grid.Column="2" VerticalAlignment="Center" Click="Change_Click"
+                                Content="{l:Tr It='Cambia cuffie', En='Change headphones'}" />
+                    </Grid>
+                    <StackPanel Spacing="2">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="64" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="48" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Glyph="&#xE767;" FontSize="20" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{l:Tr It='Volume', En='Volume'}" />
+                            <Slider x:Name="Volume" Grid.Column="2" Minimum="0" Maximum="100" StepFrequency="1"
+                                    VerticalAlignment="Center" ValueChanged="Volume_ValueChanged" />
+                            <TextBlock x:Name="VolumeText" Grid.Column="3" VerticalAlignment="Center" TextAlignment="Right" />
+                        </Grid>
+                        <TextBlock Style="{StaticResource Hint}" Margin="36,0,0,0"
+                                   Text="{l:Tr It='Lo stesso volume di Windows: lo regoli anche dai tasti delle cuffie', En='The same volume as Windows: the headphone buttons change it too'}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Grid x:Name="Row1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- microphone -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="16">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <FontIcon Glyph="&#xE720;" FontSize="20" />
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Microfono delle cuffie', En='Headset microphone'}" />
+                        </StackPanel>
+                        <l:ModePicker x:Name="Mode" />
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="MicTitle" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock x:Name="MicText" Style="{StaticResource Secondary}" />
+                        </StackPanel>
+                        <StackPanel Spacing="6">
+                            <TextBlock x:Name="MeterHint" Style="{StaticResource Hint}" />
+                            <l:LevelMeter x:Name="Meter" />
+                        </StackPanel>
+                        <Rectangle Style="{StaticResource Divider}" />
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Voce in alta qualità', En='High quality voice'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='mSBC 16 kHz quando le cuffie lo supportano, altrimenti CVSD 8 kHz', En='mSBC 16 kHz when the headphones support it, CVSD 8 kHz otherwise'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="Hd" Grid.Column="1" Toggled="Hd_Toggled" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- options -->
+                <Border Style="{StaticResource Card}" Grid.Column="1">
+                    <StackPanel Spacing="4">
+                        <TextBlock Style="{StaticResource CardTitle}" Margin="0,0,0,8" Text="{l:Tr It='Opzioni', En='Options'}" />
+                        <Grid ColumnSpacing="12" MinHeight="48">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Volume regolato dalle cuffie', En='Volume from the headphones'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='I tasti volume delle cuffie muovono quello di Windows', En='The headphone volume buttons move the Windows volume'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="AbsoluteVolume" Grid.Column="1" Tag="absolute_volume" Toggled="Option_Toggled" />
+                        </Grid>
+                        <Rectangle Style="{StaticResource Divider}" />
+                        <Grid ColumnSpacing="12" MinHeight="48">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Bassa latenza', En='Low latency'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer più piccoli per giochi e video', En='Smaller buffers for games and video'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="LowLatency" Grid.Column="1" Tag="low_latency" Toggled="Option_Toggled" />
+                        </Grid>
+                        <Rectangle Style="{StaticResource Divider}" />
+                        <Grid ColumnSpacing="12" MinHeight="48">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Tasti delle cuffie', En='Headphone buttons'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Play, pausa e brani controllano il lettore attivo', En='Play, pause and tracks control the active player'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="MediaKeys" Grid.Column="1" Tag="media_keys" Toggled="Option_Toggled" />
+                        </Grid>
+                        <Rectangle Style="{StaticResource Divider}" />
+                        <Grid ColumnSpacing="12" MinHeight="48">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Avvia con Windows', En='Start with Windows'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Sonatina parte all’accesso, nell’area di notifica', En='Sonatina starts at sign-in, in the notification area'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="Autostart" Grid.Column="1" Toggled="Autostart_Toggled" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Grid x:Name="Row2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- codecs -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="12">
+                        <Grid>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Qualità audio', En='Audio quality'}" />
+                            <HyperlinkButton HorizontalAlignment="Right" Padding="4,0,4,0" Click="Codec_Click"
+                                             Content="{l:Tr It='Scegli il codec', En='Choose the codec'}" />
+                        </Grid>
+                        <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Sonatina usa il migliore che le cuffie supportano, in quest’ordine:', En='Sonatina uses the best one the headphones support, in this order:'}" />
+                        <l:WrapPanel x:Name="Chips" Spacing="8" />
+                        <TextBlock x:Name="ChipsHint" Style="{StaticResource Hint}" Text="{l:Tr It='Barrati: non supportati da queste cuffie', En='Struck through: not supported by these headphones'}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- link -->
+                <Border Style="{StaticResource Card}" Grid.Column="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Collegamento', En='Link'}" />
+                        <Grid ColumnSpacing="16" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer', En='Buffer'}" />
+                                <TextBlock x:Name="BufferText" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Deriva del clock', En='Clock drift'}" />
+                                <TextBlock x:Name="DriftText" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Interruzioni', En='Dropouts'}" />
+                                <TextBlock x:Name="UnderrunText" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Chiavetta', En='Adapter'}" />
+                                <TextBlock x:Name="AdapterText" Margin="0,4,0,0" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Click="Restart_Click" Content="{l:Tr It='Riavvia connessione', En='Restart connection'}" />
+                            <Button Click="OpenLog_Click" Content="{l:Tr It='Apri log', En='Open log'}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

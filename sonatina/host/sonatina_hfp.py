@@ -623,6 +623,7 @@ class ScoAudio:
         self.gain_q16 = int(65536 * 10 ** (mic_gain_db / 20))
         self.cur_gain = self.gain_q16     # limiter: lowered at once on peaks, back slowly
         self.limited = 0
+        self.level = 0.0                  # microphone level 0..1 for the dashboard (decays)
         self.up = Resampler(lib, self.rate, RATE, 1, 2)
         self.down = Resampler(lib, RATE, self.rate, 2, 1)
         self.msbc = lib.sont_msbc_create() if codec == "msbc" else None
@@ -689,6 +690,7 @@ class ScoAudio:
         level = level * target >> 16
         if level > self.mic_peak:
             self.mic_peak = level
+        self.level = max(level / 32767, self.level * 0.9)
         self.mic_sink(out)
 
     def lib_has_gain(self) -> bool:

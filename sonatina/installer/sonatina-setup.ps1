@@ -121,7 +121,7 @@ if ($InstallVBCable) {
 
 if ($StopAll) {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq 'Sonatina.exe' -or
+        Where-Object { $_.Name -eq 'Sonatina.exe' -or $_.Name -eq 'SonatinaDashboard.exe' -or
                        (($_.Name -eq 'pythonw.exe' -or $_.Name -eq 'python.exe') -and
                         ($_.CommandLine -like '*sonatina_tray.py*' -or $_.CommandLine -like '*sonatina_host.py*')) } |
         ForEach-Object { Write-Log "stopping $($_.Name) PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }

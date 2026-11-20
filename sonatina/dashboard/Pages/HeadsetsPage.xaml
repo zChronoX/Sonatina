@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="SonatinaDashboard.Pages.HeadsetsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:SonatinaDashboard"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel Spacing="16" Padding="24,8,24,32">
+            <Grid Padding="0,8,0,4">
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Cuffie', En='Headphones'}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Sonatina si collega da sola alle cuffie preferite appena le accendi.', En='Sonatina connects by itself to the preferred headphones as soon as you turn them on.'}" />
+                </StackPanel>
+                <Button x:Name="PairButton" HorizontalAlignment="Right" VerticalAlignment="Top" Style="{StaticResource AccentButtonStyle}"
+                        Click="Pair_Click" Content="{l:Tr It='Abbina nuove cuffie', En='Pair new headphones'}" />
+            </Grid>
+
+            <!-- pairing -->
+            <Border x:Name="PairCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                <StackPanel Spacing="12">
+                    <Grid>
+                        <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Abbina nuove cuffie', En='Pair new headphones'}" />
+                        <Button HorizontalAlignment="Right" Click="ClosePair_Click" Content="{l:Tr It='Chiudi', En='Close'}" />
+                    </Grid>
+                    <TextBlock x:Name="PairText" Style="{StaticResource Secondary}" />
+                    <ProgressBar x:Name="PairProgress" IsIndeterminate="True" />
+                    <StackPanel x:Name="FoundList" Spacing="4" />
+                    <Button x:Name="SearchAgain" Click="Pair_Click" Content="{l:Tr It='Cerca di nuovo', En='Search again'}" />
+                </StackPanel>
+            </Border>
+
+            <StackPanel x:Name="HeadsetList" Spacing="4" />
+            <TextBlock x:Name="Empty" Style="{StaticResource Secondary}" Visibility="Collapsed"
+                       Text="{l:Tr It='Nessuna cuffia abbinata. Metti le cuffie in modalità abbinamento e premi «Abbina nuove cuffie».', En='No headphones paired yet. Put the headphones in pairing mode and press “Pair new headphones”.'}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1019,6 +1019,7 @@ class SonatinaHost:
         self.on_change = None                 # called after settings changed (save)
         self.ready = False                    # True once powered on and keys loaded
         self.stream = None                    # the A2DP stream (suspended during calls)
+        self.codec_in_use: str | None = None  # key in CODEC_CHAIN of the running stream
         self.hfp = sonatina_hfp.HfpGateway(self)
 
     # -- settings ---------------------------------------------------------------
@@ -1116,6 +1117,7 @@ class SonatinaHost:
         self.peer = None
         self.state = "idle"
         self.stream = None
+        self.codec_in_use = None
         self.hfp.on_disconnected()
         self.remote.stop()
         if self.pump:
@@ -1155,10 +1157,16 @@ class SonatinaHost:
             mtu_holder = {"mtu": 679}
             codec, ldac_quality = self.codec_for(peer)
             log.info("headset codecs: %s", ", ".join(self._sink_names(protocol)) or "?")
+            usable = [k for k in CODEC_CHAIN if self._choose(protocol, k, ldac_quality, mtu_holder) is not None]
+            entry = self.s.headsets.setdefault(peer, {})
+            if entry.get("codecs") != usable:      # remembered for the dashboard
+                entry["codecs"] = usable
+                self._changed()
             choice = None
             for candidate in CODEC_CHAIN[CODEC_CHAIN.index(codec) if codec in CODEC_CHAIN else 0:]:
                 choice = self._choose(protocol, candidate, ldac_quality, mtu_holder)
                 if choice is not None:
+                    self.codec_in_use = candidate
                     break
                 log.info("%s not usable with this headset, trying the next codec",
                          CODEC_NAMES[candidate])
@@ -1457,6 +1465,58 @@ class SonatinaHost:
             self.remote.on_windows_volume()
             await asyncio.sleep(0.1)
 
+    def snapshot(self) -> dict:
+        """Everything the dashboard shows, as plain JSON values. Called from the dashboard
+        channel's thread: only reads."""
+        p = self.pump
+        enc = p.encoder if p is not None else None
+        hf = self.hfp
+        audio = hf.audio
+        headsets = []
+        for address in sorted(set(self.paired) | set(self.s.headsets)):
+            h = self.s.headsets.get(address, {})
+            codec, quality = self.codec_for(address)
+            headsets.append({
+                "address": address, "name": self.headset_name(address), "codec": codec,
+                "ldac_quality": quality, "supported": list(h.get("codecs", [])),
+                "preferred": address == self.s.address, "connected": address == self.peer,
+                "paired": address in self.paired, "msbc_broken": bool(h.get("msbc_broken"))})
+        last = self.volume.last
+        apps = []
+        if hf.watcher is not None:
+            ignored = getattr(hf.watcher, "IGNORED", ())
+            apps = [a for a in getattr(hf.watcher, "last_apps", ()) if a.lower() not in ignored]
+        return {
+            "state": self.state,
+            "transport": self.s.transport,
+            "summary": self.summary(),
+            "peer": self.peer,
+            "headsets": headsets,
+            "discovering": self.discovering,
+            "found": [{"address": a, "name": n} for a, n in sorted(self.discovered.items())
+                      if a not in self.paired],
+            "pairing": self.pairing_target,
+            "stream": None if enc is None else {
+                "codec": self.codec_in_use, "name": enc.name, "kbps": enc.kbps,
+                "latency_ms": self.latency_ms(), "headset_delay_ms": self.headset_delay_ms},
+            "volume": {"percent": last[1] if last else None, "muted": bool(last and last[0]),
+                       "absolute": bool(getattr(self.remote, "absolute", False))},
+            "options": {k: bool(getattr(self.s, k)) for k in
+                        ("absolute_volume", "low_latency", "media_keys", "hfp_msbc")},
+            "mic": {"mode": self.s.hfp_mode, "msbc": bool(self.s.hfp_msbc), "cable": hf.mic_key,
+                    "ready": hf.ready, "in_call": hf.in_call, "codec": hf.codec, "apps": apps,
+                    "dismissed": hf.dismissed, "level": round(audio.level, 3) if audio else 0.0,
+                    "frames_ok": audio.frames_ok if audio else 0,
+                    "frames_lost": audio.frames_lost if audio else 0,
+                    "status": hf.status_line()},
+            "link": {"ring_ms": self.ring.level_ms(), "underruns": self.ring.underruns,
+                     "target_ms": p.target_ms if p else None,
+                     "margin_ms": None if p is None or p.margin_ms is None else round(p.margin_ms, 1),
+                     "rate_ppm": round((p.rate - 1) * 1e6) if p else None,
+                     "packets": p.packets if p else 0,
+                     "call": audio.stats() if audio else None},
+        }
+
     def stats_line(self) -> str:
         p = self.pump
         return (f"[{self.state}] ring={self.ring.level_ms()} ms underruns={self.ring.underruns} "
@@ -1686,6 +1746,16 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
 
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Sonatina")
 SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+IPC_PATH = os.path.join(APP_DIR, "ipc.json")
+
+
+def app_version() -> str:
+    """Written into version.txt by the CI for installed builds; "dev" otherwise."""
+    try:
+        with open(os.path.join(HERE, "version.txt"), encoding="utf-8") as f:
+            return f.read().strip() or "dev"
+    except OSError:
+        return "dev"
 
 
 def main() -> None:

@@ -12,7 +12,7 @@ The virtual headset has an A2DP sink and a Bumble Hands-Free unit. Checked:
 The virtual controller carries no SCO data, so the headset side of the link is emulated:
 packets go straight into ScoAudio and what Sonatina sends is captured.
 """
-import array, asyncio, ctypes, logging, math, os, struct, sys
+import array, asyncio, ctypes, json, logging, math, os, struct, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import sonatina_host as sh
 import sonatina_hfp as shfp
@@ -255,6 +255,11 @@ async def scenario(msbc=True, opens_hfp=False, hangup=False, broken_msbc=False):
         print('summary:', host.summary(), flush=True)
         emu.start(expected_codec)
         await asyncio.sleep(seconds)
+        snap = json.loads(json.dumps(host.snapshot()))      # what the dashboard gets
+        mic = snap['mic']
+        assert mic['in_call'] and mic['codec'] == expected_codec and mic['level'] > 0.2, mic
+        assert snap['stream'] is None, snap['stream']                    # A2DP suspended
+        assert ('mSBC' if expected_codec == 'msbc' else 'CVSD') in snap['summary'], snap['summary']
 
     await call('msbc' if msbc else 'cvsd')
     codec = host.hfp.codec

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="SonatinaDashboard.Pages.MicPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:SonatinaDashboard"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel x:Name="Root" Spacing="16" Padding="24,8,24,32" SizeChanged="Root_SizeChanged">
+            <StackPanel Spacing="4" Padding="0,8,0,4">
+                <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Microfono', En='Microphone'}" />
+                <TextBlock x:Name="SubTitle" Style="{StaticResource Secondary}" />
+            </StackPanel>
+
+            <InfoBar x:Name="CableBar" Severity="Warning" IsClosable="False"
+                     Title="{l:Tr It='Manca il microfono virtuale', En='The virtual microphone is missing'}"
+                     Message="{l:Tr It='Installa Hi-Fi Cable di VB-Audio (gratuito), poi riavvia Sonatina: le app vedranno il microfono delle cuffie come «Hi-Fi Cable Output».', En='Install Hi-Fi Cable by VB-Audio (free), then restart Sonatina: apps will see the headset microphone as “Hi-Fi Cable Output”.'}" />
+
+            <Grid x:Name="Row1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border Style="{StaticResource Card}">
+                    <StackPanel Spacing="16">
+                        <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Modalità', En='Mode'}" />
+                        <l:ModePicker x:Name="Mode" />
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="MicTitle" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock x:Name="MicText" Style="{StaticResource Secondary}" />
+                        </StackPanel>
+                        <StackPanel Spacing="6">
+                            <TextBlock x:Name="MeterHint" Style="{StaticResource Hint}" />
+                            <l:LevelMeter x:Name="Meter" />
+                        </StackPanel>
+                        <Button x:Name="EndCall" Click="EndCall_Click" Content="{l:Tr It='Torna alla musica', En='Back to music'}" />
+                        <Rectangle Style="{StaticResource Divider}" />
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{l:Tr It='Voce in alta qualità', En='High quality voice'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='mSBC 16 kHz quando le cuffie lo supportano, altrimenti CVSD 8 kHz', En='mSBC 16 kHz when the headphones support it, CVSD 8 kHz otherwise'}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="Hd" Grid.Column="1" Toggled="Hd_Toggled" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource Card}" Grid.Column="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Chiamata', En='Call'}" />
+                        <Grid ColumnSpacing="16" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Codec della voce', En='Voice codec'}" />
+                                <TextBlock x:Name="VoiceCodec" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Frame persi', En='Lost frames'}" />
+                                <TextBlock x:Name="LostFrames" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Microfono virtuale', En='Virtual microphone'}" />
+                                <TextBlock x:Name="Cable" Margin="0,4,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='App che usano il microfono', En='Apps using the microphone'}" />
+                                <TextBlock x:Name="Apps" Margin="0,4,0,0" TextWrapping="WrapWholeWords" />
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="8">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Perché in chiamata la musica peggiora', En='Why music gets worse during a call'}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Con il Bluetooth classico le cuffie non possono ricevere musica in alta qualità e mandare il microfono nello stesso momento: in chiamata usano un canale vocale. Succede anche con il telefono. Se vuoi solo ascoltare mentre un’app tiene aperto il microfono, usa «Torna alla musica» o il tasto per riagganciare delle cuffie.', En='With classic Bluetooth, headphones cannot receive high quality music and send the microphone at the same time: during a call they use a voice channel. The same happens with a phone. If you only want to listen while an app keeps the microphone open, use “Back to music” or the hang-up button of the headphones.'}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

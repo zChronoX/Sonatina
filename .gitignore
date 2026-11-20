@@ -28,3 +28,8 @@ local/
 # Claude working files (handoff copies, outputs)
 HANDOFF.md
 Claude outputs/
+
+# Dashboard (C#) build output
+sonatina/dashboard/bin/
+sonatina/dashboard/obj/
+sonatina/dashboard/publish/

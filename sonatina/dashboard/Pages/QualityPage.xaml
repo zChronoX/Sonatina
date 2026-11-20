@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="SonatinaDashboard.Pages.QualityPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:SonatinaDashboard"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel Spacing="16" Padding="24,8,24,32">
+            <StackPanel Spacing="4" Padding="0,8,0,4">
+                <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Qualità audio', En='Audio quality'}" />
+                <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Il codec scelto è ricordato per ogni cuffia. Se non va, Sonatina passa al successivo.', En='The chosen codec is remembered for each pair of headphones. If it does not work, Sonatina moves to the next one.'}" />
+            </StackPanel>
+
+            <!-- now -->
+            <Border Style="{StaticResource Card}">
+                <Grid ColumnSpacing="24" RowSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='In uso adesso', En='In use now'}" />
+                        <TextBlock x:Name="NowCodec" Style="{StaticResource MetricValue}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Bitrate', En='Bitrate'}" />
+                        <TextBlock x:Name="NowRate" Style="{StaticResource MetricValue}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Ritardo stimato', En='Estimated delay'}" />
+                        <TextBlock x:Name="NowDelay" Style="{StaticResource MetricValue}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- codec -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Style="{StaticResource CardTitle}" VerticalAlignment="Center" Text="{l:Tr It='Codec preferito', En='Preferred codec'}" />
+                        <ComboBox x:Name="HeadsetBox" Grid.Column="1" MinWidth="220" SelectionChanged="HeadsetBox_SelectionChanged" />
+                    </Grid>
+                    <StackPanel x:Name="CodecList" Spacing="2" />
+                    <Grid x:Name="LdacRow" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Qualità LDAC', En='LDAC quality'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Più alta = più dettagli, ma serve un segnale migliore (cuffie vicine alla chiavetta)', En='Higher = more detail, but needs a better signal (headphones close to the adapter)'}" />
+                        </StackPanel>
+                        <ComboBox x:Name="LdacBox" Grid.Column="1" MinWidth="220" SelectionChanged="LdacBox_SelectionChanged" />
+                    </Grid>
+                    <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Cambiando codec le cuffie si ricollegano per un attimo.', En='Changing the codec makes the headphones reconnect for a moment.'}" />
+                </StackPanel>
+            </Border>
+
+            <!-- latency -->
+            <Border Style="{StaticResource Card}">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{l:Tr It='Bassa latenza', En='Low latency'}" />
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer più piccoli per giochi e video. Se senti interruzioni, spegnila.', En='Smaller buffers for games and video. If you hear dropouts, turn it off.'}" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="LowLatency" Grid.Column="1" Toggled="LowLatency_Toggled" />
+                </Grid>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

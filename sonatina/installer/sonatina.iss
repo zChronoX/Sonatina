@@ -74,10 +74,14 @@ it.RunApp=Avvia Sonatina (cerchera' le cuffie in modalita' abbinamento)
 
 [Files]
 Source: "{#BuildDir}\dist\Sonatina\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#BuildDir}\dashboard\*"; DestDir: "{app}\dashboard"; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
 Source: "{#BuildDir}\firmware\*"; DestDir: "{app}\firmware"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#BuildDir}\wdi\wdi-simple.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "sonatina-setup.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "sonatina-setup.ps1"; Flags: dontcopy
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\dashboard"
 
 [Icons]
 Name: "{group}\Sonatina"; Filename: "{app}\Sonatina.exe"

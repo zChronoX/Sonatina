@@ -6,6 +6,7 @@ on:
     paths:
       - 'sonatina/host/**'
       - 'sonatina/installer/**'
+      - 'sonatina/dashboard/**'
       - '.github/workflows/host.yml'
     tags: [ 'v*' ]
   workflow_dispatch:
@@ -38,9 +39,34 @@ jobs:
           python latency_virtual.py
           python robustness_virtual.py
           python hfp_virtual.py
+          python ipc_virtual.py
+
+  dashboard:
+    # WinUI 3 window (C#), built on every push so compile errors show up at once
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"; else V="0.0.${GITHUB_RUN_NUMBER}"; fi
+          echo "DASH_VERSION=$V" >> "$GITHUB_ENV"
+      - name: dotnet publish
+        shell: pwsh
+        run: |
+          dotnet publish sonatina/dashboard/SonatinaDashboard.csproj -c Release -r win-x64 --self-contained true `
+            -p:Platform=x64 -p:Version=$env:DASH_VERSION -o build/dashboard
+          Get-ChildItem build/dashboard | Measure-Object -Property Length -Sum
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard
+          path: build/dashboard
 
   installer:
-    needs: tests
+    needs: [tests, dashboard]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.installer)
     runs-on: windows-latest
     permissions:
@@ -108,6 +134,12 @@ jobs:
           }
           Get-ChildItem build/firmware
 
+      # ---- dashboard window (built by the dashboard job)
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard
+          path: build/dashboard
+
       # ---- Sonatina.exe (PyInstaller, no Python needed on the PC)
       - uses: actions/setup-python@v5
         with:
@@ -116,6 +148,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -r sonatina/host/requirements.txt pyinstaller
+          Set-Content -Path build/version.txt -Value $env:APP_VERSION -NoNewline
           python -m PyInstaller --noconfirm --windowed --name Sonatina `
             --icon sonatina/installer/sonatina.ico `
             --distpath build/dist --workpath build/pyi `
@@ -123,6 +156,7 @@ jobs:
             --add-binary "sonatina/host/codec/sonatina_codec.dll;codec" `
             --add-binary "sonatina/host/third_party/libusb/libusb-1.0.dll;." `
             --add-data "sonatina/host/codec/third_party/fdk-aac/NOTICE;licenses/fdk-aac" `
+            --add-data "build/version.txt;." `
             --collect-submodules bumble --collect-data bumble `
             --collect-all libusb_package --collect-all _sounddevice_data `
             --hidden-import pystray._win32 --hidden-import pycaw.pycaw --hidden-import psutil `
