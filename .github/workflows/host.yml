@@ -39,6 +39,7 @@ jobs:
           python avrcp_virtual.py
           python latency_virtual.py
           python robustness_virtual.py
+          python hfp_virtual.py
 
   installer:
     needs: tests
@@ -122,10 +123,11 @@ jobs:
             --distpath build/dist --workpath build/pyi `
             --paths sonatina/host `
             --add-binary "sonatina/host/codec/sonatina_codec.dll;codec" `
+            --add-binary "sonatina/host/third_party/libusb/libusb-1.0.dll;." `
             --add-data "sonatina/host/codec/third_party/fdk-aac/NOTICE;licenses/fdk-aac" `
             --collect-submodules bumble --collect-data bumble `
             --collect-all libusb_package --collect-all _sounddevice_data `
-            --hidden-import pystray._win32 --hidden-import pycaw.pycaw `
+            --hidden-import pystray._win32 --hidden-import pycaw.pycaw --hidden-import psutil `
             sonatina/host/sonatina_tray.py
           Get-ChildItem build/dist/Sonatina | Select-Object -First 20
 

@@ -47,12 +47,26 @@ def setup_logging() -> None:
     logging.getLogger("bumble").setLevel(logging.WARNING)
 
 
+_MUTEX = None
+
+
 def single_instance() -> bool:
-    """Only one process may own the dongle."""
+    """Only one process may own the dongle. A failed attempt closes its handle, so that
+    a relaunched process can take the mutex once the old one has exited."""
+    global _MUTEX
     if sys.platform != "win32":
         return True
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\SonatinaHost")
-    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = k32.CreateMutexW(None, False, "Local\\SonatinaHost")
+    if ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+        if handle:
+            k32.CloseHandle(handle)
+        return False
+    _MUTEX = handle
+    return True
 
 
 def make_icon(color: tuple[int, int, int]):
@@ -70,6 +84,7 @@ def make_icon(color: tuple[int, int, int]):
 
 COLORS = {
     "streaming": (37, 99, 235),   # blue
+    "call": (22, 163, 74),        # green: headset microphone live
     "idle": (113, 113, 122),      # grey
     "error": (220, 38, 38),       # red
 }
@@ -86,6 +101,8 @@ class TrayApp:
         self.icon = None
         self.found: dict[str, str] = {}   # discovered, not yet paired
         self.first_run_search = False
+        self.access_errors = 0             # LIBUSB_ERROR_ACCESS in a row
+        self.dongle_ever = False           # this process has had the adapter open
 
     # -- host thread ----------------------------------------------------------
     def _on_host(self, host: sh.SonatinaHost) -> None:
@@ -127,13 +144,19 @@ class TrayApp:
         while not self.quitting:
             try:
                 asyncio.run(self._run_once())
-                log.warning("dongle gone, retrying in %.0f s", RETRY_S)
+                if not sh.ADAPTER_STUCK:
+                    log.warning("dongle gone, retrying in %.0f s", RETRY_S)
             except asyncio.CancelledError:
                 pass
             except sh.SystemResumed as gap:
                 log.info("PC resumed from sleep (%s): restarting Bluetooth", gap)
             except Exception as error:
-                if "device not found" in repr(error):   # adapter unplugged: wait quietly
+                if "Access" in type(error).__name__ or "ERROR_ACCESS" in repr(error):
+                    self.access_errors += 1
+                    log.error("adapter busy (%r), attempt %d", error, self.access_errors)
+                    if self.access_errors >= 3 and self.dongle_ever and not self.quitting:
+                        self.relaunch()     # the stale handle is ours: only a new process frees it
+                elif "device not found" in repr(error):   # adapter unplugged: wait quietly
                     if not getattr(self, "_warned_missing", False):
                         log.warning("Bluetooth adapter not found, waiting for it")
                         self._warned_missing = True
@@ -141,12 +164,46 @@ class TrayApp:
                     log.error("host stopped: %r (retry in %.0f s)", error, RETRY_S)
             self.host = None
             self.dongle_ok = False
+            if sh.ADAPTER_STUCK and not self.quitting:
+                self.relaunch()      # the adapter did not close: a new process frees it
             if not self.quitting:
                 time.sleep(RETRY_S)
 
     def restart(self) -> None:
-        if self.loop and self.main_task:
-            self.loop.call_soon_threadsafe(self.main_task.cancel)
+        """Cancels the host task once (a second click while it closes is ignored)."""
+        loop, task = self.loop, self.main_task
+        if loop is None or task is None or loop.is_closed() or task.done():
+            return
+
+        def cancel():
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        try:
+            loop.call_soon_threadsafe(cancel)
+        except RuntimeError:     # the loop closed meanwhile
+            pass
+
+    def relaunch(self) -> None:
+        """Starts a fresh Sonatina and exits this one (frees WinUSB for sure)."""
+        import subprocess
+        log.warning("the adapter is still held by this process: restarting Sonatina")
+        if getattr(sys, "frozen", False):
+            args = [sys.executable, "--relaunched"]
+        else:
+            args = [sys.executable, os.path.abspath(sys.argv[0]), "--relaunched"]
+        try:
+            subprocess.Popen(args, cwd=os.path.dirname(os.path.abspath(sys.argv[0])), close_fds=True,
+                             creationflags=0x00000008 | 0x00000200)   # detached, new group
+        except Exception as error:
+            log.error("cannot restart Sonatina: %r", error)
+            return
+        self.quitting = True
+        try:
+            if self.icon is not None:
+                self.icon.stop()
+        except Exception:
+            pass
+        os._exit(0)
 
     # -- tray -----------------------------------------------------------------
     def status(self) -> tuple[str, str]:
@@ -155,12 +212,17 @@ class TrayApp:
                              if not self.dongle_ok else tr("Sonatina: avvio...", "Sonatina: starting..."))
         state = self.host.state
         key = "streaming" if state == "streaming" else ("error" if state == "error" else "idle")
+        if self.host.hfp.in_call:
+            key = "call"
         return key, self.host.summary()
 
     def refresher(self) -> None:
         last = None
         while not self.quitting:
             host = self.host
+            if host is not None and getattr(host, "ready", False):
+                self.dongle_ever = True
+                self.access_errors = 0
             if (not self.first_run_search and host is not None and host.state == "idle"
                     and getattr(host, "ready", False) and not host.paired
                     and self.loop is not None):
@@ -274,6 +336,48 @@ class TrayApp:
     def _option_checked(self, name: str):
         return lambda _item: self.host is not None and bool(getattr(self.host.s, name, False))
 
+    # -- headset microphone ---------------------------------------------------
+    def _hfp_mode_action(self, mode: str):
+        def action(*_args):
+            host = self.host
+            if host is None:
+                self.settings.hfp_mode = mode
+                sh.save_settings(self.settings, sh.SETTINGS_PATH)
+                return
+
+            async def apply():
+                if await host.set_hfp_mode(mode):
+                    # the USB transport changes (SCO endpoints on/off): a fresh process
+                    # is the clean way to reopen the adapter
+                    log.info("headset microphone %s: restarting Sonatina", mode)
+                    threading.Thread(target=self.relaunch, daemon=True).start()
+            self.run_coro(apply())
+        return action
+
+    def _hfp_mode_checked(self, mode: str):
+        def checked(_item):
+            s = self.host.s if self.host is not None else self.settings
+            return s.hfp_mode == mode
+        return checked
+
+    def mic_menu(self):
+        import pystray
+
+        for label, mode in (
+                (tr("Automatico (quando un'app usa il microfono)",
+                    "Automatic (when an app uses the microphone)"), "auto"),
+                (tr("Sempre attivo (modalita' chiamata)", "Always on (call mode)"), "on"),
+                (tr("Disattivato", "Off"), "off")):
+            yield pystray.MenuItem(label, self._hfp_mode_action(mode),
+                                   checked=self._hfp_mode_checked(mode), radio=True)
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem(tr("Voce in alta qualita' (mSBC 16 kHz)", "HD voice (mSBC 16 kHz)"),
+                               self._option_action("hfp_msbc"), checked=self._option_checked("hfp_msbc"))
+        host = self.host
+        if host is not None:
+            yield pystray.Menu.SEPARATOR
+            yield pystray.MenuItem(host.hfp.status_line(), None, enabled=False)
+
     def open_log(self, *_args) -> None:
         if sys.platform == "win32":
             os.startfile(LOG_PATH)
@@ -284,7 +388,10 @@ class TrayApp:
 
     def on_quit(self, icon, *_args) -> None:
         self.quitting = True
-        self.restart()
+        try:
+            self.restart()
+        except Exception as error:
+            log.debug("quit: %r", error)
         icon.stop()
 
     def run(self) -> None:
@@ -297,6 +404,7 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Cuffie", "Headphones"), pystray.Menu(self.headsets_menu)),
             pystray.MenuItem(tr("Qualita' audio", "Audio quality"), pystray.Menu(self.codec_menu)),
+            pystray.MenuItem(tr("Microfono delle cuffie", "Headphone microphone"), pystray.Menu(self.mic_menu)),
             pystray.MenuItem(tr("Volume regolato dalle cuffie", "Volume handled by the headphones"),
                              self._option_action("absolute_volume"),
                              checked=self._option_checked("absolute_volume")),
@@ -329,7 +437,14 @@ def main() -> None:
         except Exception as error:
             log.error("cannot set the default output: %r", error)
         return
-    if not single_instance():
+    ok = single_instance()
+    if not ok and "--relaunched" in sys.argv:    # the old process is still exiting
+        for _ in range(30):
+            time.sleep(0.5)
+            ok = single_instance()
+            if ok:
+                break
+    if not ok:
         log.info("another SonatinaHost is already running")
         return
     log.info("SonatinaHost tray starting")
@@ -341,6 +456,10 @@ def main() -> None:
             sh.save_settings(settings, sh.SETTINGS_PATH)
         except Exception as error:
             log.warning("cannot set the default output yet: %r", error)
+    try:
+        sh.fix_default_output()
+    except Exception as error:
+        log.warning("cannot check the default output: %r", error)
     TrayApp(settings).run()
     log.info("SonatinaHost tray stopped")
     os._exit(0)  # do not wait for the USB thread

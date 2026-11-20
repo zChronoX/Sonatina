@@ -37,3 +37,20 @@ Ogni 5 s stampa: stato, livello del buffer, underrun, pacchetti, ritardo massimo
 
 Volume: VB-CABLE ignora il proprio cursore, quindi SonatinaHost legge volume e muto di Windows
 sull'uscita VB-CABLE (pycaw) e applica il guadagno prima della codifica (rampa, niente scatti).
+
+## Microfono delle cuffie (HFP)
+Il microfono arriva alle app attraverso un secondo cavo virtuale gratuito, **Hi-Fi Cable**
+(vb-audio.com/Cable, `HiFiCableAsioBridgeSetup`); vanno bene anche VB-CABLE A+B o il microfono
+di Steam. Nelle app si sceglie **Hi-Fi Cable Output** come microfono.
+- `sonatina_hfp.py`: Audio Gateway HFP sempre collegato accanto all'A2DP. Quando un'app apre il
+  microfono virtuale, Sonatina sospende l'A2DP, apre un link eSCO (mSBC 16 kHz, o CVSD 8 kHz),
+  scrive la voce in "Hi-Fi Cable Input" e manda l'audio di Windows alle cuffie sul link; quando
+  l'app lo chiude torna l'A2DP. Il tasto "riaggancia" delle cuffie torna alla musica.
+- Menu del tray: Microfono delle cuffie → Automatico / Sempre attivo / Disattivato, voce mSBC.
+  Icona verde = chiamata in corso.
+- USB: serve libusb >= 1.0.27 (`third_party/libusb`, 1.0.29) e l'alternate setting 2 per lo SCO.
+  Correzioni a Bumble/usb1 (lettura ISO, trasferimenti in volo) descritte in testa a `sonatina_hfp.py`.
+- Impostazioni (`settings.json`): `hfp_mode` (auto/on/off), `hfp_msbc`, `mic_device`,
+  `mic_gain_db` (6), `sco_alt` (2).
+- `tests/hfp_virtual.py`: SLC aperto da Sonatina o dalle cuffie, chiamata mSBC e CVSD con tono
+  in entrambi i versi, ritorno all'A2DP, riaggancio, ripiego automatico da mSBC a CVSD.

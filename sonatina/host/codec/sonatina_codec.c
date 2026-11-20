@@ -5,6 +5,14 @@
 #include "codec_ldac.h"
 #include "aacenc_lib.h"   /* Fraunhofer FDK AAC (third_party/fdk-aac) */
 #include "freeaptx.h"     /* aptX / aptX HD (third_party/libfreeaptx, LGPL-2.1+) */
+#include "sbc.h"          /* libsbc (Google, Apache-2.0): mSBC for HFP wide-band speech */
+#define _USE_MATH_DEFINES
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef _WIN32
 #define SONT_API __declspec(dllexport)
@@ -12,7 +20,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 4; }
+SONT_API int sont_codec_version(void) { return 5; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -261,4 +269,228 @@ SONT_API void sont_pcm_gain(int16_t *pcm, unsigned frames, unsigned channels,
             pcm[i * channels + c] = (int16_t)v;
         }
     }
+}
+
+/* ------------------------------------------------------------------ mSBC (HFP) */
+
+/* HFP 1.7+ wide-band speech: 16 kHz mono, 120 samples per frame. On the SCO link
+ * each frame is sent as 60 bytes: H2 synchronisation header (0x01, then 0x08,
+ * 0x38, 0xC8, 0xF8 in turn), the 57-byte mSBC frame, one padding byte. */
+typedef struct {
+    sbc_t enc;
+    sbc_t dec;
+    unsigned seq;
+} SONT_MSBC;
+
+static const uint8_t sont_h2[4] = {0x08, 0x38, 0xC8, 0xF8};
+
+SONT_API void *sont_msbc_create(void)
+{
+    SONT_MSBC *m = (SONT_MSBC *)calloc(1, sizeof(SONT_MSBC));
+    if (m) {
+        sbc_reset(&m->enc);
+        sbc_reset(&m->dec);
+    }
+    return m;
+}
+
+SONT_API void sont_msbc_destroy(void *h) { free(h); }
+
+static void sont_msbc_frame(struct sbc_frame *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->msbc = true;
+    f->freq = SBC_FREQ_16K;
+    f->mode = SBC_MODE_MONO;
+    f->bam = SBC_BAM_LOUDNESS;
+    f->nblocks = 15;
+    f->nsubbands = 8;
+    f->bitpool = 26;
+}
+
+/* pcm: 120 samples. out: 60 bytes. Returns 60, <0 on error. */
+SONT_API int sont_msbc_encode(void *h, const int16_t *pcm, uint8_t *out)
+{
+    SONT_MSBC *m = (SONT_MSBC *)h;
+    struct sbc_frame f;
+    if (m == NULL || pcm == NULL || out == NULL) {
+        return -1;
+    }
+    sont_msbc_frame(&f);
+    out[0] = 0x01;
+    out[1] = sont_h2[m->seq & 3];
+    m->seq++;
+    if (sbc_encode(&m->enc, pcm, 1, NULL, 0, &f, out + 2, SBC_MSBC_SIZE) != 0) {
+        return -1;
+    }
+    out[59] = 0x00;
+    return 60;
+}
+
+/* frame: the 57 mSBC bytes (starting with 0xAD), or NULL for a lost frame (packet loss
+ * concealment). pcm: 120 samples out. Returns 0, <0 if the frame is not valid mSBC
+ * (pcm then holds concealment). */
+SONT_API int sont_msbc_decode(void *h, const uint8_t *frame, int16_t *pcm)
+{
+    SONT_MSBC *m = (SONT_MSBC *)h;
+    struct sbc_frame f;
+    if (m == NULL || pcm == NULL) {
+        return -1;
+    }
+    sont_msbc_frame(&f);
+    if (frame != NULL && sbc_decode(&m->dec, frame, SBC_MSBC_SIZE, &f, pcm, 1, NULL, 0) == 0) {
+        return 0;
+    }
+    sbc_decode(&m->dec, NULL, 0, &f, pcm, 1, NULL, 0);
+    return frame == NULL ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ resampler */
+
+/* Rational polyphase resampler (L/M), windowed-sinc low-pass, int16 in and out.
+ * Used between Windows (48 kHz stereo) and the SCO link (8 or 16 kHz mono).
+ * in_ch 2 is mixed to mono, out_ch 2 duplicates the mono result. */
+typedef struct {
+    unsigned L, M, taps, in_ch, out_ch;
+    long t;           /* high-rate time of the next output, from the first new input */
+    float *h;         /* L phases x taps */
+    float *buf;       /* taps-1 history + current block */
+    unsigned buf_cap;
+} SONT_RS;
+
+static unsigned sont_gcd(unsigned a, unsigned b)
+{
+    while (b) {
+        unsigned t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+SONT_API void *sont_rs_create(unsigned in_rate, unsigned out_rate, unsigned in_ch, unsigned out_ch)
+{
+    SONT_RS *r;
+    unsigned g, n, i, big;
+    double fc, sum = 0.0;
+    double *proto;
+    if (in_rate == 0 || out_rate == 0 || in_ch < 1 || in_ch > 2 || out_ch < 1 || out_ch > 2) {
+        return NULL;
+    }
+    r = (SONT_RS *)calloc(1, sizeof(SONT_RS));
+    if (r == NULL) {
+        return NULL;
+    }
+    g = sont_gcd(in_rate, out_rate);
+    r->L = out_rate / g;
+    r->M = in_rate / g;
+    r->in_ch = in_ch;
+    r->out_ch = out_ch;
+    big = r->L > r->M ? r->L : r->M;
+    r->taps = 24 * (big / r->L + 1);          /* taps per phase */
+    n = r->taps * r->L;
+    /* cutoff 0.45 x the lower of the two rates, as a fraction of the high rate */
+    fc = 0.45 * (double)(in_rate < out_rate ? in_rate : out_rate) / ((double)in_rate * r->L);
+    proto = (double *)malloc(sizeof(double) * n);
+    r->h = (float *)malloc(sizeof(float) * n);
+    if (proto == NULL || r->h == NULL) {
+        free(proto);
+        free(r->h);
+        free(r);
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        double x = (double)i - (double)(n - 1) / 2.0;
+        double s = x == 0.0 ? 2.0 * fc : sin(2.0 * M_PI * fc * x) / (M_PI * x);
+        double w = 0.42 - 0.5 * cos(2.0 * M_PI * i / (n - 1)) + 0.08 * cos(4.0 * M_PI * i / (n - 1));
+        proto[i] = s * w;
+        sum += proto[i];
+    }
+    /* unity DC gain per phase: each output sees taps coefficients summing to ~sum/L */
+    for (i = 0; i < n; i++) {
+        unsigned p = i % r->L, j = i / r->L;
+        r->h[p * r->taps + j] = (float)(proto[i] * r->L / sum);
+    }
+    free(proto);
+    r->buf_cap = r->taps - 1;
+    r->buf = (float *)calloc(r->buf_cap, sizeof(float));
+    if (r->buf == NULL) {
+        free(r->h);
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+SONT_API void sont_rs_destroy(void *h)
+{
+    SONT_RS *r = (SONT_RS *)h;
+    if (r) {
+        free(r->h);
+        free(r->buf);
+        free(r);
+    }
+}
+
+/* Upper bound of the output frames for in_frames input frames. */
+SONT_API unsigned sont_rs_max_out(void *h, unsigned in_frames)
+{
+    SONT_RS *r = (SONT_RS *)h;
+    return r ? (unsigned)(((unsigned long long)in_frames * r->L) / r->M + 2) : 0;
+}
+
+/* Returns the frames written to out (out_ch channels), <0 on error. */
+SONT_API int sont_rs_process(void *h, const int16_t *in, unsigned in_frames,
+                             int16_t *out, unsigned out_cap)
+{
+    SONT_RS *r = (SONT_RS *)h;
+    unsigned hist, need, i, written = 0;
+    float *x;
+    if (r == NULL || (in == NULL && in_frames)) {
+        return -1;
+    }
+    hist = r->taps - 1;
+    need = hist + in_frames;
+    if (need > r->buf_cap) {
+        float *nb = (float *)realloc(r->buf, sizeof(float) * need);
+        if (nb == NULL) {
+            return -1;
+        }
+        r->buf = nb;
+        r->buf_cap = need;
+    }
+    x = r->buf;
+    for (i = 0; i < in_frames; i++) {
+        x[hist + i] = r->in_ch == 2 ? ((float)in[2 * i] + (float)in[2 * i + 1]) * 0.5f : (float)in[i];
+    }
+    while (r->t >= 0 && (unsigned long)(r->t / r->L) < in_frames) {
+        unsigned n = (unsigned)(r->t / r->L), p = (unsigned)(r->t % r->L), j;
+        const float *c = r->h + p * r->taps;
+        const float *s = x + hist + n;      /* s[-j] = input n - j */
+        float acc = 0.0f;
+        long v;
+        if (written >= out_cap) {
+            return -1;
+        }
+        for (j = 0; j < r->taps; j++) {
+            acc += c[j] * s[-(long)j];
+        }
+        v = lrintf(acc);
+        if (v > 32767) {
+            v = 32767;
+        } else if (v < -32768) {
+            v = -32768;
+        }
+        if (r->out_ch == 2) {
+            out[2 * written] = (int16_t)v;
+            out[2 * written + 1] = (int16_t)v;
+        } else {
+            out[written] = (int16_t)v;
+        }
+        written++;
+        r->t += r->M;
+    }
+    r->t -= (long)in_frames * r->L;
+    memmove(x, x + in_frames, sizeof(float) * hist);
+    return (int)written;
 }

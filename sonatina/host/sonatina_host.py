@@ -49,6 +49,7 @@ from bumble.device import Connection, Device, DeviceConfiguration
 from bumble.pairing import PairingConfig
 
 import sonatina_avrcp
+import sonatina_hfp
 import sonatina_media
 
 log = logging.getLogger("sonatina")
@@ -153,6 +154,23 @@ class CodecLib:
             L.sont_aptx_encode.restype = ctypes.c_int
             L.sont_aptx_encode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
                                            ctypes.c_char_p, ctypes.c_uint]
+        self.has_msbc = hasattr(L, "sont_msbc_create")   # codec version >= 5 (HFP)
+        if self.has_msbc:
+            L.sont_msbc_create.restype = ctypes.c_void_p
+            L.sont_msbc_create.argtypes = []
+            L.sont_msbc_destroy.argtypes = [ctypes.c_void_p]
+            L.sont_msbc_encode.restype = ctypes.c_int
+            L.sont_msbc_encode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+            L.sont_msbc_decode.restype = ctypes.c_int
+            L.sont_msbc_decode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+            L.sont_rs_create.restype = ctypes.c_void_p
+            L.sont_rs_create.argtypes = [ctypes.c_uint] * 4
+            L.sont_rs_destroy.argtypes = [ctypes.c_void_p]
+            L.sont_rs_max_out.restype = ctypes.c_uint
+            L.sont_rs_max_out.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            L.sont_rs_process.restype = ctypes.c_int
+            L.sont_rs_process.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
+                                          ctypes.c_char_p, ctypes.c_uint]
         self.has_gain = hasattr(L, "sont_pcm_gain")   # codec version >= 2
         if self.has_gain:
             L.sont_pcm_gain.restype = None
@@ -421,21 +439,28 @@ class ToneSource:
         pass
 
 
-def find_capture_device(name: str):
-    import sounddevice as sd
-
-    best = None
-    for index, dev in enumerate(sd.query_devices()):
-        if dev["max_input_channels"] < 1 or name.lower() not in dev["name"].lower():
+def find_capture_device(name: str, devices=None, hostapis=None):
+    """The VB-CABLE recording end. A plain substring match is not enough: "Hi-Fi Cable
+    Output" (the microphone cable) also contains "CABLE Output" (2026-11-20: Sonatina
+    captured the wrong cable, with its own clock: pops). Microphone cables are skipped
+    unless asked for, and names starting with `name` win; WASAPI first as before."""
+    if devices is None:
+        import sounddevice as sd
+        devices, hostapis = sd.query_devices(), sd.query_hostapis()
+    want = name.lower()
+    avoid = [k.lower() for k in sonatina_hfp.MIC_DEVICES if k.lower() not in want]
+    found = []
+    for index, dev in enumerate(devices):
+        n = dev["name"].lower()
+        if dev["max_input_channels"] < 1 or want not in n or any(a in n for a in avoid):
             continue
-        api = sd.query_hostapis(dev["hostapi"])["name"]
-        if "WASAPI" in api:
-            return index, dev, api
-        if best is None:
-            best = (index, dev, api)
-    if best is None:
+        api = hostapis[dev["hostapi"]]["name"]
+        found.append(((0 if "WASAPI" in api else 1, 0 if n.startswith(want) else 1, index),
+                      index, dev, api))
+    if not found:
         raise RuntimeError(f'no capture device matching "{name}" (is VB-CABLE installed?)')
-    return best
+    _rank, index, dev, api = min(found, key=lambda f: f[0])
+    return index, dev, api
 
 
 class CableCapture:
@@ -678,6 +703,26 @@ def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
     raise RuntimeError(f'no playback endpoint matching "{match}" (is VB-CABLE installed?)')
 
 
+def fix_default_output(match: str = "VB-Audio Virtual Cable") -> str | None:
+    """A microphone cable must never be the Windows default output: the music would go
+    into the microphone instead of the headphones (installing Hi-Fi Cable does that).
+    Returns the new default when it had to be changed."""
+    if sys.platform != "win32":
+        return None
+    from pycaw.constants import EDataFlow, ERole
+    from pycaw.pycaw import AudioUtilities
+
+    com_init()
+    enumerator = AudioUtilities.GetDeviceEnumerator()
+    dev = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender.value, ERole.eMultimedia.value)
+    name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
+    if not any(k.lower() in name.lower() for k in sonatina_hfp.MIC_DEVICES):
+        return None
+    new = set_default_output(match)
+    log.warning('Windows output was "%s" (the microphone cable): back to "%s"', name, new)
+    return new
+
+
 # ----------------------------------------------------------------------------- media pump
 SILENCE = 32   # about -60 dBFS: paused players send zeros, quiet music stays above this
 
@@ -905,11 +950,20 @@ class Settings:
     low_latency: bool = False     # smaller jitter buffer and packets (games, video)
     media_keys: bool = True       # AVRCP: headset buttons -> Windows media keys
     headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
+    hfp_mode: str = "auto"        # headset microphone: auto (when an app opens the virtual mic) |
+                                  # on (call mode whenever connected) | off (no HFP, no SCO)
+    hfp_msbc: bool = True         # wide-band speech (mSBC 16 kHz) when the headset has it
+    mic_device: str = ""          # virtual cable for the microphone ("" = first found of
+                                  # CABLE-A, Hi-Fi Cable, Steam Streaming Microphone)
+    mic_gain_db: float = 6.0      # headset microphones are quiet
+    sco_alt: int = 2              # USB alternate setting for CVSD (2 = one 16-bit link)
+    sco_alt_msbc: int = 1         # USB alternate setting for mSBC (transparent, 24-byte packets)
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "aac_bitrate",
                 "capture",
-                "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys", "low_latency")
+                "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys", "low_latency",
+                "hfp_mode", "hfp_msbc", "mic_device", "mic_gain_db", "sco_alt", "sco_alt_msbc")
 
 
 def load_settings(path: str) -> Settings:
@@ -964,6 +1018,8 @@ class SonatinaHost:
         self.headset_delay_ms: float | None = None
         self.on_change = None                 # called after settings changed (save)
         self.ready = False                    # True once powered on and keys loaded
+        self.stream = None                    # the A2DP stream (suspended during calls)
+        self.hfp = sonatina_hfp.HfpGateway(self)
 
     # -- settings ---------------------------------------------------------------
     def headset_name(self, address: str | None) -> str:
@@ -974,6 +1030,9 @@ class SonatinaHost:
     def codec_for(self, address: str) -> tuple[str, str]:
         h = self.s.headsets.get(address, {})
         return h.get("codec", self.s.codec), h.get("ldac_quality", self.s.ldac_quality)
+
+    def _changed_state(self) -> None:
+        """Something the tray shows changed (it polls every second: nothing to do)."""
 
     def _changed(self) -> None:
         if self.on_change is not None:
@@ -1017,6 +1076,7 @@ class SonatinaHost:
     def attach(self, device: Device) -> None:
         self.device = device
         self.configure_device(device)
+        self.hfp.attach(device)
         self.remote.listen(device)
         device.on("connection", self._on_connection)
 
@@ -1035,6 +1095,7 @@ class SonatinaHost:
         self.connection = connection
         self.peer = peer
         connection.on("disconnection", self._on_disconnection)
+        self.hfp.on_connected(connection)
         self.remote.start(connection)
         self.session_task = loop.create_task(self._session(connection, peer))
 
@@ -1054,6 +1115,8 @@ class SonatinaHost:
         self.connection = None
         self.peer = None
         self.state = "idle"
+        self.stream = None
+        self.hfp.on_disconnected()
         self.remote.stop()
         if self.pump:
             asyncio.get_running_loop().create_task(self.pump.stop())
@@ -1115,8 +1178,10 @@ class SonatinaHost:
                 mtu_holder["mtu"] = stream.rtp_channel.peer_mtu
                 log.info("media channel MTU %d", mtu_holder["mtu"])
             await stream.start()
+            self.stream = stream
             self.state = "streaming"
             self.remote.on_streaming()
+            self.hfp.start_slc()
             if self.s.address != peer:   # the headset in use becomes the active one
                 self.s.address = peer
                 self._changed()
@@ -1173,6 +1238,37 @@ class SonatinaHost:
         bitpool = max(2, min(self.s.sbc_max_bitpool, remote_max))
         cap = self.max_packet_ms()
         return sink, sbc_config(bitpool), lambda: SbcEncoder(self.lib, bitpool, mtu(), cap)
+
+    async def suspend_media(self) -> None:
+        """A2DP off for a call (AVDTP SUSPEND): the headset can only do one at a time."""
+        from bumble.avdtp import State
+        stream = self.stream
+        if stream is not None and stream.state == State.STREAMING:
+            try:
+                await asyncio.wait_for(stream.stop(), 3.0)
+            except Exception as error:
+                log.debug("A2DP suspend: %r", error)
+        if self.pump is not None:
+            await self.pump.stop()
+
+    async def resume_media(self) -> None:
+        from bumble.avdtp import State
+        stream = self.stream
+        if self.connection is None or stream is None:
+            return
+        if stream.state == State.STREAMING:
+            if self.pump is not None and self.pump.task is None and stream.rtp_channel is not None:
+                await self.pump.start(stream.rtp_channel)
+            return
+        try:
+            await asyncio.wait_for(stream.start(), 5.0)
+            log.info("A2DP resumed")
+        except Exception as error:
+            log.warning("A2DP resume failed (%r): reconnecting", error)
+            try:
+                await self.connection.disconnect()
+            except Exception:
+                pass
 
     def max_packet_ms(self) -> int:
         """Audio waits until its packet is full: smaller packets in low-latency mode."""
@@ -1313,9 +1409,23 @@ class SonatinaHost:
         if self.connection is not None and self.peer == norm_addr(address):
             await self.connection.disconnect()   # renegotiates with the new codec
 
+    async def set_hfp_mode(self, mode: str) -> bool:
+        """Returns True when the Bluetooth host must restart (HFP turned on or off)."""
+        old = self.s.hfp_mode
+        self.s.hfp_mode = mode
+        self._changed()
+        self.hfp.dismissed = False
+        self.hfp.sco_failures = 0
+        if mode == "auto" and self.hfp.in_call:
+            pass   # the watcher decides at its next poll
+        return (old == "off") != (mode == "off")
+
     async def set_option(self, name: str, value: bool) -> None:
         """absolute_volume and low_latency need a reconnection to take effect, media_keys not."""
         setattr(self.s, name, value)
+        if name == "hfp_msbc" and value:   # asked again: give mSBC another chance everywhere
+            for entry in self.s.headsets.values():
+                entry.pop("msbc_broken", None)
         self._changed()
         if name in ("absolute_volume", "low_latency") and self.connection is not None:
             await self.connection.disconnect()
@@ -1354,11 +1464,14 @@ class SonatinaHost:
                 + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms"
                    f" margin={p.margin_ms if p.margin_ms is None else round(p.margin_ms, 1)} ms"
                    f" target={p.target_ms} ms rate={(p.rate - 1) * 1e6:+.0f} ppm"
-                   f" latency={self.latency_ms()} ms" if p else ""))
+                   f" latency={self.latency_ms()} ms" if p else "")
+                + (f" call: {self.hfp.audio.stats()}" if self.hfp.audio is not None else ""))
 
     def summary(self) -> str:
         """One line for the tray tooltip."""
         p = self.pump
+        if self.hfp.in_call:
+            return f"{self.headset_name(self.peer)}: {self.hfp.summary()}"
         if self.state == "streaming" and p is not None and p.encoder is not None:
             vol = "" if self.volume.last is None else (
                 tr(" · muto", " · muted") if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
@@ -1463,6 +1576,36 @@ def set_timer_resolution() -> None:
             pass
 
 
+ADAPTER_STUCK = False   # a close timed out: only a new process frees the adapter
+
+
+async def close_transport(transport, timeout: float = 6.0) -> None:
+    """Closes the adapter even if a second restart arrives meanwhile. An interrupted close
+    leaves WinUSB open inside this process and every reopen fails with
+    LIBUSB_ERROR_ACCESS (2026-11-20: two menu clicks 7 s apart)."""
+    t0 = time.monotonic()
+    task = asyncio.ensure_future(transport.close())
+    while not task.done():
+        left = timeout - (time.monotonic() - t0)
+        if left <= 0:
+            global ADAPTER_STUCK
+            ADAPTER_STUCK = True
+            log.warning("adapter close still running after %.0f s", timeout)
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), left)
+        except asyncio.CancelledError:
+            log.info("restart requested while closing the adapter: finishing the close first")
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            break
+    if task.done() and not task.cancelled() and task.exception() is not None:
+        log.warning("adapter close: %r", task.exception())
+    else:
+        log.info("adapter closed (%.1f s)", time.monotonic() - t0)
+
+
 async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) -> None:
     """Runs until the dongle goes away (unplugged) or the task is cancelled.
     on_host(host) is called once the host object exists (used by the tray)."""
@@ -1474,8 +1617,24 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
         on_host(host)
     source = ToneSource(host.ring) if settings.tone else CableCapture(host.ring, settings.capture)
 
-    async with await open_transport(settings.transport) as (hci_source, hci_sink):
+    spec = settings.transport
+    if settings.hfp_mode != "off" and spec.lower().startswith("usb"):
+        libusb = sonatina_hfp.use_bundled_libusb()
+        if libusb is None and sys.platform == "win32":
+            log.warning("libusb 1.0.29 not found: headset microphone off")
+        else:
+            sonatina_hfp.install_safe_iso()
+            sonatina_hfp.tune_usb_transport()
+            spec = sonatina_hfp.transport_spec(spec, int(settings.sco_alt))
+    log.info("transport %s", spec)
+
+    transport = await open_transport(spec)
+    hci_source, hci_sink = transport.source, transport.sink
+    try:
         apply_transport_quirks(settings.transport, hci_source)
+        if "+sco=" in spec:
+            host.hfp.lane = sonatina_hfp.ScoOutLane.install(hci_sink)
+            host.hfp.usb_alt = sonatina_hfp.UsbScoAlt.install(transport)
         config = DeviceConfiguration()
         config.name = "Sonatina"
         config.class_of_device = DeviceClass.pack_class_of_device(
@@ -1498,7 +1657,8 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
         source.start()
         tasks = [asyncio.create_task(host.keep_connected()),
                  asyncio.create_task(host.follow_volume()),
-                 asyncio.create_task(watch_capture(source))]
+                 asyncio.create_task(watch_capture(source)),
+                 asyncio.create_task(host.hfp.run())]
         if settings.stats:
             tasks.append(asyncio.create_task(host.print_stats(
                 interval=60.0 if stats_to_log else 5.0, to_log=stats_to_log)))
@@ -1513,8 +1673,15 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
             for t in tasks:
                 t.cancel()
             source.stop()
+            try:
+                await host.hfp.shutdown()
+            except BaseException as error:
+                log.debug("hfp shutdown: %r", error)
+            host.hfp._stop_audio()
             if host.pump is not None:
                 await host.pump.stop()
+    finally:
+        await close_transport(transport)
 
 
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Sonatina")
@@ -1534,6 +1701,8 @@ def main() -> None:
     parser.add_argument("--volume-endpoint",
                         help="playback endpoint whose Windows volume is followed (substring)")
     parser.add_argument("--tone", action="store_true", help="1 kHz test tone instead of VB-CABLE")
+    parser.add_argument("--hfp", choices=["auto", "on", "off"],
+                        help="headset microphone: auto (when an app opens it), on, off")
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
@@ -1552,7 +1721,7 @@ def main() -> None:
     for name, value in (("transport", args.transport), ("address", args.address),
                         ("codec", args.codec), ("ldac_quality", args.ldac_quality),
                         ("sbc_max_bitpool", args.sbc_bitpool), ("capture", args.capture),
-                        ("volume_endpoint", args.volume_endpoint)):
+                        ("volume_endpoint", args.volume_endpoint), ("hfp_mode", args.hfp)):
         if value is not None:
             setattr(settings, name, norm_addr(value) if name == "address" else value)
     if args.codec or args.ldac_quality:   # explicit choice wins over the per-headset one
