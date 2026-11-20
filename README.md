@@ -14,7 +14,8 @@ Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LD
 - Follows the Windows volume and mute; headphone buttons control the player.
 - The headphone **microphone** works in Windows apps (Discord, Teams...): when an app opens it,
   Sonatina switches the headphones to call mode by itself and back to music afterwards.
-- Runs in the notification area and starts with Windows.
+- Runs in the notification area and starts with Windows; a Windows 11 style window shows the
+  headphones, codec, microphone and link, and holds all the settings.
 
 ## Requirements
 
@@ -49,6 +50,20 @@ rename it (Settings → System → Sound → CABLE Input → Rename), for exampl
 
 ## Using it
 
+Click the tray icon (or start Sonatina again from the Start menu) to open the **Sonatina window**:
+
+| Section | What it shows / does |
+|---|---|
+| Home | headphones, state, codec and estimated delay, volume, microphone mode and level, options, codec chain, link health |
+| Headphones | paired headphones (use these / forget), pair new ones |
+| Audio quality | preferred codec per headphones (unsupported ones greyed out), LDAC quality, low latency |
+| Microphone | Automatic / Always on / Off, HD voice, level, voice codec, lost frames, apps using it |
+| Diagnostics | buffer, clock drift, dropouts, packets; restart connection, open the log, copy the full status |
+| About | version, start with Windows, log file, open source components |
+
+Closing the window does not stop Sonatina: music keeps playing from the tray. The window follows
+the Windows language (English or Italian) and light/dark theme.
+
 The icon in the notification area shows the state: **blue** streaming, **green** call mode
 (microphone live), **grey** waiting for the headphones, **red** adapter missing or error. Hover it to see the headphones, codec and volume.
 
@@ -62,6 +77,7 @@ Right-click menu:
 | Headphone microphone | **Automatic** (call mode while an app uses the microphone), **Always on**, **Off**; HD voice (mSBC) |
 | Low latency (games, video) | smaller buffers and packets; the tooltip shows the estimated delay to your ears |
 | Headphone buttons | play/pause, next and previous control the current player (Spotify, browsers, Media Player...) |
+| Open Sonatina | opens the window (also a left click on the icon) |
 | Restart connection | reconnects the headphones |
 | Open log | `%LOCALAPPDATA%\Sonatina\sonatina.log` |
 | Exit | stops Sonatina until the next sign-in |
@@ -89,6 +105,11 @@ no longer need it, and pick your normal output in the sound settings.
   wrong cable). The Windows output must stay "CABLE Input"; Sonatina puts it back by itself.
 - **Microphone silent in an app**: the app must use "Hi-Fi Cable Output"; the tray icon turns
   green while the app holds the microphone. The Windows sound settings page does not count.
+- **Odd sound for a few seconds after the PC wakes up** (noise, too slow then too fast): Windows
+  and the player resynchronise their audio after sleep; Sonatina reconnects the headphones by
+  itself and the sound settles within about 15 s.
+- **The window says "Sonatina is not running"**: press *Start Sonatina*; the window connects by
+  itself. Window problems are logged in `%LOCALAPPDATA%\Sonatina\dashboard.log`.
 - Attach `sonatina.log` when reporting a problem.
 
 ## Limits (for now)
@@ -104,9 +125,11 @@ no longer need it, and pick your normal output in the sound settings.
 ## Building
 
 - Tests run on every push: `.github/workflows/host.yml` (Bumble virtual controllers, no hardware).
+- The window (`sonatina/dashboard`, C# / WinUI 3) is compiled on every push (job *dashboard*).
+  Locally, with the free .NET 8 SDK: `sonatina\dashboard\build.ps1 -Run`.
 - The installer is built by the same workflow on `v*` tags or by a manual run
-  (*Actions → Sonatina host → Run workflow*): PyInstaller (`Sonatina.exe`), libwdi `wdi-simple`,
-  Realtek firmware, Inno Setup (`sonatina/installer/sonatina.iss`).
+  (*Actions → Sonatina host → Run workflow*): PyInstaller (`Sonatina.exe`), the window,
+  libwdi `wdi-simple`, Realtek firmware, Inno Setup (`sonatina/installer/sonatina.iss`).
 - Development run without installing: `sonatina/host/README.md`.
 
 ## How it works
@@ -121,20 +144,26 @@ A2DP; when an app opens the virtual microphone it suspends A2DP, opens an eSCO l
 adapter's isochronous USB endpoints and moves voice both ways (CVSD or mSBC, resampled in
 `sonatina_codec.dll`). Notes on the USB details are at the top of that file.
 
+The window is a separate program (`SonatinaDashboard.exe`, .NET 8 + Windows App SDK, self-contained)
+that talks to the tray through `sonatina_ipc.py`: a local TCP channel on 127.0.0.1 with a random
+token in `%LOCALAPPDATA%\Sonatina\ipc.json`, newline-delimited JSON, live status pushed 4 times
+a second.
+
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `sonatina/host` | the app: host, tray, AVRCP, HFP, codec DLL (`codec/`), tests (`tests/`), tools |
+| `sonatina/dashboard` | the Sonatina window (C#, WinUI 3) |
 | `sonatina/installer` | Inno Setup script and the adapter setup helper |
-| `.github/workflows/host.yml` | tests on every push, installer on `v*` tags |
+| `.github/workflows/host.yml` | tests and window build on every push, installer on `v*` tags |
 | `archive/` | earlier kernel driver, pure-Python prototype and notes, kept as reference (see `archive/README.md`) |
 
 ## Licences
 
-Sonatina code: see `LICENSE` (to be added). Third-party parts: Bumble (Apache-2.0), libldac and
+Sonatina code: see `LICENSE` (to be added). Third-party parts: Bumble (Apache-2.0), libusb (LGPL-2.1), libldac and
 libsbc from AOSP (Apache-2.0), Fraunhofer FDK AAC (FDK AAC licence, see
 `sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libfreeaptx
 (LGPL-2.1+), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
-redistributable), PyInstaller bootloader (GPL with exception). VB-CABLE and Hi-Fi Cable
+redistributable), PyInstaller bootloader (GPL with exception), .NET and Windows App SDK (MIT). VB-CABLE and Hi-Fi Cable
 come from vb-audio.com and are not part of this project. "Bluetooth", "LDAC", "aptX" and "AAC" are trademarks of their owners.
