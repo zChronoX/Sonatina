@@ -758,6 +758,41 @@ def not_silent(pcm: bytes) -> bool:
     return bool(samples) and (max(samples) > SILENCE or min(samples) < -SILENCE)
 
 
+class LinkBacklog:
+    """Packets of our headset link still waiting in Bumble's queue (not yet handed to the
+    controller, which holds at most a few). Bumble's queue has no limit: with the
+    headphones out of range nothing leaves, seconds of audio pile up and arrive all at
+    once when the radio recovers, which the headphones cannot take (silence, the two
+    earbuds out of sync, a few seconds looping: 2026-11-21). The pump drops new audio
+    instead while more than LIMIT_S of audio is waiting here (on top of what the
+    controller holds), so what reaches the headphones stays a fraction of a second old."""
+
+    LIMIT_S = 0.150
+
+    def __init__(self, channel) -> None:
+        self.queue = None
+        self.handle = None
+        try:
+            connection = channel.connection
+            self.handle = connection.handle
+            self.queue = connection.device.host.get_data_packet_queue(connection.handle)
+        except Exception as error:      # test channels, other transports: no limit
+            log.debug("link backlog not available: %r", error)
+
+    def waiting(self) -> int:
+        packets = getattr(self.queue, "_packets", None)
+        if not packets:
+            return 0
+        handle = self.handle
+        return sum(1 for _packet, h in packets if h == handle)
+
+    def full(self, packet_s: float, dropping: bool = False) -> bool:
+        """packet_s: audio carried by one packet (LDAC 990: ~5 ms, aptX: ~19 ms). Once
+        dropping, keeps dropping until half the limit is left (no on/off flicker)."""
+        limit = self.LIMIT_S / 2 if dropping else self.LIMIT_S
+        return self.queue is not None and self.waiting() * packet_s >= limit
+
+
 class MediaPump:
     """Paces encoding on the monotonic clock (like the kernel driver's media clock),
     builds RTP packets with timestamps in samples and writes them to the channel.
@@ -795,6 +830,8 @@ class MediaPump:
         self.drift = 0.0          # learned clock offset (integral term)
         self.margin_ms: float | None = None
         self.capture_ms = 10      # capture block (CableCapture)
+        self.radio_dropped = 0    # packets not sent: the radio link was not keeping up
+        self.radio_episodes = 0
 
     async def start(self, rtp_channel) -> None:
         await self.stop()
@@ -845,6 +882,9 @@ class MediaPump:
         next_servo = last + 1.0
         underruns = self.ring.underruns
         done = 0
+        link = LinkBacklog(channel)
+        dropping = 0                # packets dropped in the current slow-radio episode
+        warned_at = -1e9
         while True:
             now = time.perf_counter()
             media += (now - last) * self.rate
@@ -873,13 +913,28 @@ class MediaPump:
                 for payload, samples in self.encoder.push(pcm):
                     header = struct.pack(">BBHII", 0x80, 96, self.seq & 0xFFFF,
                                          self.timestamp & 0xFFFFFFFF, SSRC) if rtp else b""
+                    self.seq += 1               # advanced for dropped packets too: the
+                    self.timestamp += samples   # headphones see a gap, not a time shift
+                    if link.full(samples / RATE, dropping > 0):
+                        if not dropping:
+                            self.radio_episodes += 1
+                            if now - warned_at > 30:
+                                warned_at = now
+                                log.warning("radio link too slow (headphones far away?): "
+                                            "dropping audio instead of delaying it")
+                        dropping += 1
+                        self.radio_dropped += 1
+                        continue
+                    if dropping:
+                        if dropping * samples / RATE >= 0.1:
+                            log.info("radio link back: %.1f s of audio dropped",
+                                     dropping * samples / RATE)
+                        dropping = 0
                     try:
                         channel.write(header + payload)
                     except Exception as error:   # link dropped under us: stop quietly
                         log.debug("media channel closed: %r", error)
                         return
-                    self.seq += 1
-                    self.timestamp += samples
                     self.packets += 1
                 done += PUSH_SAMPLES
             next_media = (done + PUSH_SAMPLES) / RATE - self.LEAD_S
@@ -1539,6 +1594,7 @@ class SonatinaHost:
                      "margin_ms": None if p is None or p.margin_ms is None else round(p.margin_ms, 1),
                      "rate_ppm": round((p.rate - 1) * 1e6) if p else None,
                      "packets": p.packets if p else 0,
+                     "radio_dropped": p.radio_dropped if p else 0,
                      "call": audio.stats() if audio else None},
         }
 
@@ -1546,7 +1602,8 @@ class SonatinaHost:
         p = self.pump
         return (f"[{self.state}] ring={self.ring.level_ms()} ms underruns={self.ring.underruns} "
                 f"dropped={self.ring.dropped // FRAME_BYTES} smp"
-                + (f" packets={p.packets} skips={p.skips} max_late={p.max_late_ms:.1f} ms"
+                + (f" packets={p.packets} skips={p.skips} radio_dropped={p.radio_dropped}"
+                   f" max_late={p.max_late_ms:.1f} ms"
                    f" margin={p.margin_ms if p.margin_ms is None else round(p.margin_ms, 1)} ms"
                    f" target={p.target_ms} ms rate={(p.rate - 1) * 1e6:+.0f} ppm"
                    f" latency={self.latency_ms()} ms" if p else "")
