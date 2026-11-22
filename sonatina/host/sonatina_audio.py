@@ -9,6 +9,7 @@ import asyncio
 import ctypes
 import logging
 import math
+import re
 import struct
 import sys
 import threading
@@ -290,8 +291,8 @@ class EndpointVolume:
             name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
             names.append(name)
             if match.lower() in name.lower():
-                # the Windows default output first, then "CABLE Input", then "CABLE In 16ch"
-                rank = (0 if dev.GetId() == default_id else 1, 1 if "16ch" in name.lower() else 0)
+                # the Windows default output first, then "CABLE Input", then "CABLE In 16 Ch"
+                rank = (0 if dev.GetId() == default_id else 1, 1 if is_16ch(name) else 0)
                 candidates.append((rank, i, name, dev))
         if not candidates:
             raise RuntimeError(f'no active playback endpoint matching "{match}" among {names}')
@@ -373,6 +374,19 @@ class EndpointVolume:
         return buf.raw
 
 
+def is_16ch(name: str) -> bool:
+    """VB-CABLE's multichannel input: "CABLE In 16ch" in old versions, "CABLE In 16 Ch" now
+    (2026-11-22: "16ch" did not match it and Sonatina made it the Windows output)."""
+    return re.search(r"16\s*ch\b", name.lower()) is not None
+
+
+def pick_cable_output(names: list[str], match: str = "VB-Audio Virtual Cable") -> int | None:
+    """Index of the stereo VB-CABLE input among playback endpoint names (the 16-channel
+    one only if nothing else is there)."""
+    found = [(1 if is_16ch(n) else 0, i) for i, n in enumerate(names) if match.lower() in n.lower()]
+    return min(found)[1] if found else None
+
+
 def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
     """Makes the VB-CABLE playback endpoint the Windows default output (all roles)."""
     from pycaw.constants import DEVICE_STATE, EDataFlow, ERole
@@ -381,14 +395,14 @@ def set_default_output(match: str = "VB-Audio Virtual Cable") -> str:
     com_init()
     enumerator = AudioUtilities.GetDeviceEnumerator()
     endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
-    for i in range(endpoints.GetCount()):
-        dev = endpoints.Item(i)
-        name = AudioUtilities.CreateDevice(dev).FriendlyName or ""
-        if match.lower() in name.lower() and "16ch" not in name.lower():
-            AudioUtilities.SetDefaultDevice(
-                dev.GetId(), roles=[ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
-            return name
-    raise RuntimeError(f'no playback endpoint matching "{match}" (is VB-CABLE installed?)')
+    devs = [endpoints.Item(i) for i in range(endpoints.GetCount())]
+    names = [AudioUtilities.CreateDevice(d).FriendlyName or "" for d in devs]
+    index = pick_cable_output(names, match)
+    if index is None:
+        raise RuntimeError(f'no playback endpoint matching "{match}" (is VB-CABLE installed?)')
+    AudioUtilities.SetDefaultDevice(
+        devs[index].GetId(), roles=[ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
+    return names[index]
 
 
 def fix_default_output(match: str = "VB-Audio Virtual Cable") -> str | None:

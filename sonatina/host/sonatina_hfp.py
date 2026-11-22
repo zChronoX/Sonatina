@@ -480,7 +480,24 @@ def make_ag_class():
         def _on_bldn(self) -> None:                  # redial: we place no calls
             self.send_error()
 
+        def __getattr__(self, name: str):
+            """Any other command (vendor ones like the CMF's AT+XNTSF, 2026-11-22): ERROR,
+            as a phone does. Bumble leaves it unanswered and the headset waits for a reply."""
+            if not name.startswith("_on_"):
+                raise AttributeError(name)
+
+            def unsupported(*_args) -> None:
+                command = name[4:].upper().replace("_READ", "?").replace("_TEST", "=?")
+                if command not in UNKNOWN_AT_LOGGED:
+                    UNKNOWN_AT_LOGGED.add(command)
+                    log.info("HFP: headset command AT+%s not supported: answered ERROR", command)
+                self.send_error()
+            return unsupported
+
     return SonatinaAg
+
+
+UNKNOWN_AT_LOGGED: set[str] = set()
 
 
 # ----------------------------------------------------------------------------- PCM helpers

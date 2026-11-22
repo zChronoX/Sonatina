@@ -181,6 +181,17 @@ REEXPORTED = (
 AUDIO_VIDEO_MAJOR_CLASS = 0x04
 
 
+def connect_failure_reason(error: BaseException) -> str:
+    """The HCI reason of a failed page (PAGE_TIMEOUT_ERROR: headphones off or busy)."""
+    name = getattr(error, "error_name", "") or ""
+    code = getattr(error, "error_code", None)
+    if name:
+        return name
+    if isinstance(code, int):
+        return f"0x{code:02X}"
+    return type(error).__name__
+
+
 class SonatinaHost:
     def __init__(self, settings: Settings, codec_lib: CodecLib | None = None) -> None:
         self.s = settings
@@ -505,16 +516,36 @@ class SonatinaHost:
         retry forever. Any paired headset that connects by itself is accepted too."""
         await asyncio.sleep(3)
         backoff = 3.0
+        failures = 0
+        next_summary = 0.0
         while True:
             busy = self.discovering or self.pairing_target is not None
             if self.connection is None and self.s.address and not busy:
+                # the first attempts in full, then one line every 5 minutes (2026-11-22:
+                # 200 identical lines in 17 minutes said nothing about the cause)
+                verbose = failures < 4
                 try:
-                    log.info("connecting to %s ...", self.headset_name(self.s.address))
+                    if verbose:
+                        log.info("connecting to %s ...", self.headset_name(self.s.address))
                     await self.device.connect(self.s.address, transport=PhysicalTransport.BR_EDR)
                     backoff = 3.0
+                    failures = 0
                 except Exception as error:
-                    log.info("connect failed (%s), retry in %.0f s", type(error).__name__, backoff)
+                    failures += 1
+                    reason = connect_failure_reason(error)
+                    now = time.monotonic()
+                    if verbose:
+                        log.info("connect failed (%s), retry in %.0f s", reason, backoff)
+                        next_summary = now + 300.0
+                    elif now >= next_summary:
+                        next_summary = now + 300.0
+                        log.info("still not connected to %s: %d attempts, last %s%s",
+                                 self.headset_name(self.s.address), failures, reason,
+                                 " (headphones off or connected to another device?)"
+                                 if "TIMEOUT" in reason.upper() else "")
                     backoff = min(backoff * 1.5, 20.0)
+            elif self.connection is not None:
+                failures = 0
             await asyncio.sleep(backoff if self.connection is None else 2.0)
 
     # -- headset management (called from the tray) ------------------------------

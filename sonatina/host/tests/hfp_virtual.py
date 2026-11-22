@@ -239,6 +239,16 @@ async def scenario(msbc=True, opens_hfp=False, hangup=False, broken_msbc=False):
     assert host.state == 'streaming', host.state
     assert host.hfp.ready, 'SLC not up'
     print('SLC ready, A2DP', host.pump.encoder.name, flush=True)
+    # a vendor command (the CMF sends AT+XNTSF): answered ERROR, not left waiting
+    try:
+        await headset.hf.execute_command('AT+XNTSF=1', timeout=2.0)
+        raise AssertionError('unknown AT command answered OK')
+    except asyncio.TimeoutError:
+        raise AssertionError('unknown AT command left unanswered')
+    except AssertionError:
+        raise
+    except Exception as error:
+        print('unknown AT command ->', type(error).__name__, flush=True)
 
     async def call(expected_codec, seconds=2.0):
         FakeWatcher.apps = ['Discord.exe']

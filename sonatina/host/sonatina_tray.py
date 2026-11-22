@@ -606,7 +606,7 @@ def main() -> None:
         if "--relaunched" not in sys.argv:
             launch_dashboard()    # started again from the Start menu: show the window
         return
-    log.info("SonatinaHost tray starting")
+    log.info("SonatinaHost %s tray starting", sh.app_version())
     settings = sh.load_settings(sh.SETTINGS_PATH)
     if not settings.audio_configured:   # first run: Windows plays to VB-CABLE
         try:
