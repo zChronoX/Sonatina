@@ -143,4 +143,56 @@ public static class Status
             output += " Output";
         return L.T($"Livello · alle app arriva come «{output}»", $"Level · apps receive it as “{output}”");
     }
+
+    /// <summary>Signal bars (0-4), one word and the line under the codec (1.1.0, A4).</summary>
+    public static (int Bars, string Word, string Line) Signal(JsonObject s)
+    {
+        var radio = J.At(s, "host", "radio");
+        string level = J.S(radio, "level") ?? "none";
+        if (Host(s) is null || level == "none" || J.S(s, "host", "peer") is null)
+            return (0, "-", L.T("Nessun collegamento", "No link"));
+        int bars = level switch { "excellent" => 4, "good" => 3, _ => 1 };
+        string word = level switch
+        {
+            "excellent" => L.T("Ottimo", "Excellent"),
+            "good" => L.T("Buono", "Good"),
+            _ => L.T("Debole", "Weak"),
+        };
+        string line = L.T("Segnale ", "Signal ") + word.ToLowerInvariant();
+        if (Power(radio) is string power)
+            line += $" ({power})";
+        var lost = J.I(radio, "lost_ms_minute") ?? 0;
+        if (lost > 0)
+            line += L.T($" · {lost / 1000.0:0.0} s persi nell’ultimo minuto", $" · {lost / 1000.0:0.0} s lost in the last minute");
+        if (J.B(radio, "interference"))
+            line += L.T(" · disturbo radio", " · radio interference");
+        return (bars, word, line);
+    }
+
+    /// <summary>RSSI in words: BR/EDR controllers report dB from the ideal range, some dBm.</summary>
+    public static string? Power(JsonNode? radio)
+    {
+        if (J.I(radio, "rssi") is not int v)
+            return null;
+        if (J.S(radio, "rssi_unit") == "dBm")
+            return $"{v} dBm";
+        return v >= 0 ? L.T("potenza nella norma", "power in range")
+                      : L.T($"{-v} dB sotto la norma", $"{-v} dB below range");
+    }
+
+    /// <summary>"canale 6 · 1", "nessuno", "spento".</summary>
+    public static string WifiAvoided(JsonObject s)
+    {
+        var wifi = J.At(s, "host", "radio", "wifi");
+        if (wifi is null)
+            return "-";
+        if (!J.B(wifi, "enabled"))
+            return L.T("spento", "off");
+        var channels = J.Strings(wifi, "avoid").ToList();
+        if (channels.Count == 0)
+            return L.T("nessuno", "none");
+        return (channels.Count == 1 ? L.T("canale ", "channel ") : L.T("canali ", "channels ")) + string.Join(" · ", channels);
+    }
+
+    public static string Seconds(int? ms) => ms is int v ? (v == 0 ? "0 s" : $"{v / 1000.0:0.0} s") : "-";
 }

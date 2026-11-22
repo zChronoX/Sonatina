@@ -31,6 +31,10 @@ Windows apps ──► VB-CABLE (virtual output) ──► Sonatina ──► LD
 - Follows the Windows volume and mute; headphone buttons control the player.
 - The headphone **microphone** works in Windows apps (Discord, Teams...): when an app opens it,
   Sonatina switches the headphones to call mode by itself and back to music afterwards.
+- **Automatic Windows output**: headphones on, Windows plays to Sonatina; headphones off, it
+  switches to the output you choose (speakers, monitor...) and pauses the music, like a phone.
+- Shows the **radio signal** and keeps Bluetooth away from the channels of nearby 2.4 GHz Wi-Fi
+  (AFH), the usual cause of choppy sound.
 - Runs in the notification area and starts with Windows; a Windows 11 style window shows the
   headphones, codec, microphone and link, and holds all the settings.
 
@@ -110,16 +114,20 @@ no longer need it, and pick your normal output in the sound settings.
 
 ## Troubleshooting
 
-- **No sound**: the Windows output must be "CABLE Input"; the tray icon must be blue.
+- **No sound**: with the headphones on, the Windows output must be "CABLE Input" (Sonatina sets it
+  by itself unless *Automatic Windows output* is off); the tray icon must be blue.
 - **Red icon**: the adapter is unplugged or another program owns it. Re-plug it, then *Restart
   connection*. The installer log is `C:\Program Files\Sonatina\install.log`.
 - **Headphones do not connect**: switch them off and on; if needed *Forget* them and pair again.
+  If they are also paired with the PC's normal Bluetooth, Windows may take them first: remove
+  them there.
 - **Video ahead of the sound**: Bluetooth headphones add their own buffer (often 150-250 ms;
   many have a game mode that cuts it). Turn on *Low latency*, prefer aptX or SBC, and if your
   player has an audio delay setting (VLC, mpv) use the delay shown in the tooltip.
 - **Choppy sound at LDAC 990**: keep *Adaptive LDAC* on, or choose LDAC 660 or 330 in *Audio
   quality*. A phone or PC on **2.4 GHz Wi-Fi** next to the adapter is the usual cause (Bluetooth
-  shares that band): move it to 5 GHz.
+  shares that band): keep *Avoid the Wi-Fi channels* on (Diagnostics), or move it to 5 GHz. The
+  Diagnostics page shows the signal of the last 10 minutes and warns about interference.
 - **Headphones out of range**: the sound stops and comes back, in sync, when you are near again;
   Sonatina drops the audio the radio could not carry instead of piling it up (the log says
   "radio link too slow").
@@ -132,7 +140,8 @@ no longer need it, and pick your normal output in the sound settings.
   itself and the sound settles within about 15 s.
 - **The window says "Sonatina is not running"**: press *Start Sonatina*; the window connects by
   itself. Window problems are logged in `%LOCALAPPDATA%\Sonatina\dashboard.log`.
-- Attach `sonatina.log` when reporting a problem.
+- Reporting a problem: *Export diagnostics* (Diagnostics page or tray menu) saves a zip on the
+  Desktop with the logs, settings and status.
 
 ## Limits (for now)
 

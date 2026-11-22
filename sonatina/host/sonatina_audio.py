@@ -567,6 +567,15 @@ class MediaPump:
         self.radio_episodes = 0
         self.adaptive = True      # LDAC: follow the radio (LdacAdapter)
         self.adapter: LdacAdapter | None = None
+        self.link: LinkBacklog | None = None     # packets waiting for the radio (sonatina_radio)
+        self.packet_s = PUSH_SAMPLES / RATE      # audio carried by the last packet
+
+    def queued_s(self) -> float:
+        """Audio waiting for the radio in Bumble's queue, in seconds (0 when unknown)."""
+        link = self.link
+        if link is None or self.task is None:
+            return 0.0
+        return link.waiting() * self.packet_s
 
     async def start(self, rtp_channel) -> None:
         await self.stop()
@@ -618,6 +627,7 @@ class MediaPump:
         underruns = self.ring.underruns
         done = 0
         link = LinkBacklog(channel)
+        self.link = link
         dropping = 0                # packets dropped in the current slow-radio episode
         warned_at = -1e9
         self.adapter = (LdacAdapter(self.encoder, last) if link.queue is not None
@@ -663,6 +673,7 @@ class MediaPump:
                     self.seq += 1               # advanced for dropped packets too: the
                     self.timestamp += samples   # headphones see a gap, not a time shift
                     packet_s = samples / RATE
+                    self.packet_s = packet_s
                     if link.full(samples / RATE, dropping > 0):
                         if not dropping:
                             self.radio_episodes += 1

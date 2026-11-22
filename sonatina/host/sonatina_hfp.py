@@ -1585,13 +1585,6 @@ class HfpGateway:
             # how late this turn is, including the work of the last one (COM calls...)
             self._lag_ms = max(getattr(self, "_lag_ms", 0.0), (now - previous - self.WATCH_S) * 1000)
             previous = now
-            if sys.platform == "win32" and now >= getattr(self, "_next_output_check", 0.0):
-                self._next_output_check = now + 30.0
-                try:
-                    import sonatina_host
-                    await loop.run_in_executor(self.com, sonatina_host.fix_default_output)
-                except Exception as error:
-                    log.debug("default output check: %r", error)
             if self.mic_key is None and now >= next_lookup:
                 next_lookup = now + 10.0
                 self.mic_key = await loop.run_in_executor(self.com, find_mic_cable, self.s.mic_device) \

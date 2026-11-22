@@ -43,6 +43,8 @@ from bumble.pairing import PairingConfig
 import sonatina_avrcp
 import sonatina_hfp
 import sonatina_media
+import sonatina_output
+import sonatina_radio
 from sonatina_common import (
     AAC_FRAME,
     AAC_LATM_OVERHEAD,
@@ -216,6 +218,9 @@ class SonatinaHost:
         self.stream = None                    # the A2DP stream (suspended during calls)
         self.codec_in_use: str | None = None  # key in CODEC_CHAIN of the running stream
         self.hfp = sonatina_hfp.HfpGateway(self)
+        self.output = sonatina_output.OutputSwitcher(self)
+        self.radio = sonatina_radio.RadioMonitor(self)
+        self.on_notice = None                 # tray balloon (text)
 
     # -- settings ---------------------------------------------------------------
     def headset_name(self, address: str | None) -> str:
@@ -594,6 +599,7 @@ class SonatinaHost:
         self.pairing_done.clear()
         try:
             if self.connection is not None:
+                self.output.expect_reconnect()
                 await self.connection.disconnect()
                 await asyncio.sleep(1)
             log.info("pairing with %s %s ...", name or "?", address)
@@ -622,6 +628,7 @@ class SonatinaHost:
         self.s.address = address
         self._changed()
         if self.connection is not None and self.peer != address:
+            self.output.expect_reconnect()
             await self.connection.disconnect()
 
     async def set_codec(self, address: str, codec: str, ldac_quality: str | None = None) -> None:
@@ -631,6 +638,7 @@ class SonatinaHost:
             entry["ldac_quality"] = ldac_quality
         self._changed()
         if self.connection is not None and self.peer == norm_addr(address):
+            self.output.expect_reconnect()
             await self.connection.disconnect()   # renegotiates with the new codec
 
     async def set_hfp_mode(self, mode: str) -> bool:
@@ -653,8 +661,33 @@ class SonatinaHost:
         self._changed()
         if name == "ldac_adaptive" and self.pump is not None:
             self.pump.adaptive = bool(value)        # live, no reconnection
+        if name == "auto_output" and value:
+            self.output.option_changed()
+        if name == "wifi_avoid":
+            self.radio.option_changed()
         if name in ("absolute_volume", "low_latency") and self.connection is not None:
+            self.output.expect_reconnect()
             await self.connection.disconnect()
+
+    async def set_fallback_output(self, endpoint_id: str) -> None:
+        """The output for when the headphones are off ("" = automatic)."""
+        name = ""
+        if endpoint_id:
+            match = [e for e in self.output.outputs if e.id == endpoint_id]
+            if not match:
+                raise ValueError("unknown output")
+            name = match[0].name
+        self.s.fallback_output, self.s.fallback_output_name = endpoint_id, name
+        self._changed()
+        log.info("output when the headphones are off: %s", name or "automatic")
+        if self.connection is None:
+            self.output.option_changed()
+
+    async def set_wifi_channel(self, channel: int) -> None:
+        """Wi-Fi channel to keep Bluetooth away from, chosen by hand (0 = automatic)."""
+        self.s.wifi_channel = max(0, min(14, int(channel)))
+        self._changed()
+        self.radio.option_changed()
 
     async def forget(self, address: str) -> None:
         address = norm_addr(address)
@@ -720,7 +753,10 @@ class SonatinaHost:
             "volume": {"percent": last[1] if last else None, "muted": bool(last and last[0]),
                        "absolute": bool(getattr(self.remote, "absolute", False))},
             "options": {k: bool(getattr(self.s, k)) for k in
-                        ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive")},
+                        ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
+                         "auto_output", "pause_on_disconnect", "wifi_avoid")},
+            "output": self.output.snapshot(),
+            "radio": self.radio.snapshot(),
             "mic": {"mode": self.s.hfp_mode, "msbc": bool(self.s.hfp_msbc), "cable": hf.mic_key,
                     "ready": hf.ready, "in_call": hf.in_call, "codec": hf.codec, "apps": apps,
                     "dismissed": hf.dismissed, "level": round(audio.level, 3) if audio else 0.0,
@@ -745,6 +781,7 @@ class SonatinaHost:
                    f" margin={p.margin_ms if p.margin_ms is None else round(p.margin_ms, 1)} ms"
                    f" target={p.target_ms} ms rate={(p.rate - 1) * 1e6:+.0f} ppm"
                    f" latency={self.latency_ms()} ms" if p else "")
+                + self.radio.stats()
                 + (f" call: {self.hfp.audio.stats()}" if self.hfp.audio is not None else ""))
 
     def summary(self) -> str:
@@ -760,6 +797,8 @@ class SonatinaHost:
             latency = self.latency_ms()
             if latency is not None and self.headset_delay_ms is not None:
                 vol += tr(" · ritardo ~", " · delay ~") + f"{latency} ms"
+            if self.radio.level == "weak":
+                vol += tr(" · segnale debole", " · weak signal")
             return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
         if self.discovering:
             return tr("Sonatina: ricerca cuffie...", "Sonatina: looking for headphones...")
@@ -936,6 +975,8 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
                  host.headset_name(settings.address))
         source.start()
         tasks = [asyncio.create_task(host.keep_connected()),
+                 asyncio.create_task(host.output.run()),
+                 asyncio.create_task(host.radio.run()),
                  asyncio.create_task(host.follow_volume()),
                  asyncio.create_task(watch_capture(source)),
                  asyncio.create_task(host.hfp.run())]

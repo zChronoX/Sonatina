@@ -113,6 +113,33 @@ async def main():
         raise AssertionError('unknown command accepted')
     except RuntimeError as error:
         assert 'unknown command' in str(error)
+    # 1.1.0: automatic output, Wi-Fi channel, diagnostics
+    for option in ('auto_output', 'pause_on_disconnect', 'wifi_avoid'):
+        assert await client.call('set_option', name=option, value=False) is True
+        assert getattr(host.s, option) is False, option
+        await client.call('set_option', name=option, value=True)
+    try:
+        await client.call('set_fallback_output', id='{nope}')
+        raise AssertionError('unknown output accepted')
+    except RuntimeError as error:
+        assert 'unknown output' in str(error)
+    host.output.outputs = [sh.sonatina_output.Endpoint('{mon}', 'LG ULTRAGEAR (NVIDIA High Definition Audio)')]
+    await client.call('set_fallback_output', id='{mon}')
+    assert host.s.fallback_output == '{mon}' and host.s.fallback_output_name.startswith('LG'), host.s
+    await client.call('set_wifi_channel', channel=6)
+    assert host.s.wifi_channel == 6
+    await client.call('set_wifi_channel', channel=0)
+    os.environ['SONATINA_EXPORT_DIR'] = tmp
+    path = await client.call('export_diagnostics')
+    import zipfile
+    names = zipfile.ZipFile(path).namelist()
+    assert path.startswith(tmp) and 'status.json' in names and 'info.txt' in names, (path, names)
+    status = json.loads(zipfile.ZipFile(path).read('status.json'))
+    assert status['host']['output']['fallback_name'].startswith('LG'), status['host']['output']
+    assert 'radio' in status['host'] and status['host']['options']['auto_output'] is True
+    items = list(app.output_menu())                         # tray submenu
+    assert len(items) == 2 and items[1].text.startswith('LG') and items[1].checked, [i.text for i in items]
+    print('1.1.0 commands ok:', os.path.basename(path), names)
     json.dumps(host.snapshot())                            # plain JSON all the way down
     print('commands ok, settings saved', len(saved), 'times')
 

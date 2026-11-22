@@ -16,8 +16,10 @@ import sys
 import threading
 import time
 
+import sonatina_diag
 import sonatina_host as sh
 import sonatina_ipc
+import sonatina_output
 
 log = logging.getLogger("sonatina")
 
@@ -34,7 +36,9 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
     (tr("SBC (compatibile con tutte)", "SBC (works with all headphones)"), "sbc", None),
 ]
 RETRY_S = 5.0
-OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive")
+OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
+                "auto_output", "pause_on_disconnect", "wifi_avoid")
+NO_HOST_LEAVE_S = 10.0   # adapter gone this long: Windows back to the real output
 STARTUP_LINK = "Sonatina.lnk"
 
 
@@ -166,10 +170,13 @@ class TrayApp:
         self.first_run_search = False
         self.access_errors = 0             # LIBUSB_ERROR_ACCESS in a row
         self.dongle_ever = False           # this process has had the adapter open
+        self.no_host_since: float | None = None
+        self.left_cable = False            # output moved off the cable while the host is down
 
     # -- host thread ----------------------------------------------------------
     def _on_host(self, host: sh.SonatinaHost) -> None:
         host.on_change = lambda settings: sh.save_settings(settings, sh.SETTINGS_PATH)
+        host.on_notice = self.notify
         self.host = host
         self._warned_missing = False   # the adapter is back
 
@@ -264,6 +271,13 @@ class TrayApp:
         if name == "set_autostart":
             set_autostart(bool(args.get("value")))
             return autostart_enabled()
+        if name == "export_diagnostics":
+            status = self.snapshot()
+            path = await asyncio.get_running_loop().run_in_executor(
+                None, sonatina_diag.export_diagnostics, status)
+            if args.get("reveal"):
+                sonatina_diag.reveal(path)
+            return path
         if name == "set_hfp_mode":
             mode = str(args.get("mode"))
             if mode not in ("auto", "on", "off"):
@@ -289,6 +303,10 @@ class TrayApp:
             if option not in OPTION_NAMES:
                 raise ValueError("option")
             await self._on_host_loop(host.set_option(option, bool(args.get("value"))))
+        elif name == "set_fallback_output":
+            await self._on_host_loop(host.set_fallback_output(str(args.get("id") or "")))
+        elif name == "set_wifi_channel":
+            await self._on_host_loop(host.set_wifi_channel(int(args.get("channel") or 0)))
         elif name == "set_volume":
             percent = max(0, min(100, int(args.get("percent", 0))))
             host.volume.set_scalar(percent / 100)
@@ -375,6 +393,7 @@ class TrayApp:
                 self.first_run_search = True   # no headset yet: start pairing right away
                 time.sleep(2)
                 self.on_search()
+            self._watch_no_host()
             key, text = self.status()
             if self.icon is not None and (key, text) != last:
                 last = (key, text)
@@ -382,6 +401,68 @@ class TrayApp:
                 self.icon.title = text[:127]
                 self._refresh_menu()
             time.sleep(1.0)
+
+    def _watch_no_host(self) -> None:
+        """No Bluetooth host (adapter unplugged, failing): nothing plays what Windows sends to
+        the cable, so the default output goes back to the real one (once)."""
+        if self.host is not None:
+            self.no_host_since = None
+            self.left_cable = False
+            return
+        now = time.monotonic()
+        if self.no_host_since is None:
+            self.no_host_since = now
+        if not self.left_cable and not self.quitting and now - self.no_host_since >= NO_HOST_LEAVE_S:
+            self.left_cable = True
+            try:
+                name = sonatina_output.leave_cable(self.settings)
+                if name:
+                    self.notify(tr("Chiavetta non disponibile: audio su ", "Adapter not available: sound on ") + name)
+            except Exception as error:
+                log.warning("cannot move the Windows output off the cable: %r", error)
+
+    # -- Windows output menu -------------------------------------------------------
+    def _settings(self):
+        return self.host.s if self.host is not None else self.settings
+
+    def _fallback_action(self, endpoint_id: str):
+        def action(*_args):
+            host = self.host
+            if host is not None:
+                self.run_coro(host.set_fallback_output(endpoint_id))
+        return action
+
+    def _fallback_checked(self, endpoint_id: str):
+        return lambda _item: self._settings().fallback_output == endpoint_id
+
+    def output_menu(self):
+        import pystray
+
+        host = self.host
+        auto_name = None
+        if host is not None:
+            auto = sonatina_output.choose_fallback(host.s, host.output.outputs, automatic=True)
+            auto_name = auto.name if auto else None
+        yield pystray.MenuItem(
+            tr("Automatico", "Automatic") + (f" ({auto_name})" if auto_name else ""),
+            self._fallback_action(""), checked=self._fallback_checked(""), radio=True)
+        if host is None or not host.output.outputs:
+            yield pystray.MenuItem(tr("Elenco non ancora disponibile", "List not available yet"), None, enabled=False)
+            return
+        for e in host.output.outputs:
+            yield pystray.MenuItem(e.name, self._fallback_action(e.id),
+                                   checked=self._fallback_checked(e.id), radio=True)
+
+    def on_export(self, *_args) -> None:
+        def work():
+            try:
+                path = sonatina_diag.export_diagnostics(self.snapshot())
+                self.notify(tr("Diagnostica salvata: ", "Diagnostics saved: ") + os.path.basename(path))
+                sonatina_diag.reveal(path)
+            except Exception as error:
+                log.error("export diagnostics: %r", error)
+                self.notify(tr("Esportazione non riuscita: ", "Export failed: ") + str(error))
+        threading.Thread(target=work, name="sonatina-export", daemon=True).start()
 
     # -- headsets menu --------------------------------------------------------
     def on_search(self, *_args) -> None:
@@ -540,6 +621,10 @@ class TrayApp:
     def on_quit(self, icon, *_args) -> None:
         self.quitting = True
         try:
+            sonatina_output.leave_cable(self._settings())   # nothing will play the cable now
+        except Exception as error:
+            log.warning("cannot move the Windows output off the cable: %r", error)
+        try:
             self.restart()
         except Exception as error:
             log.debug("quit: %r", error)
@@ -562,6 +647,15 @@ class TrayApp:
             pystray.MenuItem(tr("Cuffie", "Headphones"), pystray.Menu(self.headsets_menu)),
             pystray.MenuItem(tr("Qualita' audio", "Audio quality"), pystray.Menu(self.codec_menu)),
             pystray.MenuItem(tr("Microfono delle cuffie", "Headphone microphone"), pystray.Menu(self.mic_menu)),
+            pystray.MenuItem(tr("Uscita automatica di Windows", "Automatic Windows output"),
+                             self._option_action("auto_output"),
+                             checked=self._option_checked("auto_output")),
+            pystray.MenuItem(tr("Uscita quando le cuffie sono spente", "Output when the headphones are off"),
+                             pystray.Menu(self.output_menu)),
+            pystray.MenuItem(tr("Pausa quando le cuffie si scollegano", "Pause when the headphones disconnect"),
+                             self._option_action("pause_on_disconnect"),
+                             checked=self._option_checked("pause_on_disconnect")),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Volume regolato dalle cuffie", "Volume handled by the headphones"),
                              self._option_action("absolute_volume"),
                              checked=self._option_checked("absolute_volume")),
@@ -575,6 +669,7 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(tr("Riavvia connessione", "Restart connection"), self.on_restart),
             pystray.MenuItem(tr("Apri log", "Open log"), self.open_log),
+            pystray.MenuItem(tr("Esporta diagnostica...", "Export diagnostics..."), self.on_export),
             pystray.MenuItem(tr("Esci", "Exit"), self.on_quit),
         )
         self.icon = pystray.Icon("Sonatina", make_icon(COLORS["idle"]), "Sonatina", menu)

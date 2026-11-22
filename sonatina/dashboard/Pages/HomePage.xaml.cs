@@ -12,6 +12,8 @@ public sealed partial class HomePage : Page, IStatusView
     private DateTime _volumeTouched = DateTime.MinValue;
     private readonly DispatcherQueueTimer _volumeTimer;
     private string _chips = "";
+    private string _outputs = "";
+    private readonly List<string> _fallbackIds = new();
 
     public HomePage()
     {
@@ -65,6 +67,17 @@ public sealed partial class HomePage : Page, IStatusView
             CodecLine.Text = Status.CodecLine(s);
             LatencyLine.Text = Status.LatencyLine(s);
             LatencyLine.Visibility = LatencyLine.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            var (bars, word, line) = Status.Signal(s);
+            SignalPanel.Visibility = bars > 0 ? Visibility.Visible : Visibility.Collapsed;
+            SignalLine.Text = line;
+            var on = Ui.Res(bars == 1 ? "SystemFillColorCriticalBrush" : "TextFillColorPrimaryBrush");
+            var off = Ui.Res("ControlStrongFillColorDisabledBrush");
+            Bar1.Fill = bars >= 1 ? on : off;
+            Bar2.Fill = bars >= 2 ? on : off;
+            Bar3.Fill = bars >= 3 ? on : off;
+            Bar4.Fill = bars >= 4 ? on : off;
+
+            UpdateOutput(s);
 
             var percent = J.I(s, "host", "volume", "percent");
             Volume.IsEnabled = percent is not null;
@@ -95,16 +108,75 @@ public sealed partial class HomePage : Page, IStatusView
             // link
             var ring = J.I(s, "host", "link", "ring_ms");
             BufferText.Text = ring is int r ? $"{r} ms" : "-";
-            var ppm = J.I(s, "host", "link", "rate_ppm");
-            DriftText.Text = ppm is int d ? $"{Ui.Signed(d)} ppm" : "-";
-            UnderrunText.Text = J.I(s, "host", "link", "underruns")?.ToString() ?? "-";
-            AdapterText.Text = Ui.Short(J.S(s, "host", "transport"));
+            SignalText.Text = word;
+            LostText.Text = Status.Seconds(J.I(s, "host", "radio", "lost_ms_hour"));
+            WifiText.Text = Status.WifiAvoided(s);
         }
         finally
         {
             _updating = false;
         }
     }
+
+    /// <summary>The "Windows output" card and the banner shown while the headphones are off.</summary>
+    private void UpdateOutput(JsonObject s)
+    {
+        var output = J.At(s, "host", "output");
+        bool known = output is JsonObject;
+        AutoOutput.IsOn = J.B(output, "auto");
+        PauseOnDisconnect.IsOn = J.B(output, "pause");
+        AutoOutput.IsEnabled = PauseOnDisconnect.IsEnabled = FallbackCombo.IsEnabled = known;
+
+        string? switched = J.S(output, "switched");
+        bool playing = J.S(s, "host", "state") == "streaming" || Status.InCall(s);
+        OutputBar.IsOpen = switched is not null && !playing;
+        if (OutputBar.IsOpen)
+        {
+            OutputBar.Title = L.T($"Cuffie spente: Windows suona su «{switched}»", $"Headphones off: Windows plays on “{switched}”");
+            OutputBar.Message = L.T("Quando le riaccendi l’audio torna da solo su «Sonatina Audio».",
+                                    "When you turn them on again the sound goes back to “Sonatina Audio” by itself.");
+        }
+        string? current = J.S(output, "current");
+        OutputNow.Text = current is null ? "" : L.T($"Adesso: {current}", $"Now: {current}");
+
+        // the choices, rebuilt only when the list changes
+        string auto = J.S(output, "automatic_name") ?? "";
+        string chosen = J.S(output, "fallback_id") ?? "";
+        string chosenName = J.S(output, "fallback_name") ?? chosen;
+        var items = J.A(output, "outputs");
+        string key = auto + "|" + chosen + "|" + string.Join("|", items.Select(i => J.S(i, "id") + "=" + J.S(i, "name")));
+        if (key != _outputs)
+        {
+            _outputs = key;
+            FallbackCombo.Items.Clear();
+            _fallbackIds.Clear();
+            FallbackCombo.Items.Add(auto.Length > 0 ? L.T($"Automatico ({auto})", $"Automatic ({auto})")
+                                                    : L.T("Automatico", "Automatic"));
+            _fallbackIds.Add("");
+            foreach (var item in items)
+            {
+                FallbackCombo.Items.Add(J.S(item, "name") ?? "?");
+                _fallbackIds.Add(J.S(item, "id") ?? "");
+            }
+            if (chosen.Length > 0 && !_fallbackIds.Contains(chosen))
+            {   // the chosen device is not plugged in now: show it anyway
+                FallbackCombo.Items.Add(L.T($"{chosenName} (non collegato)", $"{chosenName} (not connected)"));
+                _fallbackIds.Add(chosen);
+            }
+        }
+        int index = _fallbackIds.IndexOf(chosen);
+        if (FallbackCombo.SelectedIndex != Math.Max(0, index))
+            FallbackCombo.SelectedIndex = Math.Max(0, index);
+    }
+
+    private async void Fallback_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updating || FallbackCombo.SelectedIndex < 0 || FallbackCombo.SelectedIndex >= _fallbackIds.Count)
+            return;
+        await Ui.Run("set_fallback_output", new JsonObject { ["id"] = _fallbackIds[FallbackCombo.SelectedIndex] });
+    }
+
+    private void Details_Click(object sender, RoutedEventArgs e) => App.Shell?.Go("diagnostics");
 
     private void UpdateChips(JsonObject s, JsonNode? headset, bool inCall)
     {

@@ -38,13 +38,25 @@ class Settings:
     mic_gain_db: float = 6.0      # headset microphones are quiet
     sco_alt: int = 2              # USB alternate setting for CVSD (2 = one 16-bit link)
     sco_alt_msbc: int = 1         # USB alternate setting for mSBC (transparent, 24-byte packets)
+    # automatic Windows output (sonatina_output)
+    auto_output: bool = True      # headphones on: "Sonatina Audio"; off: the fallback below
+    pause_on_disconnect: bool = True
+    fallback_output: str = ""     # endpoint id chosen by the user ("" = automatic)
+    fallback_output_name: str = ""
+    last_output: str = ""         # the last real output the user had (automatic fallback)
+    last_output_name: str = ""
+    # radio (sonatina_radio)
+    wifi_avoid: bool = True       # keep Bluetooth off the channels of nearby 2.4 GHz Wi-Fi
+    wifi_channel: int = 0         # Wi-Fi channel to avoid chosen by hand (0 = from the PC's Wi-Fi)
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "aac_bitrate",
                 "capture",
                 "volume_endpoint", "headsets", "audio_configured", "absolute_volume", "media_keys", "low_latency",
                 "ldac_adaptive",
-                "hfp_mode", "hfp_msbc", "mic_device", "mic_gain_db", "sco_alt", "sco_alt_msbc")
+                "hfp_mode", "hfp_msbc", "mic_device", "mic_gain_db", "sco_alt", "sco_alt_msbc",
+                "auto_output", "pause_on_disconnect", "fallback_output", "fallback_output_name",
+                "last_output", "last_output_name", "wifi_avoid", "wifi_channel")
 
 
 def load_settings(path: str) -> Settings:

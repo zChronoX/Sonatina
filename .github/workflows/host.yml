@@ -41,6 +41,8 @@ jobs:
           python hfp_virtual.py
           python ipc_virtual.py
           python backlog_virtual.py
+          python output_virtual.py
+          python radio_virtual.py
 
   dashboard:
     # WinUI 3 window (C#), built on every push so compile errors show up at once

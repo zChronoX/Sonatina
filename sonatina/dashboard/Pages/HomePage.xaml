@@ -18,6 +18,8 @@
                 </InfoBar.ActionButton>
             </InfoBar>
 
+            <InfoBar x:Name="OutputBar" IsClosable="False" Severity="Informational" />
+
             <!-- headphones now -->
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="20">
@@ -38,6 +40,15 @@
                             </StackPanel>
                             <TextBlock x:Name="CodecLine" Style="{StaticResource Secondary}" />
                             <TextBlock x:Name="LatencyLine" Style="{StaticResource Secondary}" />
+                            <StackPanel x:Name="SignalPanel" Orientation="Horizontal" Spacing="8" Margin="0,2,0,0">
+                                <Grid Width="18" Height="14" VerticalAlignment="Center">
+                                    <Rectangle x:Name="Bar1" Width="3" Height="4" RadiusX="1" RadiusY="1" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="0,0,0,0" />
+                                    <Rectangle x:Name="Bar2" Width="3" Height="7" RadiusX="1" RadiusY="1" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="5,0,0,0" />
+                                    <Rectangle x:Name="Bar3" Width="3" Height="10" RadiusX="1" RadiusY="1" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10,0,0,0" />
+                                    <Rectangle x:Name="Bar4" Width="3" Height="14" RadiusX="1" RadiusY="1" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="15,0,0,0" />
+                                </Grid>
+                                <TextBlock x:Name="SignalLine" Style="{StaticResource Secondary}" VerticalAlignment="Center" />
+                            </StackPanel>
                         </StackPanel>
                         <Button Grid.Column="2" VerticalAlignment="Center" Click="Change_Click"
                                 Content="{l:Tr It='Cambia cuffie', En='Change headphones'}" />
@@ -59,6 +70,49 @@
                         <TextBlock Style="{StaticResource Hint}" Margin="36,0,0,0"
                                    Text="{l:Tr It='Lo stesso volume di Windows: lo regoli anche dai tasti delle cuffie', En='The same volume as Windows: the headphone buttons change it too'}" />
                     </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Windows output (A1) -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource CardTitle}" Margin="0,0,0,8" Text="{l:Tr It='Uscita di Windows', En='Windows output'}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Cambia uscita da sola', En='Switch output automatically'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Cuffie accese: «Sonatina Audio». Cuffie spente: l’uscita scelta qui sotto', En='Headphones on: “Sonatina Audio”. Headphones off: the output chosen below'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AutoOutput" Grid.Column="1" Tag="auto_output" Toggled="Option_Toggled" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="56">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Quando le cuffie sono spente usa', En='When the headphones are off use'}" />
+                            <TextBlock x:Name="OutputNow" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                        <ComboBox x:Name="FallbackCombo" Grid.Column="1" MinWidth="280" MaxWidth="420" VerticalAlignment="Center"
+                                  SelectionChanged="Fallback_SelectionChanged" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Pausa quando le cuffie si scollegano', En='Pause when the headphones disconnect'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Come il telefono: la musica non esce all’improvviso dagli altoparlanti', En='Like a phone: the music does not suddenly come out of the speakers'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="PauseOnDisconnect" Grid.Column="1" Tag="pause_on_disconnect" Toggled="Option_Toggled" />
+                    </Grid>
                 </StackPanel>
             </Border>
 
@@ -185,7 +239,11 @@
                 <!-- link -->
                 <Border Style="{StaticResource Card}" Grid.Column="1">
                     <StackPanel Spacing="12">
-                        <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Collegamento', En='Link'}" />
+                        <Grid>
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Collegamento', En='Link'}" />
+                            <HyperlinkButton HorizontalAlignment="Right" Padding="4,0,4,0" Click="Details_Click"
+                                             Content="{l:Tr It='Dettagli', En='Details'}" />
+                        </Grid>
                         <Grid ColumnSpacing="16" RowSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -196,20 +254,20 @@
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Segnale', En='Signal'}" />
+                                <TextBlock x:Name="SignalText" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Audio perso (ultima ora)', En='Audio lost (last hour)'}" />
+                                <TextBlock x:Name="LostText" Style="{StaticResource MetricValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1">
                                 <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer', En='Buffer'}" />
                                 <TextBlock x:Name="BufferText" Style="{StaticResource MetricValue}" />
                             </StackPanel>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Deriva del clock', En='Clock drift'}" />
-                                <TextBlock x:Name="DriftText" Style="{StaticResource MetricValue}" />
-                            </StackPanel>
-                            <StackPanel Grid.Row="1">
-                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Interruzioni', En='Dropouts'}" />
-                                <TextBlock x:Name="UnderrunText" Style="{StaticResource MetricValue}" />
-                            </StackPanel>
                             <StackPanel Grid.Row="1" Grid.Column="1">
-                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Chiavetta', En='Adapter'}" />
-                                <TextBlock x:Name="AdapterText" Margin="0,4,0,0" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Wi-Fi evitato', En='Wi-Fi avoided'}" />
+                                <TextBlock x:Name="WifiText" Margin="0,4,0,0" TextWrapping="WrapWholeWords" />
                             </StackPanel>
                         </Grid>
                         <StackPanel Orientation="Horizontal" Spacing="8">

@@ -7,10 +7,120 @@
     NavigationCacheMode="Required">
     <ScrollViewer>
         <StackPanel Spacing="16" Padding="24,8,24,32">
-            <StackPanel Spacing="4" Padding="0,8,0,4">
-                <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Diagnostica', En='Diagnostics'}" />
-                <TextBlock x:Name="SubTitle" Style="{StaticResource Secondary}" />
-            </StackPanel>
+            <Grid Padding="0,8,0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Diagnostica', En='Diagnostics'}" />
+                    <TextBlock x:Name="SubTitle" Style="{StaticResource Secondary}" />
+                </StackPanel>
+                <Button x:Name="ExportButton" Grid.Column="1" VerticalAlignment="Bottom" Style="{StaticResource AccentButtonStyle}"
+                        Click="Export_Click">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE896;" FontSize="14" />
+                        <TextBlock Text="{l:Tr It='Esporta diagnostica', En='Export diagnostics'}" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <InfoBar x:Name="ExportBar" Severity="Success" IsClosable="True">
+                <InfoBar.ActionButton>
+                    <Button Click="Reveal_Click" Content="{l:Tr It='Apri cartella', En='Open folder'}" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <InfoBar x:Name="InterferenceBar" Severity="Warning" IsClosable="False" />
+
+            <!-- signal, last 10 minutes (A4) -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Segnale · ultimi 10 minuti', En='Signal · last 10 minutes'}" />
+                    <Grid ColumnSpacing="16" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Livello', En='Level'}" />
+                            <TextBlock x:Name="LevelText" Style="{StaticResource MetricValue}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Potenza (RSSI)', En='Power (RSSI)'}" />
+                            <TextBlock x:Name="RssiText" Style="{StaticResource MetricValue}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Qualità del canale', En='Link quality'}" />
+                            <TextBlock x:Name="QualityText" Style="{StaticResource MetricValue}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="3">
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Audio perso (minuto / ora)', En='Audio lost (minute / hour)'}" />
+                            <TextBlock x:Name="LostText" Style="{StaticResource MetricValue}" />
+                        </StackPanel>
+                    </Grid>
+                    <Canvas x:Name="Chart" Height="160" HorizontalAlignment="Stretch" SizeChanged="Chart_SizeChanged" />
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="14" Height="2" VerticalAlignment="Center" Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                            <TextBlock x:Name="LineLegend" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="8" Height="8" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCriticalBrush}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='audio perso (ogni 5 s)', En='audio lost (per 5 s)'}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Wi-Fi and Bluetooth (A5) -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Wi-Fi e Bluetooth', En='Wi-Fi and Bluetooth'}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Evita i canali del Wi-Fi', En='Avoid the Wi-Fi channels'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Il Bluetooth salta su 79 canali: quelli occupati dal Wi-Fi a 2,4 GHz vengono tolti', En='Bluetooth hops over 79 channels: those used by 2.4 GHz Wi-Fi are left out'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="WifiAvoid" Grid.Column="1" Toggled="WifiAvoid_Toggled" />
+                    </Grid>
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock VerticalAlignment="Center" Text="{l:Tr It='Canale Wi-Fi da evitare', En='Wi-Fi channel to avoid'}" />
+                        <ComboBox x:Name="WifiChannel" Grid.Column="1" MinWidth="240" SelectionChanged="WifiChannel_SelectionChanged" />
+                    </Grid>
+                    <TextBlock x:Name="WifiInfo" Style="{StaticResource Secondary}" />
+                    <Grid x:Name="Strip" Height="24" ColumnSpacing="2" />
+                    <Grid>
+                        <TextBlock Style="{StaticResource Hint}" Text="2402 MHz" />
+                        <TextBlock Style="{StaticResource Hint}" HorizontalAlignment="Center" Text="2441 MHz" />
+                        <TextBlock Style="{StaticResource Hint}" HorizontalAlignment="Right" Text="2480 MHz" />
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='usati', En='in use'}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCautionBrush}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='evitati (Wi-Fi)', En='avoided (Wi-Fi)'}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Rectangle Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource ControlStrongFillColorDisabledBrush}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='scartati dal collegamento', En='left out by the link'}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
 
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="16">
