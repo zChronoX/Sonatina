@@ -4,8 +4,16 @@ Audio di Windows → VB-CABLE → SonatinaHost → LDAC/SBC → chiavetta USB de
 Nessun driver kernel nostro: Secure Boot resta attivo.
 
 ## File
-- `sonatina_host.py`: il programma (cattura, jitter buffer, pump media con timer ad alta risoluzione,
-  RTP con timestamp in campioni, AVDTP/A2DP via Bumble, riconnessione automatica).
+- `sonatina_host.py`: sessione A2DP (AVDTP via Bumble, scelta del codec, abbinamento,
+  riconnessione automatica) e `main`; ripropone i nomi dei moduli sotto (`sonatina_host.X`).
+- `sonatina_audio.py`: jitter buffer (`PcmRing`), cattura di VB-CABLE, volume di Windows, uscita
+  predefinita, pump media (timer ad alta risoluzione, RTP con timestamp in campioni, limite di
+  audio in coda per la radio `LinkBacklog`, LDAC adattivo `LdacAdapter`).
+- `sonatina_codecs.py`: encoder (LDAC, SBC, AAC, aptX/aptX HD via `sonatina_codec.dll`) e
+  configurazioni dei codec offerte alle cuffie.
+- `sonatina_settings.py`: `settings.json`; `sonatina_common.py`: costanti, percorsi, lingua.
+- `sonatina_tray.py` (icona e menu), `sonatina_ipc.py` (canale con la finestra),
+  `sonatina_avrcp.py`, `sonatina_media.py` (tasti), `sonatina_hfp.py` (microfono).
 - `codec/sonatina_codec.dll`: SBC, LDAC, AAC (FDK), aptX, mSBC e ricampionatore, compilato con
   mingw-w64 da `codec/build_codec.sh` (`codec/sonatina_codec.c` è l'interfaccia C; `codec/src` i
   wrapper SBC/LDAC nati per il driver kernel, ora in `archive/`; `codec/third_party` le librerie).

@@ -87,6 +87,9 @@ public sealed partial class QualityPage : Page, IStatusView
                 BuildCodecList(headset is not null, preferred, supported);
             }
             LdacRow.Visibility = preferred == "ldac" && headset is not null ? Visibility.Visible : Visibility.Collapsed;
+            AdaptiveRow.Visibility = LdacRow.Visibility;
+            Adaptive.IsOn = J.B(s, "host", "options", "ldac_adaptive");
+            Adaptive.IsEnabled = Status.Host(s) is not null;
             string quality = J.S(headset, "ldac_quality") ?? "sq";
             foreach (var item in LdacBox.Items)
                 if (item is ComboBoxItem cbi && (string)cbi.Tag == quality && !ReferenceEquals(LdacBox.SelectedItem, cbi))
@@ -165,6 +168,12 @@ public sealed partial class QualityPage : Page, IStatusView
         _codecKey = "";
         if (_last is not null)
             Update(_last);
+    }
+
+    private async void Adaptive_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (!_updating)
+            await Ui.Run("set_option", new JsonObject { ["name"] = "ldac_adaptive", ["value"] = Adaptive.IsOn });
     }
 
     private async void LowLatency_Toggled(object sender, RoutedEventArgs e)

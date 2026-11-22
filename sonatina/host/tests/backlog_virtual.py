@@ -74,7 +74,10 @@ async def main():
                 ch.queue._packets.clear()
             await asyncio.sleep(0.005)
 
-    await radio(1.0, True)
+    # just after the start the headphones may be slow: up to 0.5 s may wait (no drops)
+    await radio(0.4, False)
+    assert pump.radio_dropped == 0, pump.radio_dropped
+    await radio(3.0, True)
     sent_ok = len(ch.written)
     assert pump.radio_dropped == 0 and sent_ok > 200, (pump.radio_dropped, sent_ok)
     await radio(2.0, False)                     # out of range for 2 s
@@ -89,7 +92,80 @@ async def main():
     assert any(b - a > 1 for a, b in zip(seqs, seqs[1:])), "the gap must show in the RTP numbers"
     await pump.stop()
     feeder.cancel()
+    adapter_check()
     print("BACKLOG OK")
+
+
+class FakeLdac:
+    def __init__(self, eqmid):
+        self.eqmid, self.kbps = eqmid, sh.LDAC_KBPS[eqmid]
+
+    def set_eqmid(self, eqmid):
+        self.eqmid, self.kbps = eqmid, sh.LDAC_KBPS[eqmid]
+        return True
+
+
+def adapter_check():
+    """Adaptive LDAC: down at once when audio waits for the radio, up again after a clean
+    stretch, never above the chosen quality; a failed step up makes the next wait longer."""
+    enc = FakeLdac(0)                                   # chosen: 990
+    a = sh.LdacAdapter(enc, 0.0)
+    t = 0.0
+
+    def run(seconds, queued, dropped=False):
+        nonlocal t
+        end = t + seconds
+        while t < end:
+            t += 0.25
+            a.update(t, queued, dropped)
+    run(5, 0.0)
+    assert enc.eqmid == 0                               # clean: stays at the ceiling
+    run(0.25, 0.1)
+    assert enc.eqmid == 1                               # 990 -> 660 at once
+    run(1.0, 0.1)
+    assert enc.eqmid == 1                               # at most one step per 2 s
+    run(1.5, 0.1)
+    assert enc.eqmid == 2                               # -> 330
+    run(5, 0.0, dropped=True)
+    assert enc.eqmid == 2                               # bottom
+    run(9.5, 0.0)
+    assert enc.eqmid == 2                               # not yet clean for 10 s
+    run(1.0, 0.0)
+    assert enc.eqmid == 1                               # 330 -> 660
+    run(3.0, 0.2)                                       # bad again soon: that try failed
+    assert enc.eqmid == 2 and a.failed_ups == 1
+    run(20, 0.0)
+    assert enc.eqmid == 2                               # now it waits 30 s
+    run(15, 0.0)
+    assert enc.eqmid == 1
+    run(70, 0.0)
+    assert enc.eqmid == 0                               # back to the ceiling...
+    run(300, 0.0)
+    assert enc.eqmid == 0                               # ...and never above it
+    b = sh.LdacAdapter(FakeLdac(1), 0.0)                # chosen 660: never 990
+    for k in range(2000):
+        b.update(k * 0.25, 0.0, False)
+    assert b.encoder.eqmid == 1 and b.steps == 0
+    print(f"adaptive LDAC: {a.steps} steps, failed ups {a.failed_ups}")
+    # the real encoder changes quality mid-stream (packets get smaller, nothing breaks)
+    import math
+    import struct
+    enc = sh.LdacEncoder(sh.CodecLib(), 0, 679)
+    tone = b"".join(struct.pack("<hh", v, v) for v in
+                    (int(8000 * math.sin(2 * math.pi * 1000 * i / sh.RATE)) for i in range(128)))
+
+    def bytes_per_s(pushes):
+        total = 0
+        for _ in range(pushes):
+            total += sum(len(p) for p, _n in enc.push(tone))
+        return total * sh.RATE / (pushes * 128) * 8 / 1000
+    hq = bytes_per_s(1500)
+    assert enc.set_eqmid(2) and enc.kbps == 330
+    bytes_per_s(400)                                    # libldac moves over a few frames
+    mq = bytes_per_s(1500)
+    enc.close()
+    print(f"LDAC mid-stream: {hq:.0f} -> {mq:.0f} kbit/s")
+    assert hq > 800 and mq < 400, (hq, mq)
 
 
 asyncio.run(main())

@@ -58,6 +58,17 @@
                         </StackPanel>
                         <ComboBox x:Name="LdacBox" Grid.Column="1" MinWidth="220" SelectionChanged="LdacBox_SelectionChanged" />
                     </Grid>
+                    <Grid x:Name="AdaptiveRow" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='LDAC adattivo', En='Adaptive LDAC'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Se la radio non regge (cuffie lontane, Wi-Fi a 2,4 GHz vicino) scende a 660 o 330 kbit/s e poi risale da solo, mai sopra la qualità scelta', En='When the radio cannot keep up (headphones far away, 2.4 GHz Wi-Fi nearby) it drops to 660 or 330 kbit/s and comes back by itself, never above the chosen quality'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="Adaptive" Grid.Column="1" Toggled="Adaptive_Toggled" />
+                    </Grid>
                     <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Cambiando codec le cuffie si ricollegano per un attimo.', En='Changing the codec makes the headphones reconnect for a moment.'}" />
                 </StackPanel>
             </Border>

@@ -20,6 +20,9 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
         ("Deriva del clock", "Clock drift", s => J.I(s, "host", "link", "rate_ppm") is int v ? $"{Ui.Signed(v)} ppm" : "-"),
         ("Interruzioni", "Dropouts", s => J.I(s, "host", "link", "underruns")?.ToString() ?? "-"),
         ("Pacchetti", "Packets", s => J.I(s, "host", "link", "packets")?.ToString() ?? "-"),
+        ("Scartati (radio lenta)", "Dropped (slow radio)", s => J.I(s, "host", "link", "radio_dropped")?.ToString() ?? "-"),
+        ("Codec in uso", "Codec in use", s => J.S(s, "host", "stream", "name") is string n
+            ? (J.I(s, "host", "stream", "kbps") is int k ? $"{n} {k}" : n) : "-"),
         ("Ritardo cuffie", "Headphone delay", s => J.I(s, "host", "stream", "headset_delay_ms") is int v ? $"{v} ms" : "-"),
         ("Chiavetta", "Adapter", s => Ui.Short(J.S(s, "host", "transport"))),
     ];

@@ -40,6 +40,7 @@ from __future__ import annotations
 import array
 import asyncio
 import collections
+import concurrent.futures
 import ctypes
 import dataclasses
 import logging
@@ -1192,6 +1193,22 @@ class HfpGateway:
         self._msbc_window = None
         self.make_watcher = MicWatcher        # tests replace these
         self.make_mic_out = MicOutput
+        self._com: concurrent.futures.ThreadPoolExecutor | None = None
+
+    @property
+    def com(self) -> concurrent.futures.ThreadPoolExecutor:
+        """One thread for the periodic Windows audio queries (who records from the virtual
+        microphone, the default output): COM calls of 10-20 ms every half second no longer
+        hold up the event loop that also moves the SCO audio. Always the same thread, so
+        the COM objects of MicWatcher stay in the apartment that created them."""
+        if self._com is None:
+            self._com = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="sonatina-com")
+        return self._com
+
+    def close_com(self) -> None:
+        if self._com is not None:
+            self._com.shutdown(wait=False, cancel_futures=True)
+            self._com = None
 
     # -- setup -----------------------------------------------------------------
     @property
@@ -1555,12 +1572,12 @@ class HfpGateway:
                 self._next_output_check = now + 30.0
                 try:
                     import sonatina_host
-                    sonatina_host.fix_default_output()
+                    await loop.run_in_executor(self.com, sonatina_host.fix_default_output)
                 except Exception as error:
                     log.debug("default output check: %r", error)
             if self.mic_key is None and now >= next_lookup:
                 next_lookup = now + 10.0
-                self.mic_key = await loop.run_in_executor(None, find_mic_cable, self.s.mic_device) \
+                self.mic_key = await loop.run_in_executor(self.com, find_mic_cable, self.s.mic_device) \
                     if sys.platform == "win32" else (self.s.mic_device or None)
                 if self.mic_key:
                     log.info("virtual microphone: %s", self.mic_key)
@@ -1570,7 +1587,7 @@ class HfpGateway:
                     log.warning("no virtual microphone (install Hi-Fi Cable): the headset "
                                 "microphone cannot reach the apps")
             try:
-                wanted = self._wanted(now)
+                wanted = await self._wanted(now)
                 if wanted and not self.in_call and self.ready and self.sco_failures < 3:
                     if await self.enter_call() and self.codec == "msbc":
                         msbc_check_at = now + 1.5          # warm-up: the link starts with zeros
@@ -1606,12 +1623,12 @@ class HfpGateway:
         lag, self._lag_ms = getattr(self, "_lag_ms", 0.0), 0.0
         return lag
 
-    def _wanted(self, now: float) -> bool:
+    async def _wanted(self, now: float) -> bool:
         if self.s.hfp_mode == "on":
             return not self.dismissed
         if self.watcher is None:
             return False
-        apps = self.watcher.poll()
+        apps = await asyncio.get_running_loop().run_in_executor(self.com, self.watcher.poll)
         if apps is None:
             return self.in_call        # cannot tell: keep the current mode
         if apps:

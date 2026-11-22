@@ -73,7 +73,7 @@ Click the tray icon (or start Sonatina again from the Start menu) to open the **
 |---|---|
 | Home | headphones, state, codec and estimated delay, volume, microphone mode and level, options, codec chain, link health |
 | Headphones | paired headphones (use these / forget), pair new ones |
-| Audio quality | preferred codec per headphones (unsupported ones greyed out), LDAC quality, low latency |
+| Audio quality | preferred codec per headphones (unsupported ones greyed out), LDAC quality, adaptive LDAC, low latency |
 | Microphone | Automatic / Always on / Off, HD voice, level, voice codec, lost frames, apps using it |
 | Diagnostics | buffer, clock drift, dropouts, packets; restart connection, open the log, copy the full status |
 | About | version, start with Windows, log file, open source components |
@@ -89,7 +89,7 @@ Right-click menu:
 | Menu | What it does |
 |---|---|
 | Headphones | switch between paired headphones, search and pair new ones, forget the current ones |
-| Audio quality | LDAC 990 / 660 / 330 kbit/s, aptX HD, aptX, AAC or SBC, remembered per headphones |
+| Audio quality | LDAC 990 / 660 / 330 kbit/s, aptX HD, aptX, AAC or SBC, remembered per headphones; **Adaptive LDAC** (on by default): drops to 660 or 330 while the radio cannot keep up and comes back by itself, never above the chosen quality |
 | Volume handled by the headphones | the Windows volume moves the headphones' own volume and their volume buttons move the Windows slider (AVRCP absolute volume, when supported) |
 | Headphone microphone | **Automatic** (call mode while an app uses the microphone), **Always on**, **Off**; HD voice (mSBC) |
 | Low latency (games, video) | smaller buffers and packets; the tooltip shows the estimated delay to your ears |
@@ -117,7 +117,12 @@ no longer need it, and pick your normal output in the sound settings.
 - **Video ahead of the sound**: Bluetooth headphones add their own buffer (often 150-250 ms;
   many have a game mode that cuts it). Turn on *Low latency*, prefer aptX or SBC, and if your
   player has an audio delay setting (VLC, mpv) use the delay shown in the tooltip.
-- **Choppy sound at LDAC 990**: choose LDAC 660 or 330 (weak radio link) in *Audio quality*.
+- **Choppy sound at LDAC 990**: keep *Adaptive LDAC* on, or choose LDAC 660 or 330 in *Audio
+  quality*. A phone or PC on **2.4 GHz Wi-Fi** next to the adapter is the usual cause (Bluetooth
+  shares that band): move it to 5 GHz.
+- **Headphones out of range**: the sound stops and comes back, in sync, when you are near again;
+  Sonatina drops the audio the radio could not carry instead of piling it up (the log says
+  "radio link too slow").
 - **Pops after installing Hi-Fi Cable**: update to 0.5.0 or later (older versions captured the
   wrong cable). The Windows output must stay "CABLE Input"; Sonatina puts it back by itself.
 - **Microphone silent in an app**: the app must use "Hi-Fi Cable Output"; the tray icon turns
@@ -151,10 +156,15 @@ no longer need it, and pick your normal output in the sound settings.
 
 ## How it works
 
-`sonatina/host/sonatina_host.py` captures "CABLE Output" (WASAPI), keeps a small jitter buffer,
-applies the Windows volume, encodes with `sonatina_codec.dll` (libldac and libsbc in C) on a
-monotonic media clock and sends RTP over AVDTP/L2CAP with [Bumble](https://github.com/google/bumble),
-a user-mode Bluetooth host that drives the adapter through WinUSB.
+Sonatina captures "CABLE Output" (WASAPI), keeps a small jitter buffer, applies the Windows
+volume, encodes with `sonatina_codec.dll` (libldac and libsbc in C) on a monotonic media clock
+and sends RTP over AVDTP/L2CAP with [Bumble](https://github.com/google/bumble), a user-mode
+Bluetooth host that drives the adapter through WinUSB. If the radio falls behind, the audio it
+cannot carry is dropped rather than queued, and LDAC lowers its bitrate until the link recovers.
+
+In `sonatina/host`: `sonatina_host.py` (A2DP session, main loop), `sonatina_audio.py` (capture,
+jitter buffer, Windows volume, media pump), `sonatina_codecs.py` (encoders, codec
+configurations), `sonatina_settings.py`, `sonatina_common.py`.
 
 For the microphone, `sonatina_hfp.py` keeps a Hands-Free (HFP Audio Gateway) connection next to
 A2DP; when an app opens the virtual microphone it suspends A2DP, opens an eSCO link over the

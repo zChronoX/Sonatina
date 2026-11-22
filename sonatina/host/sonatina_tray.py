@@ -34,7 +34,7 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
     (tr("SBC (compatibile con tutte)", "SBC (works with all headphones)"), "sbc", None),
 ]
 RETRY_S = 5.0
-OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc")
+OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive")
 STARTUP_LINK = "Sonatina.lnk"
 
 
@@ -471,6 +471,11 @@ class TrayApp:
         for label, codec, quality in CODEC_CHOICES:
             yield pystray.MenuItem(label, self._codec_action(codec, quality),
                                    checked=self._codec_checked(codec, quality), radio=True)
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem(tr("LDAC adattivo (scende se la radio non regge)",
+                                  "Adaptive LDAC (lower when the radio struggles)"),
+                               self._option_action("ldac_adaptive"),
+                               checked=self._option_checked("ldac_adaptive"))
 
     def _option_action(self, name: str):
         def action(*_args):
