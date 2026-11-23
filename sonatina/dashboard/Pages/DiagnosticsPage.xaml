@@ -49,7 +49,7 @@
                             <TextBlock x:Name="LevelText" Style="{StaticResource MetricValue}" />
                         </StackPanel>
                         <StackPanel Grid.Column="1">
-                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Potenza (RSSI)', En='Power (RSSI)'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='RSSI (valore della chiavetta)', En='RSSI (adapter value)'}" />
                             <TextBlock x:Name="RssiText" Style="{StaticResource MetricValue}" />
                         </StackPanel>
                         <StackPanel Grid.Column="2">
@@ -99,6 +99,7 @@
                         <ComboBox x:Name="WifiChannel" Grid.Column="1" MinWidth="240" SelectionChanged="WifiChannel_SelectionChanged" />
                     </Grid>
                     <TextBlock x:Name="WifiInfo" Style="{StaticResource Secondary}" />
+                    <Button x:Name="SuggestButton" Visibility="Collapsed" Click="Suggest_Click" />
                     <Grid x:Name="Strip" Height="24" ColumnSpacing="2" />
                     <Grid>
                         <TextBlock Style="{StaticResource Hint}" Text="2402 MHz" />

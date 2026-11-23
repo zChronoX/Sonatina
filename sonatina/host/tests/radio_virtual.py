@@ -112,6 +112,12 @@ def parsing_checks():
     s = sr.map_string(m)
     assert len(m) == 10 and s[:24] == '1' * 24 and s[24:47] == '0' * 23 and s[47:] == '1' * 32, s
     assert m[9] & 0x80 == 0                                       # bit 79 reserved
+    # 2026-11-23: the Realtek left 2428-2435 MHz (and 2470-2473) out by itself -> Wi-Fi 5
+    seen = ''.join('0' if k in (26, 27, 28, 29, 32, 33, 68, 69, 70, 71) else '1' for k in range(79))
+    assert sr.suggest_wifi_channel(seen) == 5, sr.suggest_wifi_channel(seen)
+    assert sr.suggest_wifi_channel('1' * 79) is None and sr.suggest_wifi_channel(None) is None
+    assert sr.suggest_wifi_channel(''.join('0' if k in (40, 41) else '1' for k in range(79))) is None
+    assert sr.suggest_wifi_channel(sr.map_string(sr.classification(sr.bad_bt_channels([11])))) == 11
     print('parsing and maps OK')
 
 
@@ -190,23 +196,31 @@ async def link_checks():
     assert await wait_for(lambda: host.radio.level == 'excellent' and host.radio.link_map is not None, 8), \
         (host.radio.level, host.radio.link_map)
     snap = json.loads(json.dumps(host.snapshot()))['radio']
-    assert snap['rssi'] == -2 and snap['rssi_unit'] == 'dB' and snap['link_quality'] == 250, snap
+    assert snap['rssi'] == -2 and snap['link_quality'] == 250, snap
+    assert snap['wifi']['suggested'] is not None        # the link map shows our own avoidance
     assert snap['afh']['applied'] and snap['afh']['avoided'] == 45 and snap['wifi']['avoid'] == [6, 1], snap['afh']
     assert snap['afh']['link_map'] == snap['afh']['host_map'], 'link map'
     assert len(snap['history']['rssi']) == 120 and snap['history']['rssi'][-1] == -2, snap['history']['rssi'][-3:]
     print('clean link: level excellent, rssi -2 dB, lq 250')
 
-    # audio lost with a strong signal: weak + interference
+    # audio lost with the signal as strong as usual: weak + interference
+    assert await wait_for(lambda: len(host.radio.samples) >= 12, 15)
     host.pump.radio_dropped += 60            # 60 packets (~0.3-1 s of audio)
     assert await wait_for(lambda: host.radio.level == 'weak', 4), host.radio.level
     assert host.radio.interference(host.radio.clock())
     assert 'segnale debole' in host.summary() or 'weak signal' in host.summary(), host.summary()
     print('audio lost, strong signal: weak, interference suspected')
 
-    # far away: weak signal without interference
+    # far away: RSSI 18 below its usual value, audio lost -> weak, not interference
     state['rssi'] = -20
-    await asyncio.sleep(2.5)
-    assert host.radio.level == 'weak'
+    await asyncio.sleep(6.5)
+    host.pump.radio_dropped += 60
+    await asyncio.sleep(1.5)
+    assert host.radio.level == 'weak' and not host.radio.interference(host.radio.clock())
+    print('audio lost with RSSI far below its usual value: weak, no interference')
+    # an adapter that always says link quality 0 (Realtek): hidden
+    state['lq'] = 0
+    assert await wait_for(lambda: not host.radio.lq_ok, 15) and host.radio.lq is None
 
     # Wi-Fi avoidance off: the full map again
     sets = state['sets']

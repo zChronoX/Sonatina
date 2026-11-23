@@ -34,7 +34,7 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
     private string? _exportPath;
     private JsonNode? _history;
     private string _historyKey = "";
-    private string _rssiUnit = "dB";
+    private int _suggested;
     private readonly Rectangle[] _cells = new Rectangle[79];
 
     public DiagnosticsPage()
@@ -99,11 +99,10 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
         var (_, word, _) = Status.Signal(s);
         LevelText.Text = word;
         RssiText.Text = Status.Power(radio) ?? "-";
-        QualityText.Text = J.I(radio, "link_quality") is int q ? $"{q} / 255" : "-";
+        QualityText.Text = J.I(radio, "link_quality") is int q ? $"{q} / 255"
+                         : radio is null ? "-" : L.T("non fornita", "not reported");
         LostText.Text = $"{Status.Seconds(J.I(radio, "lost_ms_minute"))} / {Status.Seconds(J.I(radio, "lost_ms_hour"))}";
-        _rssiUnit = J.S(radio, "rssi_unit") ?? "dB";
-        LineLegend.Text = _rssiUnit == "dBm" ? L.T("potenza (dBm)", "power (dBm)")
-                                             : L.T("potenza (dB rispetto alla norma)", "power (dB from the ideal range)");
+        LineLegend.Text = L.T("RSSI (valore della chiavetta, conta come cambia)", "RSSI (adapter value, what matters is how it changes)");
         _history = J.At(radio, "history");
         string key = _history?.ToJsonString() ?? "";
         if (key != _historyKey)
@@ -140,10 +139,18 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
                 .Take(4).ToList();
             string? error = J.S(wifi, "error");
             if (nets.Count == 0)
+            {
                 info = error is not null
                     ? L.T($"Reti Wi-Fi non leggibili ({error}): scegli il canale qui sopra.",
                           $"Wi-Fi networks not readable ({error}): choose the channel above.")
                     : L.T("Nessuna rete a 2,4 GHz vicina: niente da evitare.", "No 2.4 GHz network nearby: nothing to avoid.");
+                if (J.I(wifi, "suggested") is int suggested)
+                {
+                    _suggested = suggested;
+                    info += L.T($" La chiavetta evita già da sola alcune frequenze: probabile Wi-Fi sul canale {suggested}.",
+                                $" The adapter already leaves some frequencies out by itself: probably Wi-Fi on channel {suggested}.");
+                }
+            }
             else
                 info = L.T("Reti a 2,4 GHz: ", "2.4 GHz networks: ") + string.Join(", ", nets) + ". "
                        + (avoid.Count > 0
@@ -157,6 +164,11 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
         if (J.S(radio, "afh", "error") is string afhError)
             info += L.T($" La chiavetta non accetta la mappa ({afhError}).", $" The adapter refuses the map ({afhError}).");
         WifiInfo.Text = info;
+        bool suggest = radio is not null && enabled && manual == 0 && J.I(wifi, "suggested") is int
+                       && J.A(wifi, "networks").Count == 0;
+        SuggestButton.Visibility = suggest ? Visibility.Visible : Visibility.Collapsed;
+        if (suggest)
+            SuggestButton.Content = L.T($"Evita il canale {_suggested}", $"Avoid channel {_suggested}");
 
         string host = J.S(radio, "afh", "host_map") ?? "";
         string? used = J.S(radio, "afh", "link_map");
@@ -198,12 +210,16 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
         int n = Math.Max(1, Math.Max(rssi.Count, lost.Count));
         const double left = 36, top = 8;
         double plotW = w - left - 4, plotH = h - 28;
-        bool dbm = _rssiUnit == "dBm";
-        double hi = dbm ? -40 : 5, lo = dbm ? -95 : -30;
+        // the scale follows the values (the adapter's RSSI has no fixed unit)
+        var values = rssi.Select(x => J.D(x)).Where(v => v is not null).Select(v => v!.Value).ToList();
+        double hi = values.Count > 0 ? Math.Ceiling((values.Max() + 3) / 5) * 5 : 0;
+        double lo = values.Count > 0 ? Math.Floor((values.Min() - 3) / 5) * 5 : -30;
+        if (hi - lo < 15)
+            lo = hi - 15;
         double Y(double v) => top + (hi - Math.Clamp(v, lo, hi)) / (hi - lo) * plotH;
         var grid = Ui.Res("DividerStrokeColorDefaultBrush");
         var hint = (Style)Application.Current.Resources["Hint"];
-        foreach (double v in dbm ? new[] { -40.0, -60, -80 } : new[] { 0.0, -10, -20 })
+        foreach (double v in new[] { hi, Math.Round((hi + lo) / 2), lo })
         {
             double y = Y(v);
             Chart.Children.Add(new Line { X1 = left, Y1 = y, X2 = w, Y2 = y, Stroke = grid, StrokeThickness = 1 });
@@ -284,6 +300,12 @@ public sealed partial class DiagnosticsPage : Page, IStatusView
         {
             App.Shell?.ShowError(error.Message);
         }
+    }
+
+    private async void Suggest_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suggested > 0)
+            await Ui.Run("set_wifi_channel", new JsonObject { ["channel"] = _suggested });
     }
 
     private async void WifiAvoid_Toggled(object sender, RoutedEventArgs e)

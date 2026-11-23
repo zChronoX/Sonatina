@@ -159,8 +159,6 @@ public static class Status
             _ => L.T("Debole", "Weak"),
         };
         string line = L.T("Segnale ", "Signal ") + word.ToLowerInvariant();
-        if (Power(radio) is string power)
-            line += $" ({power})";
         var lost = J.I(radio, "lost_ms_minute") ?? 0;
         if (lost > 0)
             line += L.T($" · {lost / 1000.0:0.0} s persi nell’ultimo minuto", $" · {lost / 1000.0:0.0} s lost in the last minute");
@@ -169,16 +167,9 @@ public static class Status
         return (bars, word, line);
     }
 
-    /// <summary>RSSI in words: BR/EDR controllers report dB from the ideal range, some dBm.</summary>
-    public static string? Power(JsonNode? radio)
-    {
-        if (J.I(radio, "rssi") is not int v)
-            return null;
-        if (J.S(radio, "rssi_unit") == "dBm")
-            return $"{v} dBm";
-        return v >= 0 ? L.T("potenza nella norma", "power in range")
-                      : L.T($"{-v} dB sotto la norma", $"{-v} dB below range");
-    }
+    /// <summary>RSSI as the adapter reports it: a raw number, only comparable with itself
+    /// (the Realtek mixes scales, 1.2.1).</summary>
+    public static string? Power(JsonNode? radio) => J.I(radio, "rssi") is int v ? v.ToString() : null;
 
     /// <summary>"canale 6 · 1", "nessuno", "spento".</summary>
     public static string WifiAvoided(JsonObject s)

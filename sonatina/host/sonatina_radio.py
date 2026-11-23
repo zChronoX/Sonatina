@@ -16,7 +16,16 @@ channel chosen by hand. Since only the central decides the hopping map, Sonatina
 become central when a headset connected to it (Switch Role).
 
 BR/EDR RSSI is, per the spec, the distance in dB from the controller's "golden receive
-power range" (0 = inside it); some controllers report dBm instead: both are handled.
+power range" (0 = inside it); some controllers report dBm, and the Realtek RTL8761B does
+neither consistently (-18..-31 for a while, then -1..-3 on the same link, 2026-11-22).
+So since 1.2.1 the level comes only from how the audio gets through (audio waiting for
+the radio, audio lost, LDAC lowered by the adapter); RSSI is shown as a raw number and
+only compared with itself: audio lost while it is near its best of the last minutes
+means interference, not distance. Link quality is hidden when the adapter reports 0.
+
+Without a Wi-Fi adapter on the PC the channels the controller already leaves out of the
+link by itself (Read AFH Channel Map) point at the Wi-Fi channel to avoid: the window
+suggests it (2026-11-23: 2428-2435 MHz left out -> Wi-Fi channel 5).
 """
 
 from __future__ import annotations
@@ -280,13 +289,27 @@ def map_string(channel_map: bytes) -> str:
 LEVELS = ("none", "weak", "good", "excellent")
 
 
-def rssi_grade(rssi: int | None, absolute: bool) -> int:
-    """0 weak, 1 good, 2 excellent (2 when unknown)."""
-    if rssi is None:
-        return 2
-    if absolute:
-        return 0 if rssi <= -82 else 1 if rssi <= -70 else 2
-    return 0 if rssi <= -15 else 1 if rssi <= -6 else 2
+def suggest_wifi_channel(link_map: str | None) -> int | None:
+    """The Wi-Fi channel behind the largest block of Bluetooth channels the controller left
+    out of the link by itself (at least 4 channels; gaps of up to 3 are bridged)."""
+    if not link_map:
+        return None
+    bad = [k for k, c in enumerate(link_map) if c == "0"]
+    if not bad:
+        return None
+    clusters, current = [], [bad[0]]
+    for k in bad[1:]:
+        if k - current[-1] <= 4:
+            current.append(k)
+        else:
+            clusters.append(current)
+            current = [k]
+    clusters.append(current)
+    best = max(clusters, key=lambda c: (c[-1] - c[0], len(c)))
+    if best[-1] - best[0] < 3:
+        return None
+    center = 2402 + (best[0] + best[-1]) / 2
+    return max(1, min(13, round((center - 2407) / 5)))
 
 
 @dataclasses.dataclass
@@ -315,7 +338,7 @@ class RadioMonitor:
         self.losses: collections.deque[tuple[float, float]] = collections.deque()   # (t, ms) for an hour
         self.rssi: int | None = None
         self.lq: int | None = None
-        self.absolute = False                  # RSSI in dBm (seen <= -25)
+        self.lq_zero = 0                       # link quality readings of 0 in a row
         self.rssi_ok = True
         self.lq_ok = True
         self.afh_read_ok = True
@@ -334,6 +357,7 @@ class RadioMonitor:
         self.sent_map: bytes | None = None      # last classification the controller took
         self.afh_error: str | None = None
         self.link_map: str | None = None        # what the link really uses
+        self.last_link_map: str | None = None   # kept after a disconnection (suggestion)
         self.next_wifi = 0.0
         self.next_afh_read = 0.0
         self.wake = asyncio.Event()
@@ -394,8 +418,6 @@ class RadioMonitor:
             try:
                 rp = await asyncio.wait_for(self._command(hci.HCI_Read_RSSI_Command(handle=connection.handle)), 2.0)
                 self.rssi = int(rp.rssi)
-                if self.rssi <= -25:
-                    self.absolute = True
             except Exception as error:
                 self.rssi = None
                 if _unsupported(error):
@@ -405,6 +427,10 @@ class RadioMonitor:
             try:
                 rp = await asyncio.wait_for(self._command(HCI_Read_Link_Quality_Command(handle=connection.handle)), 2.0)
                 self.lq = int(rp.link_quality)
+                self.lq_zero = self.lq_zero + 1 if self.lq == 0 else 0
+                if self.lq_zero >= 10:      # the Realtek always says 0: not a measurement
+                    self.lq_ok, self.lq = False, None
+                    log.info("radio: this adapter does not report the link quality (always 0)")
             except Exception as error:
                 self.lq = None
                 if _unsupported(error):
@@ -432,28 +458,36 @@ class RadioMonitor:
     def lost_ms(self, now: float, seconds: float) -> float:
         return sum(ms for t, ms in self.losses if t > now - seconds)
 
+    def _ldac_lowered(self) -> bool:
+        pump = self.host.pump
+        adapter = getattr(pump, "adapter", None) if pump is not None else None
+        encoder = getattr(pump, "encoder", None) if pump is not None else None
+        try:
+            return adapter is not None and encoder is not None and encoder.eqmid > adapter.ceiling
+        except AttributeError:
+            return False
+
     def _grade(self, now: float) -> str:
+        """From how the audio gets through, not from RSSI (see the module notes)."""
         recent = self._window(now, 10)
-        lost10 = sum(x.lost_ms for x in recent)
-        queued = max((x.queued_ms for x in recent), default=0.0)
-        rssis = [x.rssi for x in recent if x.rssi is not None]
-        worst = min(rssis) if rssis else None
-        grade = rssi_grade(worst, self.absolute)
-        if lost10 > 0 or grade == 0:
+        if sum(x.lost_ms for x in recent) > 0:
             return "weak"
-        if grade == 1 or queued > 60 or self.lost_ms(now, 60) > 0:
+        queued = max((x.queued_ms for x in recent), default=0.0)
+        if queued > 60 or self.lost_ms(now, 60) > 0 or self._ldac_lowered():
             return "good"
         return "excellent"
 
     def interference(self, now: float) -> bool:
-        """Audio lost in the last minute with a strong signal: Wi-Fi or other 2.4 GHz noise."""
+        """Audio lost in the last minute while RSSI (last 10 s) stays near its best of the
+        last minutes (within 6 dB): not distance but 2.4 GHz noise, usually Wi-Fi."""
         if self.lost_ms(now, 60) < 100:
             return False
-        rssis = [x.rssi for x in self._window(now, 60) if x.rssi is not None]
-        if not rssis:
+        recent = sorted(x.rssi for x in self._window(now, 10) if x.rssi is not None)
+        history = sorted(x.rssi for x in self.samples if x.rssi is not None)
+        if len(recent) < 5 or len(history) < 10:
             return False
-        rssis.sort()
-        return rssi_grade(rssis[len(rssis) // 2], self.absolute) == 2
+        best = history[int(len(history) * 0.9)]
+        return best - recent[len(recent) // 2] <= 6
 
     def _set_level(self, level: str, now: float) -> None:
         self.level = level
@@ -466,10 +500,9 @@ class RadioMonitor:
             return
         self.next_log = now + 30.0
         self.logged_level = level
-        log.info("radio: signal %s (rssi %s%s, link quality %s, lost %.1f s in the last minute%s)",
-                 level, self.rssi, " dBm" if self.absolute else " dB", self.lq,
-                 self.lost_ms(now, 60) / 1000,
-                 ", strong signal: interference?" if level == "weak" and self.interference(now) else "")
+        log.info("radio: signal %s (rssi %s, lost %.1f s in the last minute%s)",
+                 level, self.rssi, self.lost_ms(now, 60) / 1000,
+                 ", signal as strong as usual: interference?" if level == "weak" and self.interference(now) else "")
 
     # -- A5 -------------------------------------------------------------------------
     async def refresh_wifi(self) -> None:
@@ -513,6 +546,8 @@ class RadioMonitor:
             rp = await asyncio.wait_for(self._command(
                 HCI_Read_AFH_Channel_Map_Command(connection_handle=connection.handle)), 2.0)
             self.link_map = map_string(rp.afh_channel_map) if rp.afh_mode else None
+            if self.link_map is not None:
+                self.last_link_map = self.link_map
         except Exception as error:
             self.link_map = None
             if _unsupported(error):
@@ -556,7 +591,7 @@ class RadioMonitor:
         bad = sorted(bad_bt_channels(self.avoid))
         return {
             "level": self.level,
-            "rssi": self.rssi, "rssi_unit": "dBm" if self.absolute else "dB",
+            "rssi": self.rssi,
             "link_quality": self.lq,
             "lost_ms_minute": round(self.lost_ms(now, 60)),
             "lost_ms_hour": round(self.lost_ms(now, 3600)),
@@ -569,6 +604,7 @@ class RadioMonitor:
                 "networks": [dataclasses.asdict(n) for n in self.networks[:12]],
                 "avoid": list(self.avoid),
                 "error": self.wifi_error,
+                "suggested": suggest_wifi_channel(self.last_link_map),
             },
             "afh": {
                 "host_map": map_string(self.host_map),
@@ -582,7 +618,7 @@ class RadioMonitor:
     def stats(self) -> str:
         if self.host.connection is None:
             return ""
-        return (f" rssi={self.rssi}{'dBm' if self.absolute else 'dB'} lq={self.lq} radio={self.level}"
+        return (f" rssi={self.rssi} lq={self.lq} radio={self.level}"
                 f" role={self.role}")
 
 
