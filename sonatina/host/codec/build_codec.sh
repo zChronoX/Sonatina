@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds sonatina_codec.dll (Windows x64, mingw-w64) and/or sonatina_codec.so (Linux, tests)
 # from the codec sources in src/ (SBC, LDAC wrappers, once part of the kernel driver), libsbc and
-# libldac (AOSP), the vendored FDK AAC encoder and libfreeaptx (third_party/).
+# libldac (AOSP), the vendored FDK AAC encoder, libfreeaptx and RNNoise (third_party/).
 # Run from this directory.
 #   sh build_codec.sh          # both
 #   sh build_codec.sh so       # Linux only (CI tests)
@@ -12,9 +12,13 @@ FDK=third_party/fdk-aac
 SRC="sonatina_codec.c src/codec_sbc.c src/codec_ldac.c \
      third_party/sbc/src/sbc.c third_party/sbc/src/bits.c \
      third_party/ldac/src/ldacBT.c third_party/ldac/src/ldaclib.c \
-     third_party/libfreeaptx/freeaptx.c"
+     third_party/libfreeaptx/freeaptx.c \
+     third_party/rnnoise/src/denoise.c third_party/rnnoise/src/rnn.c \
+     third_party/rnnoise/src/rnn_data.c third_party/rnnoise/src/pitch.c \
+     third_party/rnnoise/src/kiss_fft.c third_party/rnnoise/src/celt_lpc.c \
+     third_party/rnnoise/src/rnn_reader.c"
 FDK_INC=$(for d in $FDK/lib*/include; do printf -- "-I%s " "$d"; done)
-INC="-Ithird_party/libfreeaptx -Isrc -Ithird_party/sbc/include -Ithird_party/ldac/inc -Ithird_party/ldac/src $FDK_INC"
+INC="-Ithird_party/rnnoise/include -Ithird_party/libfreeaptx -Isrc -Ithird_party/sbc/include -Ithird_party/ldac/inc -Ithird_party/ldac/src $FDK_INC"
 DEF="-DSONATINA_WITH_LIBSBC -DSONATINA_WITH_LIBLDAC -D_32BIT_FIXED_POINT"
 FDK_FLAGS="-O2 -fno-exceptions -fno-rtti -w $FDK_INC"
 

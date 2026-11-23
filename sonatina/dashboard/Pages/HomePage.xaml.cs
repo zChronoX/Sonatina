@@ -64,6 +64,13 @@ public sealed partial class HomePage : Page, IStatusView
             HeadsetName.Text = J.S(headset, "name") ?? (host is null ? "Sonatina" : L.T("Nessuna cuffia", "No headphones"));
             var (stateText, kind) = Status.State(s);
             StatePill.Set(stateText, kind);
+            string? battery = Status.Battery(headset, J.B(headset, "connected"));
+            BatteryText.Text = battery ?? "";
+            BatteryText.Visibility = battery is null ? Visibility.Collapsed : Visibility.Visible;
+            if (J.I(headset, "battery") is int low && low <= 15 && J.B(headset, "connected"))
+                BatteryText.Foreground = Ui.Res("SystemFillColorCriticalBrush");
+            else
+                BatteryText.ClearValue(TextBlock.ForegroundProperty);
             CodecLine.Text = Status.CodecLine(s);
             LatencyLine.Text = Status.LatencyLine(s);
             LatencyLine.Visibility = LatencyLine.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;

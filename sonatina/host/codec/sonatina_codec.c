@@ -6,6 +6,7 @@
 #include "aacenc_lib.h"   /* Fraunhofer FDK AAC (third_party/fdk-aac) */
 #include "freeaptx.h"     /* aptX / aptX HD (third_party/libfreeaptx, LGPL-2.1+) */
 #include "sbc.h"          /* libsbc (Google, Apache-2.0): mSBC for HFP wide-band speech */
+#include "rnnoise.h"      /* RNNoise v0.1.1 (Xiph/Mozilla, BSD-3-Clause): microphone noise reduction */
 #define _USE_MATH_DEFINES
 #include <math.h>
 #ifndef M_PI
@@ -20,7 +21,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 5; }
+SONT_API int sont_codec_version(void) { return 6; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -493,4 +494,196 @@ SONT_API int sont_rs_process(void *h, const int16_t *in, unsigned in_frames,
     r->t -= (long)in_frames * r->L;
     memmove(x, x + in_frames, sizeof(float) * hist);
     return (int)written;
+}
+
+/* ------------------------------------------------------------------ voice (1.2.0) */
+
+/* Cleaning of the headset microphone, 48 kHz mono, 480 samples (10 ms) per call:
+ *   noise reduction  RNNoise; `strength` < 1 mixes some of the original back in (a natural
+ *                    residue instead of a "underwater" sound). RNNoise output is one frame
+ *                    late, so the original is delayed by one frame before mixing.
+ *   AGC              the speech level (frames RNNoise calls voice) is brought towards
+ *                    -20 dBFS: +3 dB/s up, 30 dB/s down, between -6 and +24 dB. Without AGC
+ *                    the fixed gain is used.
+ *   gate             200 ms without voice: down to -26 dB (in ~50 ms), open at once on voice.
+ *   limiter          peaks above 29000 lower the gain at once, released over ~1 s.
+ * flags: 1 = noise reduction, 2 = AGC, 4 = gate. With no flag only the fixed gain and the
+ * limiter apply (no extra delay). */
+#define SONT_VOICE_FRAME 480
+#define SONT_VOICE_DENOISE 1
+#define SONT_VOICE_AGC 2
+#define SONT_VOICE_GATE 4
+
+typedef struct {
+    DenoiseState *rn;
+    float dry[SONT_VOICE_FRAME];   /* previous input frame (aligned with RNNoise's output) */
+    float gain;                    /* linear gain applied at the end of the last frame */
+    float agc_db;
+    float speech_db;
+    float gate, gate_target;
+    float limit;
+    int quiet;
+    float vad, in_peak, out_peak;
+} SONT_VOICE;
+
+SONT_API void *sont_voice_create(float start_gain_db)
+{
+    SONT_VOICE *v = (SONT_VOICE *)calloc(1, sizeof(SONT_VOICE));
+    if (v == NULL) {
+        return NULL;
+    }
+    v->rn = rnnoise_create(NULL);
+    if (v->rn == NULL) {
+        free(v);
+        return NULL;
+    }
+    v->agc_db = start_gain_db;
+    v->speech_db = -20.0f - start_gain_db;
+    v->gain = powf(10.0f, start_gain_db / 20.0f);
+    v->gate = v->gate_target = 1.0f;
+    v->limit = 1.0f;
+    return v;
+}
+
+SONT_API void sont_voice_destroy(void *h)
+{
+    SONT_VOICE *v = (SONT_VOICE *)h;
+    if (v) {
+        rnnoise_destroy(v->rn);
+        free(v);
+    }
+}
+
+/* Processes one frame in place; returns RNNoise's voice probability (0 without RNNoise). */
+SONT_API float sont_voice_process(void *h, int16_t *pcm, unsigned flags, float strength,
+                                  float fixed_gain_db)
+{
+    SONT_VOICE *v = (SONT_VOICE *)h;
+    float x[SONT_VOICE_FRAME], d[SONT_VOICE_FRAME], y[SONT_VOICE_FRAME];
+    float peak = 0.0f, sum = 0.0f, g0, g1, target_db, lim_peak;
+    int i;
+    if (v == NULL || pcm == NULL) {
+        return 0.0f;
+    }
+    for (i = 0; i < SONT_VOICE_FRAME; i++) {
+        x[i] = (float)pcm[i];
+        if (fabsf(x[i]) > peak) {
+            peak = fabsf(x[i]);
+        }
+    }
+    v->in_peak = peak / 32768.0f;
+    if (flags & (SONT_VOICE_DENOISE | SONT_VOICE_AGC | SONT_VOICE_GATE)) {
+        v->vad = rnnoise_process_frame(v->rn, d, x);
+        if (strength < 0.0f) {
+            strength = 0.0f;
+        } else if (strength > 1.0f) {
+            strength = 1.0f;
+        }
+        for (i = 0; i < SONT_VOICE_FRAME; i++) {
+            y[i] = (flags & SONT_VOICE_DENOISE) ? d[i] + (1.0f - strength) * (v->dry[i] - d[i]) : v->dry[i];
+        }
+        memcpy(v->dry, x, sizeof(x));
+    } else {
+        v->vad = 0.0f;
+        memcpy(y, x, sizeof(x));
+    }
+
+    /* level of this frame, for the AGC */
+    for (i = 0; i < SONT_VOICE_FRAME; i++) {
+        sum += y[i] * y[i];
+    }
+    if (flags & SONT_VOICE_AGC) {
+        float rms_db = 10.0f * log10f(sum / SONT_VOICE_FRAME / (32768.0f * 32768.0f) + 1e-12f);
+        if (v->vad > 0.6f && rms_db > -65.0f) {
+            v->speech_db += 0.05f * (rms_db - v->speech_db);
+        }
+        target_db = -20.0f - v->speech_db;
+        if (target_db > 24.0f) {
+            target_db = 24.0f;
+        } else if (target_db < -6.0f) {
+            target_db = -6.0f;
+        }
+        if (target_db > v->agc_db) {
+            v->agc_db += fminf(0.03f, target_db - v->agc_db);
+        } else {
+            v->agc_db -= fminf(0.3f, v->agc_db - target_db);
+        }
+    } else {
+        v->agc_db = fixed_gain_db;
+    }
+
+    /* gate */
+    if (flags & SONT_VOICE_GATE) {
+        if (v->vad > 0.5f) {
+            v->quiet = 0;
+            v->gate_target = 1.0f;
+        } else if (++v->quiet > 20) {
+            v->gate_target = 0.05f;
+        }
+    } else {
+        v->gate_target = 1.0f;
+    }
+    if (v->gate_target > v->gate) {
+        v->gate = v->gate_target;                       /* open at once */
+    } else {
+        v->gate += 0.2f * (v->gate_target - v->gate);   /* close over ~50 ms */
+    }
+
+    /* gain + limiter, ramped over the frame */
+    g0 = v->gain;
+    g1 = powf(10.0f, v->agc_db / 20.0f) * v->gate;
+    peak = 0.0f;
+    for (i = 0; i < SONT_VOICE_FRAME; i++) {
+        if (fabsf(y[i]) > peak) {
+            peak = fabsf(y[i]);
+        }
+    }
+    lim_peak = peak * g1 * v->limit;
+    if (lim_peak > 29000.0f) {
+        v->limit *= 29000.0f / lim_peak;                /* at once */
+    } else if (v->limit < 1.0f) {
+        v->limit = fminf(1.0f, v->limit * 1.012f);      /* ~1 s back to 0 dB */
+    }
+    g1 *= v->limit;
+    if (peak * g0 > 29000.0f) {                         /* a louder frame: no overshoot */
+        g0 = 29000.0f / peak;
+    }
+    peak = 0.0f;
+    for (i = 0; i < SONT_VOICE_FRAME; i++) {
+        float g = g0 + (g1 - g0) * (float)i / SONT_VOICE_FRAME;
+        float s = y[i] * g;
+        long q;
+        if (s > 32767.0f) {
+            s = 32767.0f;
+        } else if (s < -32768.0f) {
+            s = -32768.0f;
+        }
+        q = lrintf(s);
+        pcm[i] = (int16_t)q;
+        if (fabsf(s) > peak) {
+            peak = fabsf(s);
+        }
+    }
+    v->gain = g1;
+    v->out_peak = peak / 32768.0f;
+    return v->vad;
+}
+
+/* 0 voice probability, 1 AGC gain dB, 2 gate (0..1), 3 input peak, 4 output peak (0..1),
+ * 5 limiter (0..1) */
+SONT_API float sont_voice_get(void *h, unsigned what)
+{
+    SONT_VOICE *v = (SONT_VOICE *)h;
+    if (v == NULL) {
+        return 0.0f;
+    }
+    switch (what) {
+    case 0: return v->vad;
+    case 1: return v->agc_db;
+    case 2: return v->gate;
+    case 3: return v->in_peak;
+    case 4: return v->out_peak;
+    case 5: return v->limit;
+    default: return 0.0f;
+    }
 }

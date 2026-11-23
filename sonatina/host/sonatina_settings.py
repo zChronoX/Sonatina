@@ -48,6 +48,11 @@ class Settings:
     # radio (sonatina_radio)
     wifi_avoid: bool = True       # keep Bluetooth off the channels of nearby 2.4 GHz Wi-Fi
     wifi_channel: int = 0         # Wi-Fi channel to avoid chosen by hand (0 = from the PC's Wi-Fi)
+    # headset battery and voice (1.2.0)
+    hfp_battery: bool = True      # HF indicators: the headset reports its battery
+    mic_denoise: str = "normal"   # off | normal | strong (RNNoise)
+    mic_agc: bool = True          # automatic level instead of the fixed mic_gain_db
+    mic_gate: bool = False        # silence between words
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "aac_bitrate",
@@ -56,7 +61,8 @@ SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpoo
                 "ldac_adaptive",
                 "hfp_mode", "hfp_msbc", "mic_device", "mic_gain_db", "sco_alt", "sco_alt_msbc",
                 "auto_output", "pause_on_disconnect", "fallback_output", "fallback_output_name",
-                "last_output", "last_output_name", "wifi_avoid", "wifi_channel")
+                "last_output", "last_output_name", "wifi_avoid", "wifi_channel",
+                "hfp_battery", "mic_denoise", "mic_agc", "mic_gate")
 
 
 def load_settings(path: str) -> Settings:

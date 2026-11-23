@@ -140,6 +140,21 @@ async def main():
     await run_for(sw, clock, 2)
     assert not host.remote.media.commands and len(win.history) == switches, (host.remote.media.commands, win.history)
     print("5. codec change -> no pause, no switch: OK")
+    # ... and a play/pause button the headset sends right after that reconnection is ignored
+    import sonatina_avrcp as sa
+    assert sw.own_reconnection()
+    host.output = sw
+    remote = sa.RemoteControl(host, host.remote.media)
+    remote.connected_at = -1e9
+    host.remote.media.commands.clear()
+    remote.on_key(sa.Key.PAUSE)
+    assert host.remote.media.commands == [], host.remote.media.commands
+    clock.t += 10
+    assert not sw.own_reconnection()
+    remote.status_asked = True
+    remote.on_key(sa.Key.PAUSE)
+    assert host.remote.media.commands == ["pause"], host.remote.media.commands
+    print("   headset PAUSE right after our reconnection ignored, later obeyed: OK")
 
     # 6: a device picked by hand while the headphones are off stays
     disconnect(host)

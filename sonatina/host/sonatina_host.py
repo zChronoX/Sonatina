@@ -221,6 +221,9 @@ class SonatinaHost:
         self.output = sonatina_output.OutputSwitcher(self)
         self.radio = sonatina_radio.RadioMonitor(self)
         self.on_notice = None                 # tray balloon (text)
+        self.battery: int | None = None       # headset battery %, this connection
+        self.battery_source: str | None = None
+        self.battery_warned = 101             # lowest threshold already announced
 
     # -- settings ---------------------------------------------------------------
     def headset_name(self, address: str | None) -> str:
@@ -311,8 +314,38 @@ class SonatinaHost:
             return None
         return self.pump.latency_ms() + int(self.headset_delay_ms or 0)
 
+    # -- battery (1.2.0) ----------------------------------------------------------
+    BATTERY_WARN = (15, 5)
+
+    def on_battery(self, percent: int, source: str) -> None:
+        """Battery level reported by the headset (HFP)."""
+        percent = max(0, min(100, int(percent)))
+        old = self.battery
+        self.battery, self.battery_source = percent, source
+        if old is None or abs(percent - old) >= 10 or percent <= 20 and percent != old:
+            log.info("headset battery %d%% (%s)", percent, source)
+        if self.peer:
+            entry = self.s.headsets.setdefault(self.peer, {})
+            if entry.get("battery") != percent:
+                entry["battery"], entry["battery_at"] = percent, int(time.time())
+                self._changed()
+        if percent >= 25:
+            self.battery_warned = 101      # charged again: warn again next time
+        for level in self.BATTERY_WARN:
+            if percent <= level < self.battery_warned:
+                self.battery_warned = level
+                if self.on_notice is not None:
+                    self.on_notice(tr(f"Batteria delle cuffie al {percent}%", f"Headphone battery at {percent}%")
+                                   + (f": {self.headset_name(self.peer)}" if self.peer else ""))
+                break
+
+    def battery_text(self) -> str:
+        return "" if self.battery is None else tr(" · batteria ", " · battery ") + f"{self.battery}%"
+
     def _on_disconnection(self, reason) -> None:
         log.info("disconnected (reason 0x%02X)", reason)
+        self.battery = None
+        self.battery_warned = 101
         self.connection = None
         self.peer = None
         self.state = "idle"
@@ -665,7 +698,7 @@ class SonatinaHost:
             self.output.option_changed()
         if name == "wifi_avoid":
             self.radio.option_changed()
-        if name in ("absolute_volume", "low_latency") and self.connection is not None:
+        if name in ("absolute_volume", "low_latency", "hfp_battery") and self.connection is not None:
             self.output.expect_reconnect()
             await self.connection.disconnect()
 
@@ -682,6 +715,14 @@ class SonatinaHost:
         log.info("output when the headphones are off: %s", name or "automatic")
         if self.connection is None:
             self.output.option_changed()
+
+    async def set_mic_denoise(self, mode: str) -> None:
+        """Noise reduction of the headset microphone: off | normal | strong (live)."""
+        if mode not in ("off", "normal", "strong"):
+            raise ValueError("mode")
+        self.s.mic_denoise = mode
+        self._changed()
+        log.info("microphone noise reduction: %s", mode)
 
     async def set_wifi_channel(self, channel: int) -> None:
         """Wi-Fi channel to keep Bluetooth away from, chosen by hand (0 = automatic)."""
@@ -731,7 +772,8 @@ class SonatinaHost:
                 "address": address, "name": self.headset_name(address), "codec": codec,
                 "ldac_quality": quality, "supported": list(h.get("codecs", [])),
                 "preferred": address == self.s.address, "connected": address == self.peer,
-                "paired": address in self.paired, "msbc_broken": bool(h.get("msbc_broken"))})
+                "paired": address in self.paired, "msbc_broken": bool(h.get("msbc_broken")),
+                "battery": h.get("battery"), "battery_at": h.get("battery_at")})
         last = self.volume.last
         apps = []
         if hf.watcher is not None:
@@ -754,14 +796,22 @@ class SonatinaHost:
                        "absolute": bool(getattr(self.remote, "absolute", False))},
             "options": {k: bool(getattr(self.s, k)) for k in
                         ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
-                         "auto_output", "pause_on_disconnect", "wifi_avoid")},
+                         "auto_output", "pause_on_disconnect", "wifi_avoid", "hfp_battery",
+                         "mic_agc", "mic_gate")},
             "output": self.output.snapshot(),
+            "battery": None if self.battery is None else {"percent": self.battery, "source": self.battery_source},
             "radio": self.radio.snapshot(),
             "mic": {"mode": self.s.hfp_mode, "msbc": bool(self.s.hfp_msbc), "cable": hf.mic_key,
                     "ready": hf.ready, "in_call": hf.in_call, "codec": hf.codec, "apps": apps,
                     "dismissed": hf.dismissed, "level": round(audio.level, 3) if audio else 0.0,
                     "frames_ok": audio.frames_ok if audio else 0,
                     "frames_lost": audio.frames_lost if audio else 0,
+                    "voice": {"available": bool(getattr(self.lib, "has_voice", False)),
+                              "denoise": self.s.mic_denoise, "agc": bool(self.s.mic_agc),
+                              "gate": bool(self.s.mic_gate),
+                              "level_in": round(audio.level_in, 3) if audio else 0.0,
+                              "vad": round(audio.vad, 2) if audio else 0.0,
+                              "gain_db": round(audio.agc_db, 1) if audio else None},
                     "status": hf.status_line()},
             "link": {"ring_ms": self.ring.level_ms(), "underruns": self.ring.underruns,
                      "target_ms": p.target_ms if p else None,
@@ -788,7 +838,7 @@ class SonatinaHost:
         """One line for the tray tooltip."""
         p = self.pump
         if self.hfp.in_call:
-            return f"{self.headset_name(self.peer)}: {self.hfp.summary()}"
+            return f"{self.headset_name(self.peer)}: {self.hfp.summary()}{self.battery_text()}"
         if self.state == "streaming" and p is not None and p.encoder is not None:
             vol = "" if self.volume.last is None else (
                 tr(" · muto", " · muted") if self.volume.last[0] else f" · vol {self.volume.last[1]}%")
@@ -799,6 +849,7 @@ class SonatinaHost:
                 vol += tr(" · ritardo ~", " · delay ~") + f"{latency} ms"
             if self.radio.level == "weak":
                 vol += tr(" · segnale debole", " · weak signal")
+            vol += self.battery_text()
             return f"{self.headset_name(self.peer)}: {p.encoder.name} {p.encoder.kbps} kbit/s{vol}"
         if self.discovering:
             return tr("Sonatina: ricerca cuffie...", "Sonatina: looking for headphones...")

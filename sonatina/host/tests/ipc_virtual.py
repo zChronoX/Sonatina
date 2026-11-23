@@ -137,6 +137,22 @@ async def main():
     status = json.loads(zipfile.ZipFile(path).read('status.json'))
     assert status['host']['output']['fallback_name'].startswith('LG'), status['host']['output']
     assert 'radio' in status['host'] and status['host']['options']['auto_output'] is True
+    # 1.2.0: microphone cleaning, battery option
+    await client.call('set_mic_denoise', mode='strong')
+    assert host.s.mic_denoise == 'strong'
+    try:
+        await client.call('set_mic_denoise', mode='max')
+        raise AssertionError('bad mode accepted')
+    except RuntimeError as error:
+        assert 'mode' in str(error)
+    for option in ('mic_agc', 'mic_gate'):
+        await client.call('set_option', name=option, value=not getattr(host.s, option))
+    assert host.s.mic_agc is False and host.s.mic_gate is True
+    menu = list(app.denoise_menu())
+    assert [m.checked for m in menu] == [False, False, True], [m.checked for m in menu]
+    snap = json.loads(json.dumps(host.snapshot()))
+    assert snap['mic']['voice']['denoise'] == 'strong' and snap['mic']['voice']['available'], snap['mic']
+    assert snap['options']['mic_gate'] is True and 'battery' in snap
     items = list(app.output_menu())                         # tray submenu
     assert len(items) == 2 and items[1].text.startswith('LG') and items[1].checked, [i.text for i in items]
     print('1.1.0 commands ok:', os.path.basename(path), names)

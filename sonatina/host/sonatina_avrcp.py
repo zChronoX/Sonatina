@@ -214,6 +214,11 @@ class RemoteControl:
             if key == Key.PLAY and now - self.connected_at < 3.0:
                 log.info("headset button PLAY right after connecting: ignored")
                 return
+            output = getattr(self.host, "output", None)
+            if output is not None and output.own_reconnection():
+                log.info("headset button %s right after Sonatina reconnected the headphones "
+                         "(codec or option change): ignored", name)
+                return
             self.last_play_pause = now
         media = self.media
         if media is not None and media.available:

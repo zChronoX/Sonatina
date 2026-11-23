@@ -427,13 +427,17 @@ def msbc_transparent_parameters():
 
 
 # ----------------------------------------------------------------------------- HFP AG
-def ag_configuration(msbc: bool):
+def ag_configuration(msbc: bool, battery: bool = True):
+    """battery: HF indicators (AT+BIND / AT+BIEV), the standard way headsets report their
+    battery level (1.2.0)."""
     from bumble import hfp
 
+    features = [hfp.AgFeature.CODEC_NEGOTIATION, hfp.AgFeature.ESCO_S4_SETTINGS_SUPPORTED,
+                hfp.AgFeature.ENHANCED_CALL_STATUS]
+    if battery:
+        features.append(hfp.AgFeature.HF_INDICATORS)
     return hfp.AgConfiguration(
-        supported_ag_features=[hfp.AgFeature.CODEC_NEGOTIATION,
-                               hfp.AgFeature.ESCO_S4_SETTINGS_SUPPORTED,
-                               hfp.AgFeature.ENHANCED_CALL_STATUS],
+        supported_ag_features=features,
         supported_ag_indicators=[hfp.AgIndicatorState.call(),
                                  hfp.AgIndicatorState.callsetup(),
                                  hfp.AgIndicatorState.callheld(),
@@ -441,7 +445,7 @@ def ag_configuration(msbc: bool):
                                  hfp.AgIndicatorState.signal(),
                                  hfp.AgIndicatorState.roam(),
                                  hfp.AgIndicatorState.battchg()],
-        supported_hf_indicators=[],
+        supported_hf_indicators=[hfp.HfIndicator.BATTERY_LEVEL] if battery else [],
         supported_ag_call_hold_operations=[],
         supported_audio_codecs=([hfp.AudioCodec.CVSD, hfp.AudioCodec.MSBC] if msbc
                                 else [hfp.AudioCodec.CVSD]),
@@ -470,11 +474,34 @@ def make_ag_class():
         def _on_cnum(self) -> None:                  # subscriber number: none
             self.send_ok()
 
+        on_battery = None                            # (percent, source), set by HfpGateway
+
+        def _battery(self, percent: int, source: str) -> None:
+            if self.on_battery is not None and 0 <= percent <= 100:
+                self.on_battery(percent, source)
+
         def _on_xapl(self, *_args) -> None:          # Apple accessory handshake
-            self.send_response("+XAPL=iPhone,0")
+            self.send_response("+XAPL=iPhone,2")     # 2: we take battery reports
             self.send_ok()
 
-        def _on_iphoneaccev(self, *_args) -> None:   # Apple battery report
+        def _on_iphoneaccev(self, *args) -> None:    # Apple battery: count, (key, value)...
+            try:
+                values = [int(a) for a in args if not isinstance(a, list)]
+                pairs = dict(zip(values[1::2], values[2::2]))
+                if 1 in pairs:                        # key 1: battery 0..9
+                    self._battery(min(100, (pairs[1] + 1) * 10), "iphoneaccev")
+            except ValueError:
+                pass
+            self.send_ok()
+
+        def _on_xevent(self, *args) -> None:         # Android: BATTERY,level,levels,...
+            try:
+                if args and bytes(args[0]).upper() == b"BATTERY" and len(args) >= 2:
+                    level = int(args[1])
+                    levels = int(args[2]) if len(args) >= 3 and args[2] else 101
+                    self._battery(round(level * 100 / max(1, levels - 1)), "xevent")
+            except (ValueError, TypeError):
+                pass
             self.send_ok()
 
         def _on_bldn(self) -> None:                  # redial: we place no calls
@@ -658,7 +685,8 @@ class ScoDump:
 class ScoAudio:
     """Both directions of an open SCO link.
 
-    rx: SCO payload -> (mSBC frames ->) 8/16 kHz PCM -> 48 kHz stereo -> gain -> mic_sink
+    rx: SCO payload -> (mSBC frames ->) 8/16 kHz PCM -> 48 kHz mono -> voice cleaning
+        (1.2.0: RNNoise, automatic level, gate, limiter; 10 ms frames) -> stereo -> mic_sink
     tx: Windows audio ring (48 kHz stereo) -> volume -> 8/16 kHz mono -> (mSBC ->) SCO,
         exactly as many bytes as were received (the headset paces the link).
 
@@ -687,8 +715,11 @@ class ScoAudio:
     MAX_BACKLOG = 8       # packets queued in the lane beyond the 8 in flight (24 ms)
     LIMIT = 29000         # microphone ceiling after gain (headsets peak at 30000 raw, 2026-11-20)
 
+    VOICE_FRAME = 480     # 10 ms at 48 kHz: the unit of the voice cleaning (RNNoise)
+    STRENGTH = {"normal": 0.85, "strong": 1.0}   # share of the noise RNNoise removes
+
     def __init__(self, lib, codec: str, ring, volume, mic_sink, mic_gain_db: float, send,
-                 lane=None) -> None:
+                 lane=None, settings=None) -> None:
         self.lib = lib
         self.codec = codec
         self.ring = ring
@@ -700,7 +731,16 @@ class ScoAudio:
         self.cur_gain = self.gain_q16     # limiter: lowered at once on peaks, back slowly
         self.limited = 0
         self.level = 0.0                  # microphone level 0..1 for the dashboard (decays)
-        self.up = Resampler(lib, self.rate, RATE, 1, 2)
+        self.up = Resampler(lib, self.rate, RATE, 1, 1)
+        self.settings = settings          # mic_denoise / mic_agc / mic_gate / mic_gain_db, read live
+        self.mic_gain_db = mic_gain_db
+        self.voice = lib.sont_voice_create(float(mic_gain_db)) if hasattr(lib, "sont_voice_create") else None
+        self.voice_buf = bytearray()      # 48 kHz mono waiting for a full 10 ms frame
+        self.level_in = 0.0               # level before the cleaning (dashboard "before")
+        self.vad = 0.0                    # voice probability (RNNoise)
+        self.agc_db = mic_gain_db
+        self.voice_frames = 0
+        self.voice_flags = 0
         self.down = Resampler(lib, RATE, self.rate, 2, 1)
         self.msbc = lib.sont_msbc_create() if codec == "msbc" else None
         self.rx_buf = bytearray()
@@ -777,12 +817,59 @@ class ScoAudio:
             pcm = data[: len(data) // 2 * 2]
         if not pcm:
             return
-        out = self.up.process(pcm)
-        if not out:
+        mono = self.up.process(pcm)
+        if not mono:
             return
+        self.voice_buf += mono
+        size = self.VOICE_FRAME * 2
+        while len(self.voice_buf) >= size:
+            frame = bytes(self.voice_buf[:size])
+            del self.voice_buf[:size]
+            frame = self._clean(frame) if self.voice is not None else self._gain(frame)
+            stereo = array.array("h", bytes(len(frame) * 2))
+            samples = array.array("h")
+            samples.frombytes(frame)
+            stereo[0::2] = samples
+            stereo[1::2] = samples
+            self.mic_sink(stereo.tobytes())
+
+    def voice_mode(self) -> tuple[int, float]:
+        """(flags, strength) for sont_voice_process from the settings."""
+        s = self.settings
+        if s is None:
+            return 0, 1.0
+        mode = str(getattr(s, "mic_denoise", "off"))
+        flags = (1 if mode in self.STRENGTH else 0) | (2 if getattr(s, "mic_agc", False) else 0) \
+            | (4 if getattr(s, "mic_gate", False) else 0)
+        return flags, self.STRENGTH.get(mode, 1.0)
+
+    def _clean(self, frame: bytes) -> bytes:
+        """One 10 ms frame through the cleaning in the codec library (gain and limiter
+        included: without a flag only those)."""
+        flags, strength = self.voice_mode()
+        gain_db = float(getattr(self.settings, "mic_gain_db", self.mic_gain_db))
+        buf = ctypes.create_string_buffer(frame, len(frame))
+        lib = self.lib
+        self.vad = lib.sont_voice_process(self.voice, buf, flags, strength, gain_db)
+        self.voice_flags = flags
+        self.voice_frames += 1
+        self.level_in = max(lib.sont_voice_get(self.voice, 3), self.level_in * 0.9)
+        out_peak = lib.sont_voice_get(self.voice, 4)
+        self.agc_db = lib.sont_voice_get(self.voice, 1)
+        if lib.sont_voice_get(self.voice, 5) < 0.99:
+            self.limited += 1
+        level = int(out_peak * 32767)
+        if level > self.mic_peak:
+            self.mic_peak = level
+        self.level = max(out_peak, self.level * 0.9)
+        return buf.raw
+
+    def _gain(self, out: bytes) -> bytes:
+        """Fixed gain and limiter in Python (codec library without the voice functions)."""
         samples = array.array("h")
         samples.frombytes(out)
         level = max(max(samples), -min(samples))
+        self.level_in = max(level / 32767, self.level_in * 0.9)
         target = self.gain_q16
         if level * target > self.LIMIT << 16:         # would clip: just enough gain, now
             target = max(self.gain_q16 // 4, (self.LIMIT << 16) // level)
@@ -791,14 +878,14 @@ class ScoAudio:
             target = min(target, self.cur_gain + max(1, self.cur_gain // 150))
         if (target != 65536 or self.cur_gain != 65536) and self.lib_has_gain():
             buf = ctypes.create_string_buffer(out, len(out))
-            self.lib.sont_pcm_gain(buf, len(out) // 4, 2, self.cur_gain, target)
+            self.lib.sont_pcm_gain(buf, len(out) // 2, 1, self.cur_gain, target)
             out = buf.raw
         self.cur_gain = target
         level = level * target >> 16
         if level > self.mic_peak:
             self.mic_peak = level
         self.level = max(level / 32767, self.level * 0.9)
-        self.mic_sink(out)
+        return out
 
     def lib_has_gain(self) -> bool:
         return hasattr(self.lib, "sont_pcm_gain")
@@ -994,7 +1081,16 @@ class ScoAudio:
                    if q is not None else "")
                 + f" mic peak {self.mic_peak} (limited {self.limited}) out peak {self.tx_peak}"
                 + f" servo {self.tx_ppm:+.0f} ppm trims {self.tx_trims} top-ups {self.topups} held {self.held}"
-                + f" silent blocks {self.silent_pulls}")
+                + f" silent blocks {self.silent_pulls}"
+                + (f" voice {self.voice_summary()}" if self.voice is not None else ""))
+
+    def voice_summary(self) -> str:
+        flags = self.voice_flags
+        parts = [("rnnoise" if flags & 1 else "no-nr"), (f"agc {self.agc_db:+.0f} dB" if flags & 2
+                                                         else f"gain {self.agc_db:+.0f} dB")]
+        if flags & 4:
+            parts.append("gate")
+        return ",".join(parts)
 
     def close(self) -> None:
         self.closed = True
@@ -1004,6 +1100,9 @@ class ScoAudio:
             self.dump.write()
         self.up.close()
         self.down.close()
+        if self.voice:
+            self.lib.sont_voice_destroy(self.voice)
+            self.voice = None
         if self.msbc:
             self.lib.sont_msbc_destroy(self.msbc)
             self.msbc = None
@@ -1246,7 +1345,7 @@ class HfpGateway:
         self.channel = server.listen(self._on_dlc)
         server.on("start", self._on_mux)
         device.sdp_service_records[AG_RECORD_HANDLE] = hfp.make_ag_sdp_records(
-            AG_RECORD_HANDLE, self.channel, ag_configuration(self.can_msbc()))
+            AG_RECORD_HANDLE, self.channel, ag_configuration(self.can_msbc(), self.s.hfp_battery))
         device.on("sco_connection", self._on_sco_connection)
         device.on("sco_connection_failure", self._on_sco_failure)
         self._sco_waiter: asyncio.Future | None = None
@@ -1266,7 +1365,9 @@ class HfpGateway:
         self._bind(dlc)
 
     def _bind(self, dlc) -> None:
-        ag = make_ag_class()(dlc, ag_configuration(self.can_msbc()))
+        ag = make_ag_class()(dlc, ag_configuration(self.can_msbc(), self.s.hfp_battery))
+        ag.on_battery = self._on_battery
+        ag.on("hf_indicator", self._on_hf_indicator)
         ag.on("slc_complete", lambda: self._slc_complete(ag))
         ag.on("hang_up", self._on_hang_up)
         ag.on("answer", self._on_answer)
@@ -1357,6 +1458,17 @@ class HfpGateway:
         codecs = [c.name for c in ag.supported_audio_codecs] or ["CVSD"]
         log.info("HFP: ready (headset codecs %s)", ", ".join(codecs))
         self.host._changed_state()
+
+    # -- battery (1.2.0) -------------------------------------------------------
+    def _on_hf_indicator(self, state) -> None:
+        from bumble import hfp
+        if getattr(state, "indicator", None) == hfp.HfIndicator.BATTERY_LEVEL:
+            self._on_battery(int(state.current_status), "hf indicator")
+
+    def _on_battery(self, percent: int, source: str) -> None:
+        handler = getattr(self.host, "on_battery", None)
+        if handler is not None:
+            handler(percent, source)
 
     # -- headset buttons -------------------------------------------------------
     def _on_hang_up(self) -> None:
@@ -1532,7 +1644,7 @@ class HfpGateway:
         self.audio = ScoAudio(self.lib.lib, codec, self.host.ring, self.host.volume, sink,
                               float(self.s.mic_gain_db),
                               lambda sdu: host.send_sco_sdu(connection_handle=handle, sdu=sdu),
-                              lane=self.lane)
+                              lane=self.lane, settings=self.s)
         seconds = ScoDump.seconds_from_env()
         if seconds > 0:
             self.audio.dump = ScoDump(codec, seconds)

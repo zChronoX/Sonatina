@@ -201,6 +201,6 @@ a second.
 Sonatina code: MIT, see `LICENSE`. Third-party parts: Bumble (Apache-2.0), libusb (LGPL-2.1), libldac and
 libsbc from AOSP (Apache-2.0), Fraunhofer FDK AAC (FDK AAC licence, see
 `sonatina/host/codec/third_party/fdk-aac/NOTICE`; it grants no patent licence), libfreeaptx
-(LGPL-2.1+), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
+(LGPL-2.1+), RNNoise (BSD-3-Clause, Xiph.Org / Mozilla), libwdi `wdi-simple` (LGPL-3.0), Realtek firmware (linux-firmware,
 redistributable), PyInstaller bootloader (GPL with exception), .NET and Windows App SDK (MIT). VB-CABLE and Hi-Fi Cable
 come from vb-audio.com and are not part of this project. "Bluetooth", "LDAC", "aptX" and "AAC" are trademarks of their owners.

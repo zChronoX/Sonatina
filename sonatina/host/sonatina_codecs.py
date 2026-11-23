@@ -99,6 +99,16 @@ class CodecLib:
             L.sont_rs_process.restype = ctypes.c_int
             L.sont_rs_process.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
                                           ctypes.c_char_p, ctypes.c_uint]
+        self.has_voice = hasattr(L, "sont_voice_create")   # codec version >= 6 (1.2.0)
+        if self.has_voice:
+            L.sont_voice_create.restype = ctypes.c_void_p
+            L.sont_voice_create.argtypes = [ctypes.c_float]
+            L.sont_voice_destroy.argtypes = [ctypes.c_void_p]
+            L.sont_voice_process.restype = ctypes.c_float
+            L.sont_voice_process.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint,
+                                             ctypes.c_float, ctypes.c_float]
+            L.sont_voice_get.restype = ctypes.c_float
+            L.sont_voice_get.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         self.has_gain = hasattr(L, "sont_pcm_gain")   # codec version >= 2
         if self.has_gain:
             L.sont_pcm_gain.restype = None

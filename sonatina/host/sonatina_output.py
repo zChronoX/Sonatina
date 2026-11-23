@@ -112,11 +112,19 @@ class OutputSwitcher:
         self.pending: str | None = None         # "cable" | "fallback"
         self.last_error: str | None = None
         self.paused = False
+        self.own_ready_at = -1e9                # headphones back after our own disconnection
 
     # -- called by the host -------------------------------------------------------
     def expect_reconnect(self) -> None:
         """Sonatina is about to drop the link itself (it reconnects right away)."""
         self.expected_until = self.clock() + self.EXPECTED_S
+
+    def own_reconnection(self, seconds: float = 8.0) -> bool:
+        """Sonatina is reconnecting the headphones itself (codec or option change), or did
+        so in the last `seconds`: headset play/pause buttons then are not the user's
+        (2026-11-23: pauses at every codec change)."""
+        now = self.clock()
+        return now < self.expected_until or now - self.own_ready_at < seconds
 
     def ready_now(self) -> bool:
         h = self.host
@@ -148,6 +156,8 @@ class OutputSwitcher:
             self.gone_since = None
             self.pending = "cable"
             self.paused = False
+            if now < self.expected_until:
+                self.own_ready_at = now
             self.expected_until = 0.0     # the reconnection we were waiting for happened
         elif not link_up and self.link_up:          # the link just went away
             self.gone_since = now

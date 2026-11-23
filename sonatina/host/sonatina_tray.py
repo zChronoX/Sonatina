@@ -37,7 +37,7 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
 ]
 RETRY_S = 5.0
 OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
-                "auto_output", "pause_on_disconnect", "wifi_avoid")
+                "auto_output", "pause_on_disconnect", "wifi_avoid", "hfp_battery", "mic_agc", "mic_gate")
 NO_HOST_LEAVE_S = 10.0   # adapter gone this long: Windows back to the real output
 STARTUP_LINK = "Sonatina.lnk"
 
@@ -305,6 +305,8 @@ class TrayApp:
             await self._on_host_loop(host.set_option(option, bool(args.get("value"))))
         elif name == "set_fallback_output":
             await self._on_host_loop(host.set_fallback_output(str(args.get("id") or "")))
+        elif name == "set_mic_denoise":
+            await self._on_host_loop(host.set_mic_denoise(str(args.get("mode"))))
         elif name == "set_wifi_channel":
             await self._on_host_loop(host.set_wifi_channel(int(args.get("channel") or 0)))
         elif name == "set_volume":
@@ -605,10 +607,34 @@ class TrayApp:
         yield pystray.Menu.SEPARATOR
         yield pystray.MenuItem(tr("Voce in alta qualita' (mSBC 16 kHz)", "HD voice (mSBC 16 kHz)"),
                                self._option_action("hfp_msbc"), checked=self._option_checked("hfp_msbc"))
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem(tr("Riduzione del rumore", "Noise reduction"), pystray.Menu(self.denoise_menu))
+        yield pystray.MenuItem(tr("Livello automatico", "Automatic level"),
+                               self._option_action("mic_agc"), checked=self._option_checked("mic_agc"))
+        yield pystray.MenuItem(tr("Silenzio quando non parli", "Silence when not talking"),
+                               self._option_action("mic_gate"), checked=self._option_checked("mic_gate"))
         host = self.host
         if host is not None:
             yield pystray.Menu.SEPARATOR
             yield pystray.MenuItem(host.hfp.status_line(), None, enabled=False)
+
+    def denoise_menu(self):
+        import pystray
+
+        for label, mode in ((tr("Spenta", "Off"), "off"), (tr("Normale", "Normal"), "normal"),
+                            (tr("Forte", "Strong"), "strong")):
+            yield pystray.MenuItem(label, self._denoise_action(mode),
+                                   checked=lambda _i, m=mode: self._settings().mic_denoise == m, radio=True)
+
+    def _denoise_action(self, mode: str):
+        def action(*_args):
+            host = self.host
+            if host is not None:
+                self.run_coro(host.set_mic_denoise(mode))
+            else:
+                self.settings.mic_denoise = mode
+                sh.save_settings(self.settings, sh.SETTINGS_PATH)
+        return action
 
     def open_log(self, *_args) -> None:
         if sys.platform == "win32":

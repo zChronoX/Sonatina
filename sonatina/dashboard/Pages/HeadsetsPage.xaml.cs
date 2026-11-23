@@ -112,6 +112,8 @@ public sealed partial class HeadsetsPage : Page, IStatusView
         }
         string codec = Ui.CodecLabel(Ui.Effective(J.S(h, "codec"), J.Strings(h, "supported").ToHashSet()));
         parts.Add(L.T($"codec preferito {codec}", $"preferred codec {codec}"));
+        if (Status.Battery(h, connected) is string battery)
+            parts.Add(battery);
         if (J.B(h, "msbc_broken"))
             parts.Add(L.T("microfono in CVSD (mSBC non funziona)", "microphone in CVSD (mSBC does not work)"));
 

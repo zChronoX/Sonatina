@@ -78,10 +78,12 @@ class Headset:
         self.opens_hfp = opens_hfp
         self.hf = None
         self.sco_links = []
+        # the mSBC headset also reports its battery with HF indicators (AT+BIND in the SLC)
         self.cfg = hfp.HfConfiguration(
             supported_hf_features=[hfp.HfFeature.CODEC_NEGOTIATION, hfp.HfFeature.ESCO_S4_SETTINGS_SUPPORTED,
-                                   hfp.HfFeature.REMOTE_VOLUME_CONTROL],
-            supported_hf_indicators=[],
+                                   hfp.HfFeature.REMOTE_VOLUME_CONTROL]
+                                  + ([hfp.HfFeature.HF_INDICATORS] if msbc else []),
+            supported_hf_indicators=[hfp.HfIndicator.BATTERY_LEVEL] if msbc else [],
             supported_audio_codecs=[hfp.AudioCodec.CVSD] + ([hfp.AudioCodec.MSBC] if msbc else []))
         avdtp.Listener.for_device(device).on('connection', lambda server: server.add_sink(sh.ldac_config()))
         server = rfcomm.Server(device)
@@ -198,7 +200,7 @@ async def scenario(msbc=True, opens_hfp=False, hangup=False, broken_msbc=False):
         d.classic_enabled = True
     headset = Headset(devs[1], msbc=msbc, opens_hfp=opens_hfp)
     settings = sh.Settings(tone=True, address=ADDRS[1], headsets={ADDRS[1]: {'name': 'Air5'}},
-                           hfp_mode='auto', mic_device='Hi-Fi Cable')
+                           hfp_mode='auto', mic_device='Hi-Fi Cable', mic_denoise='off', mic_agc=False)
     host = sh.SonatinaHost(settings)
     host.hfp.make_watcher = FakeWatcher
     host.hfp.make_mic_out = FakeMicOut
@@ -249,6 +251,25 @@ async def scenario(msbc=True, opens_hfp=False, hangup=False, broken_msbc=False):
         raise
     except Exception as error:
         print('unknown AT command ->', type(error).__name__, flush=True)
+
+    # battery (1.2.0): HF indicator, Apple and Android reports; warnings at 15 % and 5 %
+    notices = []
+    host.on_notice = notices.append
+    if msbc:
+        await headset.hf.execute_command('AT+BIEV=2,80', timeout=2.0)
+        assert host.battery == 80 and host.battery_source == 'hf indicator', (host.battery, host.battery_source)
+    await headset.hf.execute_command('AT+IPHONEACCEV=2,1,4,2,0', timeout=2.0)
+    assert host.battery == 50, host.battery
+    await headset.hf.execute_command('AT+XEVENT=BATTERY,1,11,300,0', timeout=2.0)
+    assert host.battery == 10 and len(notices) == 1 and '10%' in notices[0], (host.battery, notices)
+    await headset.hf.execute_command('AT+XEVENT=BATTERY,1,11,300,0', timeout=2.0)
+    assert len(notices) == 1, notices                     # announced once
+    await headset.hf.execute_command('AT+IPHONEACCEV=1,1,0', timeout=2.0)
+    assert host.battery == 10 and len(notices) == 1        # 0/9 -> 10 %, same level
+    snap = json.loads(json.dumps(host.snapshot()))
+    assert snap['battery']['percent'] == 10 and snap['headsets'][0]['battery'] == 10, snap['headsets']
+    assert 'batteria 10%' in host.summary() or 'battery 10%' in host.summary(), host.summary()
+    print('battery reports OK:', host.summary(), flush=True)
 
     async def call(expected_codec, seconds=2.0):
         FakeWatcher.apps = ['Discord.exe']
@@ -526,7 +547,7 @@ def unit_checks():
     for i in range(0, len(stream), 24):
         miss.on_packet(hci.HCI_SynchronousDataPacket(connection_handle=1, packet_status=0,
                                                      data_total_length=len(stream[i:i + 24]), data=stream[i:i + 24]))
-    pcm_out = sum(len(b) for b in got)
+    pcm_out = sum(len(b) for b in got) + len(miss.voice_buf) * 2   # + the 10 ms frame in progress (mono)
     assert miss.frames_missing == 1 and miss.frames_ok == 9 and pcm_out == 10 * 120 * 3 * 4, (miss.stats(), pcm_out)
     print('missing frame concealed:', miss.frames_missing)
     # capture device: the Hi-Fi Cable must not be taken for VB-CABLE (pops, 2026-11-20)

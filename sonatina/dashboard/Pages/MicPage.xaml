@@ -87,6 +87,69 @@
                 </Border>
             </Grid>
 
+            <!-- voice cleaning (1.2.0, A3) -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource CardTitle}" Margin="0,0,0,8" Text="{l:Tr It='Pulizia della voce', En='Voice cleaning'}" />
+                    <Grid ColumnSpacing="12" MinHeight="56">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Riduzione del rumore', En='Noise reduction'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Toglie ventola, tastiera e rumori di fondo (RNNoise, sul PC); 10 ms di ritardo in più', En='Removes fan, keyboard and background noise (RNNoise, on the PC); 10 ms more delay'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="Denoise" Grid.Column="1" Toggled="Denoise_Toggled" />
+                    </Grid>
+                    <RadioButtons x:Name="Strength" MaxColumns="2" Margin="0,0,0,8" SelectionChanged="Strength_SelectionChanged" />
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="56">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Livello automatico', En='Automatic level'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Alza la voce se parli piano, la abbassa se gridi (al posto del guadagno fisso)', En='Raises a quiet voice, lowers a loud one (instead of the fixed gain)'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="Agc" Grid.Column="1" Tag="mic_agc" Toggled="Option_Toggled" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="56">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Silenzio quando non parli', En='Silence when not talking'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Chiude il microfono nelle pause, si riapre appena parli', En='Closes the microphone in the pauses, opens as soon as you talk'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="Gate" Grid.Column="1" Tag="mic_gate" Toggled="Option_Toggled" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <StackPanel Spacing="6" Margin="0,12,0,0">
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Dalle cuffie', En='From the headphones'}" />
+                        <l:LevelMeter x:Name="MeterIn" />
+                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="{l:Tr It='Alle app, dopo la pulizia', En='To the apps, after cleaning'}" />
+                        <l:LevelMeter x:Name="MeterOut" />
+                        <TextBlock x:Name="VoiceInfo" Style="{StaticResource Hint}" />
+                    </StackPanel>
+                    <Rectangle Style="{StaticResource Divider}" Margin="0,8,0,0" />
+                    <Grid ColumnSpacing="12" MinHeight="56">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Batteria delle cuffie', En='Headphone battery'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Le cuffie mandano la percentuale sul canale del microfono. Spegnilo solo se il microfono non si collega più (le cuffie si ricollegano).', En='The headphones send the percentage on the microphone channel. Turn it off only if the microphone no longer connects (the headphones reconnect).'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="BatteryOption" Grid.Column="1" Tag="hfp_battery" Toggled="Option_Toggled" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="8">
                     <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Perché in chiamata la musica peggiora', En='Why music gets worse during a call'}" />

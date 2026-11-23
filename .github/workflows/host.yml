@@ -43,6 +43,7 @@ jobs:
           python backlog_virtual.py
           python output_virtual.py
           python radio_virtual.py
+          python voice_virtual.py
 
   dashboard:
     # WinUI 3 window (C#), built on every push so compile errors show up at once
@@ -159,6 +160,7 @@ jobs:
             --add-binary "sonatina/host/codec/sonatina_codec.dll;codec" `
             --add-binary "sonatina/host/third_party/libusb/libusb-1.0.dll;." `
             --add-data "sonatina/host/codec/third_party/fdk-aac/NOTICE;licenses/fdk-aac" `
+            --add-data "sonatina/host/codec/third_party/rnnoise/COPYING;licenses/rnnoise" `
             --add-data "build/version.txt;." `
             --collect-submodules bumble --collect-data bumble `
             --collect-all libusb_package --collect-all _sounddevice_data `

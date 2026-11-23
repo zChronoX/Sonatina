@@ -195,4 +195,17 @@ public static class Status
     }
 
     public static string Seconds(int? ms) => ms is int v ? (v == 0 ? "0 s" : $"{v / 1000.0:0.0} s") : "-";
+
+    /// <summary>"batteria 80 %" while connected, "ultima batteria 80 % (23/11 18:23)" after (1.2.0).</summary>
+    public static string? Battery(JsonNode? headset, bool connected)
+    {
+        if (J.I(headset, "battery") is not int percent)
+            return null;
+        if (connected)
+            return L.T($"batteria {percent} %", $"battery {percent} %");
+        string when = "";
+        if (J.D(headset, "battery_at") is double at)
+            when = " (" + DateTimeOffset.FromUnixTimeSeconds((long)at).ToLocalTime().ToString("dd/MM HH:mm") + ")";
+        return L.T($"ultima batteria {percent} %{when}", $"last battery {percent} %{when}");
+    }
 }

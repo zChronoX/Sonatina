@@ -37,6 +37,7 @@
                             <StackPanel Orientation="Horizontal" Spacing="10">
                                 <TextBlock x:Name="HeadsetName" Style="{StaticResource SubtitleTextBlockStyle}" TextTrimming="CharacterEllipsis" />
                                 <l:Pill x:Name="StatePill" />
+                                <TextBlock x:Name="BatteryText" Style="{StaticResource Secondary}" VerticalAlignment="Center" />
                             </StackPanel>
                             <TextBlock x:Name="CodecLine" Style="{StaticResource Secondary}" />
                             <TextBlock x:Name="LatencyLine" Style="{StaticResource Secondary}" />
