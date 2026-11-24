@@ -217,6 +217,23 @@ async def main():
     win = FakeWindows(CABLE)
     assert so.leave_cable(s, win) is None and win.default == CABLE.id
     print("8. leave_cable: OK")
+
+    # 9 (N4, 1.3.0): the cable's name, and the hint to rename it
+    host, win, sw, clock = make()
+    await run_for(sw, clock, 1)
+    snap = sw.snapshot()
+    assert snap["cable_name"] == CABLE.name and snap["cable_renamed"] and not snap["cable_hint"]
+    old = so.Endpoint("{cable}", "Altoparlanti (2- VB-Audio Virtual Cable)")
+    win.endpoints = [CABLE16, old, MIC, SPEAKERS, MONITOR]
+    sw.next_refresh = 0
+    await run_for(sw, clock, 1)
+    snap = sw.snapshot()
+    assert snap["cable_name"] == old.name and snap["cable_hint"], snap
+    host.s.cable_rename_hint = False
+    assert not sw.snapshot()["cable_hint"], "toggle off: no hint"
+    assert so.cable_renamed(None) and so.cable_renamed("Sonatina Audio (VB-Audio Virtual Cable)")
+    assert not so.cable_renamed("CABLE Input (VB-Audio Virtual Cable)")
+    print("9. cable name and rename hint: OK")
     print("OUTPUT OK")
 
 

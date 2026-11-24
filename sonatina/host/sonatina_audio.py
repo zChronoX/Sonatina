@@ -134,6 +134,8 @@ def find_capture_device(name: str, devices=None, hostapis=None):
     if devices is None:
         import sounddevice as sd
         devices, hostapis = sd.query_devices(), sd.query_hostapis()
+    if hostapis is None:
+        raise ValueError("hostapis must be given with devices")
     want = name.lower()
     avoid = [k.lower() for k in sonatina_hfp.MIC_DEVICES if k.lower() not in want]
     found = []
@@ -478,52 +480,86 @@ class LinkBacklog:
         return time.monotonic() < self.grace_until
 
 
-class LdacAdapter:
-    """Adaptive LDAC (like Android's "best effort"): when the radio cannot keep up (audio
-    piling up for it, or dropped), one step down 990 -> 660 -> 330 kbit/s; after a while
-    with a clean link, one step back up, never above the quality chosen by the user. A
-    step up that fails soon makes the next try wait longer. Wi-Fi on 2.4 GHz next to the
-    adapter made LDAC 990 lose ~3 s of audio a minute (2026-11-21)."""
+class QualityAdapter:
+    """Adaptive quality ("Qualita' adattiva", like Android's LDAC "best effort"): when the
+    radio cannot keep up (audio piling up for it, or dropped), one step down; after a while
+    with a clean link, one step back up, never above the quality chosen by the user.
+    Works with any encoder that has `levels` (kbit/s, best first), `level` and
+    `set_level()`: LDAC 990/660/330, SBC bitpool 53/42/33, AAC 100/75/50 % of the bitrate.
 
-    DOWN_QUEUED_S = 0.080       # audio waiting for the radio that means it is behind
+    1.3.0 (N3), after LDAC went up and down all day under 2.4 GHz interference that cost
+    only 88 ms of audio in an hour: a short queue spike is not enough (it must last 0.5 s,
+    or audio must actually be lost); the lowest step needs lost audio or a long queue;
+    failed steps up make the next try wait up to 5 minutes, and that is forgotten slowly
+    (one failed try every 10 minutes without trouble)."""
+
+    DOWN_QUEUED_S = 0.080       # audio waiting for the radio that means it is behind...
+    HIGH_FOR_S = 0.5            # ...for this long (or audio lost)
+    DEEP_QUEUED_S = 0.150       # below the first step: only lost audio or this much waiting
     CLEAN_QUEUED_S = 0.030      # below this the link counts as clean
     DOWN_EVERY_S = 2.0          # at most one step down per 2 s (libldac moves over frames)
-    UP_AFTER_S = (10.0, 30.0, 60.0, 120.0)   # clean time before a step up, per failed try
+    UP_AFTER_S = (10.0, 30.0, 60.0, 120.0, 300.0)   # clean time before a step up, per failed try
     FAILED_UP_S = 20.0          # a step down this soon after a step up: that try failed
+    FORGIVE_S = 600.0           # this long without a step down: one failed try forgotten
 
     def __init__(self, encoder, now: float) -> None:
         self.encoder = encoder
-        self.ceiling = encoder.eqmid            # 0 = 990 (best) .. 2 = 330
+        self.ceiling = encoder.level            # 0 = best
+        self.bottom = len(encoder.levels) - 1
         self.clean_since = now
+        self.high_since: float | None = None
         self.last_down = -1e9
         self.last_up = -1e9
+        self.trouble_free_since = now
         self.failed_ups = 0
         self.steps = 0
 
     def update(self, now: float, queued_s: float, dropped: bool) -> None:
         enc = self.encoder
-        if dropped or queued_s >= self.DOWN_QUEUED_S:
+        if self.failed_ups and now - self.trouble_free_since >= self.FORGIVE_S:
+            self.failed_ups -= 1
+            self.trouble_free_since = now
+        if queued_s >= self.DOWN_QUEUED_S:
+            if self.high_since is None:
+                self.high_since = now
+        else:
+            self.high_since = None
+        deep = enc.level > self.ceiling          # already one step down
+        behind = dropped or (self.high_since is not None and now - self.high_since >= self.HIGH_FOR_S
+                             and (not deep or queued_s >= self.DEEP_QUEUED_S))
+        if behind:
             self.clean_since = now
-            if enc.eqmid < 2 and now - self.last_down >= self.DOWN_EVERY_S:
+            self.trouble_free_since = now
+            if enc.level < self.bottom and now - self.last_down >= self.DOWN_EVERY_S:
                 if now - self.last_up < self.FAILED_UP_S:
-                    self.failed_ups += 1
-                self._step(enc.eqmid + 1, now, "radio not keeping up")
+                    self.failed_ups = min(self.failed_ups + 1, len(self.UP_AFTER_S) - 1)
+                self._step(enc.level + 1, "radio not keeping up")
                 self.last_down = now
             return
         if queued_s > self.CLEAN_QUEUED_S:
             self.clean_since = now
             return
         wait = self.UP_AFTER_S[min(self.failed_ups, len(self.UP_AFTER_S) - 1)]
-        if enc.eqmid > self.ceiling and now - self.clean_since >= wait:
-            self._step(enc.eqmid - 1, now, f"clean for {wait:.0f} s")
+        if enc.level > self.ceiling and now - self.clean_since >= wait:
+            self._step(enc.level - 1, f"clean for {wait:.0f} s")
             self.last_up = now
             self.clean_since = now
 
-    def _step(self, eqmid: int, now: float, why: str) -> None:
+    def set_ceiling(self, level: int, now: float) -> None:
+        """The user picked another quality while streaming: go there at once."""
+        self.ceiling = level
+        self.encoder.set_level(level)
+        self.clean_since = now
+        self.failed_ups = 0
+
+    def _step(self, level: int, why: str) -> None:
         old = self.encoder.kbps
-        if self.encoder.set_eqmid(eqmid):
+        if self.encoder.set_level(level):
             self.steps += 1
-            log.info("LDAC %d -> %d kbit/s (%s)", old, self.encoder.kbps, why)
+            log.info("%s %d -> %d kbit/s (%s)", self.encoder.name, old, self.encoder.kbps, why)
+
+
+LdacAdapter = QualityAdapter   # 1.2 name
 
 
 class MediaPump:
@@ -565,10 +601,19 @@ class MediaPump:
         self.capture_ms = 10      # capture block (CableCapture)
         self.radio_dropped = 0    # packets not sent: the radio link was not keeping up
         self.radio_episodes = 0
-        self.adaptive = True      # LDAC: follow the radio (LdacAdapter)
-        self.adapter: LdacAdapter | None = None
+        self.adaptive = True      # follow the radio (QualityAdapter)
+        self.adapter: QualityAdapter | None = None
         self.link: LinkBacklog | None = None     # packets waiting for the radio (sonatina_radio)
         self.packet_s = PUSH_SAMPLES / RATE      # audio carried by the last packet
+        self.eq = None            # Equalizer (M4), shared with the host
+
+    def set_target(self, target_ms: int) -> None:
+        """New jitter-buffer target while playing (low latency on/off): the servo moves
+        the buffer there by running the media clock up to 0.2 % fast or slow."""
+        if target_ms != self.target_ms:
+            log.info("jitter buffer target %d -> %d ms", self.target_ms, target_ms)
+        self.target_ms = target_ms
+        self.ring.set_prefill(target_ms + self.capture_ms)
 
     def queued_s(self) -> float:
         """Audio waiting for the radio in Bumble's queue, in seconds (0 when unknown)."""
@@ -630,8 +675,8 @@ class MediaPump:
         self.link = link
         dropping = 0                # packets dropped in the current slow-radio episode
         warned_at = -1e9
-        self.adapter = (LdacAdapter(self.encoder, last) if link.queue is not None
-                        and hasattr(self.encoder, "set_eqmid") else None)
+        self.adapter = (QualityAdapter(self.encoder, last) if link.queue is not None
+                        and len(getattr(self.encoder, "levels", ())) > 1 else None)
         next_adapt = last + 0.25
         packet_s = PUSH_SAMPLES / RATE
         dropped_seen = self.radio_dropped
@@ -645,7 +690,7 @@ class MediaPump:
             if self.adapter is not None and now >= next_adapt:
                 next_adapt = now + 0.25
                 if not self.adaptive:               # turned off: back to the chosen quality
-                    self.encoder.set_eqmid(self.adapter.ceiling)
+                    self.encoder.set_level(self.adapter.ceiling)
                 elif not link.in_grace():
                     self.adapter.update(now, link.waiting() * packet_s, self.radio_dropped != dropped_seen)
                 dropped_seen = self.radio_dropped
@@ -665,6 +710,8 @@ class MediaPump:
                     self._on_underrun()
                 if not_silent(pcm):
                     self.last_audio = now
+                if self.eq is not None:
+                    pcm = self.eq.process(pcm, PUSH_SAMPLES)
                 if self.volume is not None:
                     pcm = self.volume.apply(pcm, PUSH_SAMPLES)
                 for payload, samples in self.encoder.push(pcm):

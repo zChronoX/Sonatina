@@ -12,7 +12,7 @@ The virtual headset has an A2DP sink and a Bumble Hands-Free unit. Checked:
 The virtual controller carries no SCO data, so the headset side of the link is emulated:
 packets go straight into ScoAudio and what Sonatina sends is captured.
 """
-import array, asyncio, ctypes, json, logging, math, os, struct, sys
+import array, asyncio, ctypes, json, logging, math, os, struct, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import sonatina_host as sh
 import sonatina_hfp as shfp
@@ -605,8 +605,8 @@ def unit_checks():
     # tx gaps: one packet out per packet in; during a gap in what arrives the USB lane asks
     # for packets itself, and late packets are held back once the lane is full (2026-11-20)
     clock = [1000.0]
-    real_monotonic = shfp.time.monotonic
-    shfp.time.monotonic = lambda: clock[0]
+    real_monotonic = time.monotonic
+    time.monotonic = lambda: clock[0]
 
     class Lane:
         def __init__(self):
@@ -638,7 +638,7 @@ def unit_checks():
         assert lane.on_idle is None
         print(f'tx gaps: lane top-up {gap.topups}, held {gap.held}')
     finally:
-        shfp.time.monotonic = real_monotonic
+        time.monotonic = real_monotonic
     assert shfp.transport_spec('usb:0BDA:8771+sco=1', 2) == 'usb:0BDA:8771+sco=1'
     assert shfp.transport_spec('android-netsim', 2) == 'android-netsim'
 

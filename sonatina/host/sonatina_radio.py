@@ -463,7 +463,7 @@ class RadioMonitor:
         adapter = getattr(pump, "adapter", None) if pump is not None else None
         encoder = getattr(pump, "encoder", None) if pump is not None else None
         try:
-            return adapter is not None and encoder is not None and encoder.eqmid > adapter.ceiling
+            return adapter is not None and encoder is not None and encoder.level > adapter.ceiling
         except AttributeError:
             return False
 

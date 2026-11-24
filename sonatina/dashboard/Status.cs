@@ -45,6 +45,7 @@ public static class Status
         {
             "streaming" => (L.T("In riproduzione", "Playing"), "success"),
             "securing" or "negotiating" => (L.T("Collegamento…", "Connecting…"), "caution"),
+            "switching" => (L.T("Cambio codec…", "Changing codec…"), "caution"),
             "error" => (L.T("Errore", "Error"), "critical"),
             _ => J.S(host, "peer") is not null
                 ? (L.T("Collegate", "Connected"), "success")

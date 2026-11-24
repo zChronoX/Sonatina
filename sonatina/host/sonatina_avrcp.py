@@ -181,16 +181,19 @@ class RemoteControl:
 
     async def _connect_if_needed(self, protocol: avrcp.Protocol) -> None:
         await asyncio.sleep(CONNECT_AFTER_S)
-        if protocol is not self.protocol or protocol.avctp_protocol is not None:
+        connection = self.connection
+        if protocol is not self.protocol or protocol.avctp_protocol is not None or connection is None:
             return
         try:
-            await asyncio.wait_for(protocol.connect(self.connection), COMMAND_TIMEOUT_S)
+            await asyncio.wait_for(protocol.connect(connection), COMMAND_TIMEOUT_S)
         except Exception as error:
             log.info("AVRCP not available on this headset (%r)", error)
 
     def _on_start(self) -> None:
         log.info("AVRCP connected")
         protocol = self.protocol
+        if protocol is None:
+            return
         self._spawn(self._setup(protocol))
         self._spawn(self._track_status(protocol))
 

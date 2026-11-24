@@ -1,0 +1,15 @@
+# Lint (M7, 1.3.0): real mistakes only (undefined or unused names, syntax, bugbear), not style.
+# Run from sonatina/host:  ruff check .
+target-version = "py313"
+line-length = 120
+extend-exclude = ["codec/third_party", "third_party"]
+
+[lint]
+select = ["F", "E9", "B"]
+ignore = [
+    "B905",   # zip() without strict=: the lengths match by construction
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B007", "B904", "E401"]
+"tools/*" = ["B007", "B904"]

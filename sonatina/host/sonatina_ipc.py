@@ -69,6 +69,7 @@ class IpcServer:
 
     async def serve_forever(self) -> None:
         await self.start()
+        assert self.server is not None
         async with self.server:
             await self.server.serve_forever()
 
@@ -189,7 +190,7 @@ class IpcClient:
         self.writer = None
         self.next_id = 0
 
-    async def connect(self) -> dict:
+    async def connect(self) -> dict | None:
         with open(self.info_path, encoding="utf-8") as f:
             info = json.load(f)
         self.reader, self.writer = await asyncio.open_connection("127.0.0.1", info["port"], limit=MAX_LINE * 16)

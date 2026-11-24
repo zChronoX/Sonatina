@@ -53,6 +53,7 @@ en.StatusAdapter=Giving the adapter to Sonatina...
 en.StatusVB=Installing VB-CABLE...
 en.AdapterFailed=The adapter could not be configured (code %1). Details: %2
 en.VBFailed=VB-CABLE could not be downloaded: install it from https://vb-audio.com/Cable/ and restart Sonatina.
+en.StatusRename=Naming the audio output "Sonatina Audio"...
 en.RunApp=Start Sonatina (it will look for headphones in pairing mode)
 it.AdapterTitle=Chiavetta Bluetooth per Sonatina
 it.AdapterDesc=Scegli la chiavetta Bluetooth USB che Sonatina usera' per le cuffie.
@@ -70,6 +71,7 @@ it.StatusAdapter=Assegno la chiavetta a Sonatina...
 it.StatusVB=Installo VB-CABLE...
 it.AdapterFailed=Non sono riuscito a configurare la chiavetta (codice %1). Dettagli: %2
 it.VBFailed=Download di VB-CABLE non riuscito: installalo da https://vb-audio.com/Cable/ e riavvia Sonatina.
+it.StatusRename=Chiamo l'uscita audio "Sonatina Audio"...
 it.RunApp=Avvia Sonatina (cerchera' le cuffie in modalita' abbinamento)
 
 [Files]
@@ -93,6 +95,9 @@ Root: HKLM; Subkey: "Software\Sonatina"; ValueType: string; ValueName: "AdapterV
 Root: HKLM; Subkey: "Software\Sonatina"; ValueType: string; ValueName: "AdapterPid"; ValueData: "{code:GetPid}"; Flags: uninsdeletekey
 
 [Run]
+; N4 (1.3.0): the cable shows up in Windows as "Sonatina Audio" (needs admin: done here once;
+; with VB-CABLE just installed it only exists after the restart, then the Home offers it)
+Filename: "{app}\Sonatina.exe"; Parameters: "--rename-cable"; StatusMsg: "{cm:StatusRename}"; Flags: runhidden waituntilterminated
 Filename: "{app}\Sonatina.exe"; Description: "{cm:RunApp}"; Flags: postinstall nowait runasoriginaluser skipifsilent
 
 [Code]

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="SonatinaDashboard.Pages.WizardPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:SonatinaDashboard">
+    <ScrollViewer>
+        <Grid Padding="24,8,24,32">
+            <StackPanel Spacing="20" MaxWidth="920" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="4" Padding="0,8,0,0">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Prepariamo Sonatina', En='Let’s set up Sonatina'}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Quattro controlli, ognuno con il suo stato. Puoi tornarci quando vuoi da Informazioni → «Rivedi la configurazione».', En='Four checks, each with its status. You can come back any time from About → “Review the setup”.'}" />
+                </StackPanel>
+
+                <!-- stepper -->
+                <Grid x:Name="Stepper" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                </Grid>
+
+                <Border Style="{StaticResource Card}" MinHeight="360" Padding="28,24,28,24">
+                    <StackPanel Spacing="16">
+                        <TextBlock x:Name="StepTitle" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock x:Name="StepIntro" Style="{StaticResource Secondary}" />
+                        <StackPanel x:Name="Checks" Spacing="8" />
+                    </StackPanel>
+                </Border>
+
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <HyperlinkButton Click="Skip_Click" Content="{l:Tr It='Salta, lo farò dopo', En='Skip, I’ll do it later'}" />
+                    <Button x:Name="BackButton" Grid.Column="2" Click="Back_Click" Content="{l:Tr It='Indietro', En='Back'}" />
+                    <Button x:Name="NextButton" Grid.Column="3" Style="{StaticResource AccentButtonStyle}" Click="Next_Click" />
+                </Grid>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

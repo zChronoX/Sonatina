@@ -186,3 +186,57 @@ public sealed class ModePicker : Grid
             button.IsChecked = (string)button.Tag == mode;
     }
 }
+
+/// <summary>A segmented control with options set from code (low latency modes, EQ presets).</summary>
+public sealed class Segmented : Grid
+{
+    private readonly List<ToggleButton> _buttons = [];
+    private readonly StackPanel _row = new() { Orientation = Orientation.Horizontal, Spacing = 2 };
+    public string Value { get; private set; } = "";
+    public event Action<string>? Picked;
+
+    public Segmented()
+    {
+        CornerRadius = new CornerRadius(6);
+        Padding = new Thickness(3);
+        BorderThickness = new Thickness(1);
+        BorderBrush = Ui.Res("CardStrokeColorDefaultBrush");
+        Background = Ui.Res("ControlAltFillColorSecondaryBrush");
+        HorizontalAlignment = HorizontalAlignment.Left;
+        Children.Add(_row);
+    }
+
+    public void SetOptions(IEnumerable<(string Key, string Label)> options)
+    {
+        _buttons.Clear();
+        _row.Children.Clear();
+        foreach (var (key, label) in options)
+        {
+            var button = new ToggleButton
+            {
+                Content = label,
+                Tag = key,
+                MinWidth = 72,
+                Padding = new Thickness(14, 5, 14, 6),
+                CornerRadius = new CornerRadius(4),
+            };
+            button.Click += (_, _) =>
+            {
+                bool changed = key != Value;
+                Set(key);
+                if (changed)
+                    Picked?.Invoke(key);
+            };
+            _buttons.Add(button);
+            _row.Children.Add(button);
+        }
+        Set(Value);
+    }
+
+    public void Set(string value)
+    {
+        Value = value;
+        foreach (var button in _buttons)
+            button.IsChecked = (string)button.Tag == value;
+    }
+}

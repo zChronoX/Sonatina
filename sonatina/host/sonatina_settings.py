@@ -28,7 +28,8 @@ class Settings:
     absolute_volume: bool = True  # AVRCP: volume on the headset when it supports it
     low_latency: bool = False     # smaller jitter buffer and packets (games, video)
     media_keys: bool = True       # AVRCP: headset buttons -> Windows media keys
-    ldac_adaptive: bool = True    # LDAC: lower the bitrate while the radio cannot keep up
+    ldac_adaptive: bool = True    # adaptive quality (LDAC, SBC, AAC): lower the bitrate while the
+                                  # radio cannot keep up (name kept from 1.0 for saved settings)
     headsets: dict = field(default_factory=dict)  # "AA:BB:..": {"name", "codec", "ldac_quality"}
     hfp_mode: str = "auto"        # headset microphone: auto (when an app opens the virtual mic) |
                                   # on (call mode whenever connected) | off (no HFP, no SCO)
@@ -53,6 +54,13 @@ class Settings:
     mic_denoise: str = "normal"   # off | normal | strong (RNNoise)
     mic_agc: bool = True          # automatic level instead of the fixed mic_gain_db
     mic_gate: bool = False        # silence between words
+    # 1.3.0
+    codec_switch_live: bool = True  # codec change on the running link (no reconnection)
+    bt_conflict_check: bool = True  # tell when the headphones are connected to Windows' Bluetooth
+    cable_rename_hint: bool = True  # suggest renaming the cable "Sonatina Audio"
+    setup_done: bool = False      # the setup guide (M6) was finished or skipped
+    low_latency_mode: str = ""    # off | on | apps ("" = from low_latency, 1.2 settings)
+    low_latency_apps: list = field(default_factory=list)   # exe names, mode "apps"
 
 
 SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpool", "aac_bitrate",
@@ -62,7 +70,9 @@ SAVED_FIELDS = ("transport", "address", "codec", "ldac_quality", "sbc_max_bitpoo
                 "hfp_mode", "hfp_msbc", "mic_device", "mic_gain_db", "sco_alt", "sco_alt_msbc",
                 "auto_output", "pause_on_disconnect", "fallback_output", "fallback_output_name",
                 "last_output", "last_output_name", "wifi_avoid", "wifi_channel",
-                "hfp_battery", "mic_denoise", "mic_agc", "mic_gate")
+                "hfp_battery", "mic_denoise", "mic_agc", "mic_gate",
+                "codec_switch_live", "bt_conflict_check", "cable_rename_hint",
+                "low_latency_mode", "low_latency_apps", "setup_done")
 
 
 def load_settings(path: str) -> Settings:

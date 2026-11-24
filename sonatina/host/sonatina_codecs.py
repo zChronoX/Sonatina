@@ -21,6 +21,8 @@ from bumble.avdtp import AVDTP_AUDIO_MEDIA_TYPE, MediaCodecCapabilities
 from sonatina_common import (
     AAC_FRAME,
     AAC_LATM_OVERHEAD,
+    AAC_MIN_ADAPTIVE_BITRATE,
+    SBC_MIN_ADAPTIVE_BITPOOL,
     APTX_CODEC_ID,
     APTX_HD_CODEC_ID,
     APTX_HD_VENDOR_ID,
@@ -109,11 +111,85 @@ class CodecLib:
                                              ctypes.c_float, ctypes.c_float]
             L.sont_voice_get.restype = ctypes.c_float
             L.sont_voice_get.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        self.has_adaptive = hasattr(L, "sont_sbc_set_bitpool")   # codec version >= 7 (1.3.0)
+        if self.has_adaptive:
+            L.sont_sbc_set_bitpool.restype = ctypes.c_int
+            L.sont_sbc_set_bitpool.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            L.sont_aac_set_bitrate.restype = ctypes.c_int
+            L.sont_aac_set_bitrate.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            L.sont_eq_create.restype = ctypes.c_void_p
+            L.sont_eq_create.argtypes = [ctypes.c_uint]
+            L.sont_eq_destroy.argtypes = [ctypes.c_void_p]
+            L.sont_eq_set.restype = None
+            L.sont_eq_set.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_float]
+            L.sont_eq_process.restype = None
+            L.sont_eq_process.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
         self.has_gain = hasattr(L, "sont_pcm_gain")   # codec version >= 2
         if self.has_gain:
             L.sont_pcm_gain.restype = None
             L.sont_pcm_gain.argtypes = [ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint,
                                         ctypes.c_int, ctypes.c_int]
+
+
+# ----------------------------------------------------------------------------- equalizer
+EQ_FREQS = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
+EQ_PRESETS = {                      # dB per band (M4, 1.3.0; the mockup approved 2026-11-23)
+    "flat": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "bass": [6, 5, 4, 2, 0, 0, 0, 0, 0, 0],
+    "voice": [-3, -2, -1, 1, 3, 4, 3, 1, 0, -1],
+    "treble": [0, 0, 0, 0, 0, 1, 2, 4, 5, 6],
+}
+EQ_MAX_DB = 12
+
+
+def eq_gains(entry: dict | None) -> list[int]:
+    """The 10 gains a headset's settings ask for (all 0 when off)."""
+    entry = entry or {}
+    if not entry.get("on"):
+        return [0] * len(EQ_FREQS)
+    preset = entry.get("preset", "flat")
+    if preset == "custom":
+        raw = list(entry.get("custom") or [])
+        raw = (raw + [0] * len(EQ_FREQS))[:len(EQ_FREQS)]
+        return [max(-EQ_MAX_DB, min(EQ_MAX_DB, int(round(float(g))))) for g in raw]
+    return list(EQ_PRESETS.get(preset, EQ_PRESETS["flat"]))
+
+
+class Equalizer:
+    """10-band equalizer on the music before encoding (sonatina_codec >= 7). Boosts lower
+    the whole signal by the biggest boost (no clipping); filter states survive changes."""
+
+    def __init__(self, lib: CodecLib) -> None:
+        self.lib = lib.lib
+        self.handle = self.lib.sont_eq_create(RATE)
+        if not self.handle:
+            raise RuntimeError("equalizer init failed")
+        self.gains = [0] * len(EQ_FREQS)
+        self.active = False
+
+    @property
+    def preamp_db(self) -> int:
+        return -max([0] + self.gains)
+
+    def set(self, gains: list[int]) -> None:
+        gains = [max(-EQ_MAX_DB, min(EQ_MAX_DB, int(g))) for g in gains][:len(EQ_FREQS)]
+        if gains == self.gains:
+            return
+        self.gains = gains
+        self.lib.sont_eq_set(self.handle, (ctypes.c_float * len(EQ_FREQS))(*gains), 0.0)
+        self.active = any(gains)
+
+    def process(self, pcm: bytes, frames: int) -> bytes:
+        if not self.active:
+            return pcm
+        buf = ctypes.create_string_buffer(pcm, len(pcm))
+        self.lib.sont_eq_process(self.handle, buf, frames)
+        return buf.raw
+
+    def close(self) -> None:
+        if self.handle:
+            self.lib.sont_eq_destroy(self.handle)
+            self.handle = None
 
 
 class LdacEncoder:
@@ -132,6 +208,14 @@ class LdacEncoder:
         self.max_payload = mtu - RTP_HEADER
         self.kbps = LDAC_KBPS[eqmid]
         self.delay_ms = LDAC_DELAY_MS
+        self.levels = tuple(LDAC_KBPS[i] for i in range(3))   # adaptive quality: 990/660/330
+
+    @property
+    def level(self) -> int:
+        return self.eqmid
+
+    def set_level(self, level: int) -> bool:
+        return self.set_eqmid(level)
 
     def set_eqmid(self, eqmid: int) -> bool:
         """Changes the quality while streaming (libldac moves to it over a few frames; the
@@ -179,6 +263,33 @@ class SbcEncoder:
         self.out = ctypes.create_string_buffer(512)
         self.pending: list[bytes] = []
         self.kbps = self.frame_bytes * 8 * RATE // 128 // 1000
+        # adaptive quality: the chosen bitpool, about 80 % and 62 % of it (53 -> 42 -> 33)
+        self.bitpools = [bitpool]
+        if lib.has_adaptive:
+            for share in (0.8, 0.62):
+                b = max(SBC_MIN_ADAPTIVE_BITPOOL, round(bitpool * share))
+                if b < self.bitpools[-1]:
+                    self.bitpools.append(b)
+        self.levels = tuple(self.lib.sont_sbc_frame_bytes(RATE, 3, 16, 8, 1, b) * 8 * RATE // 128 // 1000
+                            for b in self.bitpools)
+        self.level = 0
+
+    def set_level(self, level: int) -> bool:
+        """A new bitpool from the next frame on: every SBC frame carries its own bitpool,
+        the headphones follow without renegotiation (like Android's SBC bitpool steps)."""
+        if level == self.level:
+            return True
+        if not 0 <= level < len(self.bitpools):
+            return False
+        size = self.lib.sont_sbc_set_bitpool(self.handle, self.bitpools[level])
+        if size <= 0:
+            return False
+        # frames already waiting keep the old bitpool: each SBC frame header carries its own
+        self.level = level
+        self.bitpool = self.bitpools[level]
+        self.frame_bytes = size
+        self.kbps = self.levels[level]
+        return True
 
     def push(self, pcm: bytes) -> list[tuple[bytes, int]]:
         n = self.lib.sont_sbc_encode(self.handle, pcm, 128, self.out, 512)
@@ -226,6 +337,27 @@ class AacEncoder:
         self.oversize = 0
         log.info("AAC: %d kbit/s, peak %d kbit/s (MTU %d), delay %d samples", self.kbps,
                  self.peak // 1000, mtu, self.lib.sont_aac_get(self.handle, 2))
+        # adaptive quality: the chosen bitrate, 3/4 and 1/2 of it, never under 128 kbit/s
+        self.bitrates = [self.bitrate]
+        if lib.has_adaptive:
+            for share in (0.75, 0.5):
+                b = max(AAC_MIN_ADAPTIVE_BITRATE, int(self.bitrate * share) // 1000 * 1000)
+                if b < self.bitrates[-1]:
+                    self.bitrates.append(b)
+        self.levels = tuple(b // 1000 for b in self.bitrates)
+        self.level = 0
+
+    def set_level(self, level: int) -> bool:
+        if level == self.level:
+            return True
+        if not 0 <= level < len(self.bitrates):
+            return False
+        if self.lib.sont_aac_set_bitrate(self.handle, self.bitrates[level]) != 0:
+            return False
+        self.level = level
+        self.bitrate = self.bitrates[level]
+        self.kbps = self.levels[level]
+        return True
 
     def push(self, pcm: bytes) -> list[tuple[bytes, int]]:
         self.pcm += pcm

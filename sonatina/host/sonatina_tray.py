@@ -20,6 +20,7 @@ import sonatina_diag
 import sonatina_host as sh
 import sonatina_ipc
 import sonatina_output
+import sonatina_winbt
 
 log = logging.getLogger("sonatina")
 
@@ -37,7 +38,8 @@ CODEC_CHOICES = [  # (label, codec, ldac quality)
 ]
 RETRY_S = 5.0
 OPTION_NAMES = ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
-                "auto_output", "pause_on_disconnect", "wifi_avoid", "hfp_battery", "mic_agc", "mic_gate")
+                "auto_output", "pause_on_disconnect", "wifi_avoid", "hfp_battery", "mic_agc", "mic_gate",
+                "codec_switch_live", "bt_conflict_check", "cable_rename_hint", "setup_done")
 NO_HOST_LEAVE_S = 10.0   # adapter gone this long: Windows back to the real output
 STARTUP_LINK = "Sonatina.lnk"
 
@@ -278,6 +280,12 @@ class TrayApp:
             if args.get("reveal"):
                 sonatina_diag.reveal(path)
             return path
+        if name == "rename_cable":          # N4: UAC prompt, then Sonatina.exe --rename-cable
+            return await asyncio.get_running_loop().run_in_executor(
+                None, sonatina_output.rename_cable_elevated)
+        if name == "open_bluetooth_settings":
+            sonatina_winbt.open_bluetooth_settings()
+            return True
         if name == "set_hfp_mode":
             mode = str(args.get("mode"))
             if mode not in ("auto", "on", "off"):
@@ -303,6 +311,16 @@ class TrayApp:
             if option not in OPTION_NAMES:
                 raise ValueError("option")
             await self._on_host_loop(host.set_option(option, bool(args.get("value"))))
+        elif name == "set_eq":
+            custom = args.get("custom")
+            await self._on_host_loop(host.set_eq(
+                str(args["address"]), args.get("on") if "on" in args else None,
+                str(args["preset"]) if args.get("preset") else None,
+                [float(g) for g in custom] if isinstance(custom, list) else None))
+        elif name == "set_low_latency":
+            apps = args.get("apps")
+            await self._on_host_loop(host.set_low_latency(
+                str(args.get("mode")), [str(a) for a in apps] if isinstance(apps, list) else None))
         elif name == "set_fallback_output":
             await self._on_host_loop(host.set_fallback_output(str(args.get("id") or "")))
         elif name == "set_mic_denoise":
@@ -377,7 +395,7 @@ class TrayApp:
             return "error", (tr("Sonatina: chiavetta non trovata", "Sonatina: adapter not found")
                              if not self.dongle_ok else tr("Sonatina: avvio...", "Sonatina: starting..."))
         state = self.host.state
-        key = "streaming" if state == "streaming" else ("error" if state == "error" else "idle")
+        key = "streaming" if state in ("streaming", "switching") else ("error" if state == "error" else "idle")
         if self.host.hfp.in_call:
             key = "call"
         return key, self.host.summary()
@@ -555,10 +573,13 @@ class TrayApp:
             yield pystray.MenuItem(label, self._codec_action(codec, quality),
                                    checked=self._codec_checked(codec, quality), radio=True)
         yield pystray.Menu.SEPARATOR
-        yield pystray.MenuItem(tr("LDAC adattivo (scende se la radio non regge)",
-                                  "Adaptive LDAC (lower when the radio struggles)"),
+        yield pystray.MenuItem(tr("Qualita' adattiva (scende se la radio non regge)",
+                                  "Adaptive quality (lower when the radio struggles)"),
                                self._option_action("ldac_adaptive"),
                                checked=self._option_checked("ldac_adaptive"))
+        yield pystray.MenuItem(tr("Cambio codec senza scollegare", "Change codec without disconnecting"),
+                               self._option_action("codec_switch_live"),
+                               checked=self._option_checked("codec_switch_live"))
 
     def _option_action(self, name: str):
         def action(*_args):
@@ -566,6 +587,12 @@ class TrayApp:
             if host is not None:
                 self.run_coro(host.set_option(name, not getattr(host.s, name)))
         return action
+
+    def _low_latency_action(self, *_args) -> None:
+        """Tray tick: on/off now (the per-app list stays, "Solo con queste app" is in the window)."""
+        host = self.host
+        if host is not None:
+            self.run_coro(host.set_low_latency("off" if host.lowlat.active else "on"))
 
     def _option_checked(self, name: str):
         return lambda _item: self.host is not None and bool(getattr(self.host.s, name, False))
@@ -686,8 +713,8 @@ class TrayApp:
                              self._option_action("absolute_volume"),
                              checked=self._option_checked("absolute_volume")),
             pystray.MenuItem(tr("Bassa latenza (giochi, video)", "Low latency (games, video)"),
-                             self._option_action("low_latency"),
-                             checked=self._option_checked("low_latency")),
+                             self._low_latency_action,
+                             checked=lambda _item: self.host is not None and self.host.lowlat.active),
             pystray.MenuItem(tr("Tasti delle cuffie (play/pausa, brani)",
                                 "Headphone buttons (play/pause, tracks)"),
                              self._option_action("media_keys"),
@@ -709,6 +736,13 @@ def main() -> None:
         firmware = os.path.join(os.path.dirname(sys.executable), "firmware")
         if os.path.isdir(firmware):
             os.environ.setdefault("BUMBLE_RTK_FIRMWARE_DIR", firmware)
+    if "--rename-cable" in sys.argv:         # installer (admin) or the dashboard (UAC)
+        try:
+            log.info("cable: %s -> %s", sonatina_output.rename_cable(), sonatina_output.CABLE_NAME)
+        except Exception as error:
+            log.error("cannot rename the cable: %r", error)
+            sys.exit(1)
+        return
     if "--set-default-output" in sys.argv:   # used once by the installer
         try:
             log.info("default output: %s", sh.set_default_output())

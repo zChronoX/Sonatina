@@ -1,7 +1,7 @@
 import asyncio, logging, os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import sonatina_host as sh
-from bumble import a2dp, avdtp
+from bumble import avdtp
 from bumble.controller import Controller
 from bumble.device import Device
 from bumble.host import Host

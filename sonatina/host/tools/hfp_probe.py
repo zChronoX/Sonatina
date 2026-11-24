@@ -53,7 +53,6 @@ def install_safe_iso() -> None:
     access violation is swallowed by ctypes around libusb_handle_events and Python dies
     with 'Fatal Python error: _PyThreadState_Attach'. Read from the transfer's own Python
     buffer instead, clamp the lengths, and report what the descriptors contained."""
-    import ctypes
     import usb1
     from usb1 import libusb1
 

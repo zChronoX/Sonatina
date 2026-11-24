@@ -85,6 +85,7 @@ public sealed partial class HomePage : Page, IStatusView
             Bar4.Fill = bars >= 4 ? on : off;
 
             UpdateOutput(s);
+            UpdateNotices(s);
 
             var percent = J.I(s, "host", "volume", "percent");
             Volume.IsEnabled = percent is not null;
@@ -105,7 +106,7 @@ public sealed partial class HomePage : Page, IStatusView
 
             // options
             AbsoluteVolume.IsOn = J.B(s, "host", "options", "absolute_volume");
-            LowLatency.IsOn = J.B(s, "host", "options", "low_latency");
+            LowLatency.IsOn = J.B(s, "host", "low_latency", "active");   // also when an app turned it on
             MediaKeys.IsOn = J.B(s, "host", "options", "media_keys");
             AbsoluteVolume.IsEnabled = LowLatency.IsEnabled = MediaKeys.IsEnabled = host is not null;
             Autostart.IsOn = autostart;
@@ -250,6 +251,52 @@ public sealed partial class HomePage : Page, IStatusView
     {
         if (!_updating)
             await Ui.Run("set_autostart", new JsonObject { ["value"] = Autostart.IsOn });
+    }
+
+    /// <summary>N2 and N4 banners: shown only while they apply, they go away by themselves.</summary>
+    private void UpdateNotices(JsonObject s)
+    {
+        string? held = J.S(s, "host", "conflict", "name");
+        ConflictBar.IsOpen = held is not null && J.S(s, "host", "state") != "streaming";
+        if (ConflictBar.IsOpen)
+        {
+            ConflictBar.Title = L.T($"Le {held} sono collegate al Bluetooth di Windows",
+                                    $"{held} are connected to Windows' own Bluetooth");
+            ConflictBar.Message = L.T("Per questo Sonatina non riesce a raggiungerle. Scollegale da Windows (o rimuovile da lì, se le usi solo con Sonatina) e si collegheranno qui da sole.",
+                                      "That is why Sonatina cannot reach them. Disconnect them in Windows (or remove them there, if you only use them with Sonatina) and they will connect here by themselves.");
+        }
+        string? cable = J.S(s, "host", "output", "cable_name");
+        if (!J.B(s, "host", "options", "cable_rename_hint"))
+            _cableDismissed = false;       // the host has it off now: the flag is no longer needed
+        CableBar.IsOpen = J.B(s, "host", "output", "cable_hint") && cable is not null && !_cableDismissed;
+        if (CableBar.IsOpen)
+        {
+            CableBar.Title = L.T($"Il cavo audio si chiama «{cable}»", $"The audio cable is called “{cable}”");
+            CableBar.Message = L.T("Windows l’ha installato con un nome che si confonde con gli altoparlanti veri. Sonatina può chiamarlo «Sonatina Audio» (chiede il permesso di amministratore una volta).",
+                                   "Windows installed it with a name easy to mistake for the real speakers. Sonatina can call it “Sonatina Audio” (it asks for administrator permission once).");
+        }
+    }
+
+    private bool _cableDismissed;
+
+    private async void BluetoothSettings_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:bluetooth"));
+        }
+        catch (Exception)
+        {
+            await Ui.Run("open_bluetooth_settings");
+        }
+    }
+
+    private async void RenameCable_Click(object sender, RoutedEventArgs e) => await Ui.Run("rename_cable");
+
+    private async void CableBar_Close(InfoBar sender, object args)
+    {
+        _cableDismissed = true;            // closed: not again (Informazioni turns it back on)
+        await Ui.Run("set_option", new JsonObject { ["name"] = "cable_rename_hint", ["value"] = false });
     }
 
     private async void EndCall_Click(object sender, RoutedEventArgs e) => await Ui.Run("end_call");

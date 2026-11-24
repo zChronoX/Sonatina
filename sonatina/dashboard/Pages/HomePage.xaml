@@ -20,6 +20,20 @@
 
             <InfoBar x:Name="OutputBar" IsClosable="False" Severity="Informational" />
 
+            <!-- N2 (1.3.0): the headphones are connected to Windows' own Bluetooth -->
+            <InfoBar x:Name="ConflictBar" IsClosable="False" Severity="Warning">
+                <InfoBar.ActionButton>
+                    <Button Click="BluetoothSettings_Click" Content="{l:Tr It='Apri impostazioni Bluetooth', En='Open Bluetooth settings'}" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!-- N4 (1.3.0): the cable still has the name Windows gave it -->
+            <InfoBar x:Name="CableBar" IsClosable="True" Severity="Informational" CloseButtonClick="CableBar_Close">
+                <InfoBar.ActionButton>
+                    <Button Click="RenameCable_Click" Content="{l:Tr It='Rinomina', En='Rename'}" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
             <!-- headphones now -->
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="20">
@@ -181,7 +195,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="{l:Tr It='Bassa latenza', En='Low latency'}" />
-                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer più piccoli per giochi e video', En='Smaller buffers for games and video'}" />
+                                <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer più piccoli per giochi e video (o solo con alcune app: Qualità audio)', En='Smaller buffers for games and video (or only with some apps: Audio quality)'}" />
                             </StackPanel>
                             <ToggleSwitch x:Name="LowLatency" Grid.Column="1" Tag="low_latency" Toggled="Option_Toggled" />
                         </Grid>

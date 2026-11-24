@@ -20,6 +20,7 @@ import ctypes
 import logging
 import sys
 import time
+from typing import Any
 
 from bumble.a2dp import (
     A2DP_MPEG_2_4_AAC_CODEC_TYPE,
@@ -45,6 +46,8 @@ import sonatina_hfp
 import sonatina_media
 import sonatina_output
 import sonatina_radio
+import sonatina_winbt
+import sonatina_lowlat
 from sonatina_common import (
     AAC_FRAME,
     AAC_LATM_OVERHEAD,
@@ -87,6 +90,10 @@ from sonatina_codecs import (
     aptx_config,
     AptxEncoder,
     CodecLib,
+    eq_gains,
+    EQ_FREQS,
+    EQ_PRESETS,
+    Equalizer,
     ldac_config,
     LdacEncoder,
     sbc_config,
@@ -104,6 +111,7 @@ from sonatina_audio import (
     find_capture_device,
     fix_default_output,
     LdacAdapter,
+    QualityAdapter,
     LinkBacklog,
     MediaPump,
     not_silent,
@@ -157,6 +165,10 @@ REEXPORTED = (
     aptx_config,
     AptxEncoder,
     CodecLib,
+    eq_gains,
+    EQ_FREQS,
+    EQ_PRESETS,
+    Equalizer,
     ldac_config,
     LdacEncoder,
     sbc_config,
@@ -170,6 +182,7 @@ REEXPORTED = (
     find_capture_device,
     fix_default_output,
     LdacAdapter,
+    QualityAdapter,
     LinkBacklog,
     MediaPump,
     not_silent,
@@ -217,9 +230,18 @@ class SonatinaHost:
         self.ready = False                    # True once powered on and keys loaded
         self.stream = None                    # the A2DP stream (suspended during calls)
         self.codec_in_use: str | None = None  # key in CODEC_CHAIN of the running stream
+        self.avdtp = None                     # AVDTP signalling of the connection (codec switch)
+        self.mtu_holder = {"mtu": 679}
+        self.switch_lock = asyncio.Lock()
+        self.ldac_quality_in_use: str | None = None
         self.hfp = sonatina_hfp.HfpGateway(self)
         self.output = sonatina_output.OutputSwitcher(self)
         self.radio = sonatina_radio.RadioMonitor(self)
+        self.winlink = sonatina_winbt.WindowsLinkCheck()   # N2: headphones held by Windows
+        self.lowlat = sonatina_lowlat.LowLatency(self)      # M3: live, per app
+        self.eq = Equalizer(self.lib) if getattr(self.lib, "has_adaptive", False) else None   # M4
+        self.windows_bt: bool | None = None   # Windows has its own Bluetooth radio (setup guide)
+        self.winlink.on_found = self._on_windows_holds
         self.on_notice = None                 # tray balloon (text)
         self.battery: int | None = None       # headset battery %, this connection
         self.battery_source: str | None = None
@@ -298,10 +320,18 @@ class SonatinaHost:
                  "CENTRAL" if connection.role == 0 else "PERIPHERAL")
         self.connection = connection
         self.peer = peer
+        self.winlink.reset()
         connection.on("disconnection", self._on_disconnection)
         self.hfp.on_connected(connection)
         self.remote.start(connection)
         self.session_task = loop.create_task(self._session(connection, peer))
+
+    def _on_windows_holds(self, address: str) -> None:
+        if self.on_notice is not None:
+            self.on_notice(tr(f"{self.headset_name(address)} sono collegate al Bluetooth di Windows: "
+                              "scollegale da lì e si collegheranno a Sonatina",
+                              f"{self.headset_name(address)} are connected to Windows' own Bluetooth: "
+                              "disconnect them there and they will connect to Sonatina"))
 
     def _on_delay_report(self, delay: int) -> None:
         """AVDTP delay report, in 1/10 ms: the headset's own buffer + decoding."""
@@ -350,7 +380,9 @@ class SonatinaHost:
         self.peer = None
         self.state = "idle"
         self.stream = None
+        self.avdtp = None
         self.codec_in_use = None
+        self.ldac_quality_in_use = None
         self.hfp.on_disconnected()
         self.remote.stop()
         if self.pump:
@@ -387,7 +419,8 @@ class SonatinaHost:
             protocol = await AvdtpProtocol.connect(connection, version)
             await protocol.discover_remote_endpoints()
 
-            mtu_holder = {"mtu": 679}
+            mtu_holder = self.mtu_holder = {"mtu": 679}
+            self.avdtp = protocol
             codec, ldac_quality = self.codec_for(peer)
             log.info("headset codecs: %s", ", ".join(self._sink_names(protocol)) or "?")
             usable = [k for k in CODEC_CHAIN if self._choose(protocol, k, ldac_quality, mtu_holder) is not None]
@@ -395,32 +428,10 @@ class SonatinaHost:
             if entry.get("codecs") != usable:      # remembered for the dashboard
                 entry["codecs"] = usable
                 self._changed()
-            choice = None
-            for candidate in CODEC_CHAIN[CODEC_CHAIN.index(codec) if codec in CODEC_CHAIN else 0:]:
-                choice = self._choose(protocol, candidate, ldac_quality, mtu_holder)
-                if choice is not None:
-                    self.codec_in_use = candidate
-                    break
-                log.info("%s not usable with this headset, trying the next codec",
-                         CODEC_NAMES[candidate])
-            if choice is None:
+            picked = self._pick(protocol, codec, ldac_quality)
+            if picked is None:
                 raise RuntimeError("no usable sink on the headset (not even SBC)")
-
-            sink, config, make_encoder = choice
-            delay_reporting = any(
-                c.service_category == AVDTP_DELAY_REPORTING_SERVICE_CATEGORY for c in sink.capabilities)
-            self.pump = MediaPump(self.ring, make_encoder, self.volume, self.jitter_target_ms())
-            self.pump.adaptive = bool(self.s.ldac_adaptive)
-            self.headset_delay_ms = None
-            source = protocol.add_source(config, self.pump, delay_reporting)
-            source.on("delay_report", self._on_delay_report)
-            stream = await protocol.create_stream(source, sink)
-            await stream.open()
-            if stream.rtp_channel is not None:
-                mtu_holder["mtu"] = stream.rtp_channel.peer_mtu
-                log.info("media channel MTU %d", mtu_holder["mtu"])
-            await stream.start()
-            self.stream = stream
+            await self._open_stream(protocol, *picked, ldac_quality)
             self.state = "streaming"
             self.remote.on_streaming()
             self.hfp.start_slc()
@@ -437,6 +448,108 @@ class SonatinaHost:
                 await connection.disconnect()
             except Exception:
                 pass
+
+    def _pick(self, protocol, codec: str, ldac_quality: str):
+        """(codec key, (sink, configuration, encoder factory)): `codec` or the next usable
+        one down CODEC_CHAIN; None if the headset has none."""
+        start = CODEC_CHAIN.index(codec) if codec in CODEC_CHAIN else 0
+        for candidate in CODEC_CHAIN[start:]:
+            choice = self._choose(protocol, candidate, ldac_quality, self.mtu_holder)
+            if choice is not None:
+                return candidate, choice
+            log.info("%s not usable with this headset, trying the next codec", CODEC_NAMES[candidate])
+        return None
+
+    async def _open_stream(self, protocol, codec: str, choice, ldac_quality: str) -> None:
+        """New local source + stream to `sink`, opened and started (state -> streaming)."""
+        sink, config, make_encoder = choice
+        delay_reporting = any(
+            c.service_category == AVDTP_DELAY_REPORTING_SERVICE_CATEGORY for c in sink.capabilities)
+        self.pump = MediaPump(self.ring, make_encoder, self.volume, self.jitter_target_ms())
+        self.pump.adaptive = bool(self.s.ldac_adaptive)
+        self.pump.eq = self.eq
+        self._apply_eq()
+        self.headset_delay_ms = None
+        source = protocol.add_source(config, self.pump, delay_reporting)
+        source.on("delay_report", self._on_delay_report)
+        stream = await protocol.create_stream(source, sink)
+        await stream.open()
+        if stream.rtp_channel is not None:
+            self.mtu_holder["mtu"] = stream.rtp_channel.peer_mtu
+            log.info("media channel MTU %d", self.mtu_holder["mtu"])
+        await stream.start()
+        self.stream = stream
+        self.codec_in_use = codec
+        self.ldac_quality_in_use = ldac_quality
+
+    async def switch_codec(self) -> bool:
+        """Codec (or LDAC quality) change on the running connection, without dropping the
+        link: AVDTP SUSPEND + CLOSE of the stream, then a new stream on the headset's other
+        endpoint. Under a second of silence instead of a 5-10 s reconnection (N1, 1.3.0).
+        False when it could not be done this way (the caller reconnects instead)."""
+        from bumble.avdtp import State
+        protocol, stream, peer = self.avdtp, self.stream, self.peer
+        if (protocol is None or stream is None or peer is None or self.connection is None
+                or self.state != "streaming" or self.hfp.in_call):
+            return False
+        async with self.switch_lock:
+            codec, quality = self.codec_for(peer)
+            picked = self._pick(protocol, codec, quality)
+            if picked is None:
+                return False
+            key, choice = picked
+            if key == self.codec_in_use and key != "ldac":
+                log.info("codec change: %s already in use", CODEC_NAMES[key])
+                return True
+            if key == "ldac" and self.codec_in_use == "ldac":
+                return self._ldac_quality_live(choice, quality)
+            started = time.perf_counter()
+            old = CODEC_NAMES.get(self.codec_in_use or "", "?")
+            self.output.expect_reconnect()        # headset buttons during the switch are not the user's
+            self.state = "switching"
+            try:
+                if stream.state == State.STREAMING:
+                    await asyncio.wait_for(stream.stop(), 3.0)
+                if self.pump is not None:
+                    await self.pump.stop()
+                await asyncio.wait_for(stream.close(), 3.0)
+                self.stream = None
+                try:
+                    await asyncio.wait_for(self._open_stream(protocol, key, choice, quality), 5.0)
+                except Exception as error:     # some headsets need a moment after CLOSE
+                    log.info("codec change: headset not ready (%r), retrying", error)
+                    await asyncio.sleep(0.5)
+                    await asyncio.wait_for(self._open_stream(protocol, key, choice, quality), 5.0)
+            except Exception as error:
+                log.warning("codec change on the running link failed (%r): reconnecting", error)
+                self.state = "error"
+                try:
+                    if self.connection is not None:
+                        await self.connection.disconnect()
+                except Exception:
+                    pass
+                return True                        # the reconnection applies the new codec
+            self.state = "streaming"
+            log.info("codec changed without reconnecting: %s -> %s in %.1f s", old,
+                     CODEC_NAMES[key], time.perf_counter() - started)
+            self._changed()
+            return True
+
+    def _ldac_quality_live(self, choice, quality: str) -> bool:
+        """LDAC quality changed: the encoder switches in place, not even a gap."""
+        pump = self.pump
+        encoder = pump.encoder if pump is not None else None
+        if encoder is None or not hasattr(encoder, "set_eqmid"):
+            return False
+        eqmid = LDAC_EQMID.get(quality, 1)
+        pump.make_encoder = choice[2]             # used again after a call (resume)
+        if pump.adapter is not None:
+            pump.adapter.set_ceiling(eqmid, time.perf_counter())
+        else:
+            encoder.set_eqmid(eqmid)
+        self.ldac_quality_in_use = quality
+        log.info("LDAC quality changed in place: %d kbit/s", encoder.kbps)
+        return True
 
     def _choose(self, protocol, codec: str, ldac_quality: str, mtu_holder: dict):
         """(sink, configuration, encoder factory) for `codec`, or None if not usable."""
@@ -514,10 +627,74 @@ class SonatinaHost:
 
     def max_packet_ms(self) -> int:
         """Audio waits until its packet is full: smaller packets in low-latency mode."""
-        return LOW_LATENCY_PACKET_MS if self.s.low_latency else 0
+        return LOW_LATENCY_PACKET_MS if self.lowlat.active else 0
 
     def jitter_target_ms(self) -> int:
-        return LOW_LATENCY_TARGET_MS if self.s.low_latency else NORMAL_TARGET_MS
+        return LOW_LATENCY_TARGET_MS if self.lowlat.active else NORMAL_TARGET_MS
+
+    def apply_low_latency(self) -> None:
+        """Low latency turned on or off while playing: the jitter buffer moves to the new
+        target through the clock servo (a few seconds, no gap, no reconnection)."""
+        pump = self.pump
+        if pump is None:
+            return
+        target = self.jitter_target_ms()
+        if not self.lowlat.active:
+            target = max(target, pump.target_ms)   # keep what late audio already taught it
+        pump.set_target(target)
+
+    async def check_windows_bt(self) -> None:
+        try:
+            self.windows_bt = await asyncio.to_thread(sonatina_winbt.windows_has_bluetooth)
+        except Exception as error:
+            log.debug("Windows Bluetooth check: %r", error)
+
+    # -- equalizer (M4) -----------------------------------------------------------
+    def _apply_eq(self) -> None:
+        if self.eq is None:
+            return
+        entry = self.s.headsets.get(self.peer or self.s.address or "", {}).get("eq")
+        gains = eq_gains(entry)
+        if gains != self.eq.gains:
+            self.eq.set(gains)
+            log.info("equalizer: %s", "off" if not any(gains) else
+                     f"{(entry or {}).get('preset')} {gains} (preamp {self.eq.preamp_db} dB)")
+
+    async def set_eq(self, address: str, on: bool | None = None, preset: str | None = None,
+                     custom: list | None = None) -> None:
+        """Remembered per headset; applied at once when it is the one playing."""
+        entry = self.s.headsets.setdefault(norm_addr(address), {})
+        eq: dict[str, Any] = dict(entry.get("eq") or {"on": False, "preset": "flat", "custom": [0] * len(EQ_FREQS)})
+        if on is not None:
+            eq["on"] = bool(on)
+        if preset is not None:
+            if preset != "custom" and preset not in EQ_PRESETS:
+                raise ValueError("preset")
+            if preset == "custom" and not any(eq.get("custom") or []) and eq.get("preset") in EQ_PRESETS:
+                eq["custom"] = list(EQ_PRESETS[eq["preset"]])   # start from what was playing
+            eq["preset"] = preset
+        if custom is not None:
+            eq["custom"] = eq_gains({"on": True, "preset": "custom", "custom": custom})
+        entry["eq"] = eq
+        self._changed()
+        if norm_addr(address) == (self.peer or self.s.address):
+            self._apply_eq()
+
+    async def set_low_latency(self, mode: str, apps: list[str] | None = None) -> None:
+        if mode not in sonatina_lowlat.MODES:
+            raise ValueError("mode")
+        self.s.low_latency_mode = mode
+        self.s.low_latency = mode == "on"              # 1.2 settings, tray tick
+        if apps is not None:
+            seen, clean = set(), []
+            for a in apps:
+                a = str(a).strip()
+                if a and a.lower() not in seen:
+                    seen.add(a.lower())
+                    clean.append(a)
+            self.s.low_latency_apps = clean[:20]
+        self._changed()
+        await self.lowlat.update()
 
     @staticmethod
     def _sink_names(protocol) -> list[str]:
@@ -540,7 +717,7 @@ class SonatinaHost:
         return names
 
     @staticmethod
-    def _codec_info(sink):
+    def _codec_info(sink) -> Any:
         if sink is None:
             return None
         for cap in sink.capabilities:
@@ -582,6 +759,12 @@ class SonatinaHost:
                                  " (headphones off or connected to another device?)"
                                  if "TIMEOUT" in reason.upper() else "")
                     backoff = min(backoff * 1.5, 20.0)
+                    if self.s.bt_conflict_check:
+                        try:
+                            await self.winlink.after_failure(self.s.address, failures,
+                                                             "TIMEOUT" in reason.upper())
+                        except Exception as check_error:
+                            log.debug("Windows link check: %r", check_error)
             elif self.connection is not None:
                 failures = 0
             await asyncio.sleep(backoff if self.connection is None else 2.0)
@@ -671,6 +854,11 @@ class SonatinaHost:
             entry["ldac_quality"] = ldac_quality
         self._changed()
         if self.connection is not None and self.peer == norm_addr(address):
+            if self.hfp.in_call:
+                log.info("codec change applied after the call")
+                return
+            if self.s.codec_switch_live and await self.switch_codec():
+                return
             self.output.expect_reconnect()
             await self.connection.disconnect()   # renegotiates with the new codec
 
@@ -686,7 +874,7 @@ class SonatinaHost:
         return (old == "off") != (mode == "off")
 
     async def set_option(self, name: str, value: bool) -> None:
-        """absolute_volume and low_latency need a reconnection to take effect, media_keys not."""
+        """absolute_volume and hfp_battery need a reconnection to take effect, the others not."""
         setattr(self.s, name, value)
         if name == "hfp_msbc" and value:   # asked again: give mSBC another chance everywhere
             for entry in self.s.headsets.values():
@@ -698,7 +886,10 @@ class SonatinaHost:
             self.output.option_changed()
         if name == "wifi_avoid":
             self.radio.option_changed()
-        if name in ("absolute_volume", "low_latency", "hfp_battery") and self.connection is not None:
+        if name == "low_latency":                   # live since 1.3.0 (M3)
+            await self.set_low_latency("on" if value else "off")
+            return
+        if name in ("absolute_volume", "hfp_battery") and self.connection is not None:
             self.output.expect_reconnect()
             await self.connection.disconnect()
 
@@ -773,7 +964,10 @@ class SonatinaHost:
                 "ldac_quality": quality, "supported": list(h.get("codecs", [])),
                 "preferred": address == self.s.address, "connected": address == self.peer,
                 "paired": address in self.paired, "msbc_broken": bool(h.get("msbc_broken")),
-                "battery": h.get("battery"), "battery_at": h.get("battery_at")})
+                "battery": h.get("battery"), "battery_at": h.get("battery_at"),
+                "eq": {"on": bool((h.get("eq") or {}).get("on")),
+                       "preset": (h.get("eq") or {}).get("preset", "flat"),
+                       "custom": list((h.get("eq") or {}).get("custom") or [0] * len(EQ_FREQS))}})
         last = self.volume.last
         apps = []
         if hf.watcher is not None:
@@ -791,14 +985,27 @@ class SonatinaHost:
             "pairing": self.pairing_target,
             "stream": None if enc is None else {
                 "codec": self.codec_in_use, "name": enc.name, "kbps": enc.kbps,
+                "levels": list(getattr(enc, "levels", ()) or ()),
+                "level": getattr(enc, "level", 0),
+                "ceiling": (self.pump.adapter.ceiling if self.pump is not None
+                            and self.pump.adapter is not None else getattr(enc, "level", 0)),
                 "latency_ms": self.latency_ms(), "headset_delay_ms": self.headset_delay_ms},
             "volume": {"percent": last[1] if last else None, "muted": bool(last and last[0]),
                        "absolute": bool(getattr(self.remote, "absolute", False))},
             "options": {k: bool(getattr(self.s, k)) for k in
                         ("absolute_volume", "low_latency", "media_keys", "hfp_msbc", "ldac_adaptive",
                          "auto_output", "pause_on_disconnect", "wifi_avoid", "hfp_battery",
-                         "mic_agc", "mic_gate")},
+                         "mic_agc", "mic_gate", "codec_switch_live", "bt_conflict_check",
+                         "cable_rename_hint", "setup_done")},
             "output": self.output.snapshot(),
+            "low_latency": self.lowlat.snapshot(),
+            "setup": {"done": bool(self.s.setup_done), "windows_bt": self.windows_bt},
+            "eq": None if self.eq is None else {
+                "freqs": list(EQ_FREQS), "presets": EQ_PRESETS, "gains": self.eq.gains,
+                "preamp_db": self.eq.preamp_db},
+            "conflict": None if not (self.winlink.conflict and self.winlink.conflict == self.s.address
+                                     and self.s.bt_conflict_check) else {
+                "address": self.winlink.conflict, "name": self.headset_name(self.winlink.conflict)},
             "battery": None if self.battery is None else {"percent": self.battery, "source": self.battery_source},
             "radio": self.radio.snapshot(),
             "mic": {"mode": self.s.hfp_mode, "msbc": bool(self.s.hfp_msbc), "cable": hf.mic_key,
@@ -859,6 +1066,7 @@ class SonatinaHost:
         return {"idle": tr("Sonatina: in attesa delle cuffie", "Sonatina: waiting for the headphones"),
                 "securing": tr("Sonatina: connessione...", "Sonatina: connecting..."),
                 "negotiating": tr("Sonatina: connessione...", "Sonatina: connecting..."),
+                "switching": tr("Sonatina: cambio codec...", "Sonatina: changing codec..."),
                 "error": tr("Sonatina: errore (vedi log)", "Sonatina: error (see the log)"),
                 }.get(self.state, f"Sonatina: {self.state}")
 
@@ -1028,6 +1236,8 @@ async def amain(settings: Settings, on_host=None, stats_to_log: bool = False) ->
         tasks = [asyncio.create_task(host.keep_connected()),
                  asyncio.create_task(host.output.run()),
                  asyncio.create_task(host.radio.run()),
+                 asyncio.create_task(host.lowlat.run()),
+                 asyncio.create_task(host.check_windows_bt()),
                  asyncio.create_task(host.follow_volume()),
                  asyncio.create_task(watch_capture(source)),
                  asyncio.create_task(host.hfp.run())]

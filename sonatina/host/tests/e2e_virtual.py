@@ -1,4 +1,4 @@
-import asyncio, logging, sys, time, struct
+import asyncio, logging, sys, struct
 sys.path.insert(0, __import__('os').path.join(__import__('os').path.dirname(__file__), '..'))
 import sonatina_host as sh
 from bumble import a2dp, avdtp
@@ -176,5 +176,6 @@ async def main():
     await run('ldac', with_ldac=False, with_aac=True, with_aptx=True)   # LDAC missing -> aptX HD
     await run('aptx', with_aac=True, with_aptx=True)
     aac_mtu_check()
-asyncio.run(main())
-print('E2E OK')
+if __name__ == '__main__':
+    asyncio.run(main())
+    print('E2E OK')

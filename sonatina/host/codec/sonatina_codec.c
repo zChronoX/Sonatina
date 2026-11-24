@@ -21,7 +21,7 @@
 #define SONT_API __attribute__((visibility("default")))
 #endif
 
-SONT_API int sont_codec_version(void) { return 6; }
+SONT_API int sont_codec_version(void) { return 7; }
 
 /* ------------------------------------------------------------------ LDAC */
 
@@ -106,6 +106,25 @@ SONT_API int sont_sbc_encode(void *h, const int16_t *pcm, unsigned samples_per_c
     return (int)w;
 }
 
+/* Adaptive quality (1.3.0): a new bitpool from the next frame on, the filter bank keeps
+ * its history (no click). Returns the new frame size in bytes, <0 when refused. */
+SONT_API int sont_sbc_set_bitpool(void *h, unsigned bitpool)
+{
+    SONT_SBC_PARAMS p;
+    memset(&p, 0, sizeof(p));
+    p.min_bitpool = 2;
+    p.max_bitpool = 250;
+    if (SontSbcSetBitpool((SONT_SBC_ENCODER *)h, &p, (uint8_t)bitpool) != 0) {
+        return -1;
+    }
+    p.sampling = 48000;
+    p.channel_mode = 3;
+    p.blocks = 16;
+    p.subbands = 8;
+    p.allocation = 1;
+    return (int)SontSbcEncodedFrameBytes(&p, (uint8_t)bitpool);
+}
+
 /* ------------------------------------------------------------------ AAC */
 
 /* AAC-LC in LATM (audioMuxVersion 0, StreamMuxConfig in every frame), the A2DP
@@ -168,6 +187,13 @@ SONT_API int sont_aac_get(void *h, unsigned what)
     case 2: return aacEncInfo(e, &info) == AACENC_OK ? (int)info.nDelay : -1;
     default: return -1;
     }
+}
+
+/* Adaptive quality (1.3.0): FDK takes a new bitrate at the next frame (configuration
+ * re-init only, the encoder states and the bit reservoir carry on). 0 ok, <0 refused. */
+SONT_API int sont_aac_set_bitrate(void *h, unsigned bitrate)
+{
+    return aacEncoder_SetParam((HANDLE_AACENCODER)h, AACENC_BITRATE, bitrate) == AACENC_OK ? 0 : -1;
 }
 
 /* pcm: `frames` frames of interleaved int16 (1024 per call keeps one AU out per call).
@@ -685,5 +711,143 @@ SONT_API float sont_voice_get(void *h, unsigned what)
     case 4: return v->out_peak;
     case 5: return v->limit;
     default: return 0.0f;
+    }
+}
+
+/* ------------------------------------------------------------------ equalizer (1.3.0) */
+
+/* 10 bands, 31 Hz .. 16 kHz, octave apart: low shelf, 8 peaking, high shelf (RBJ cookbook),
+ * float, stereo interleaved int16 in place. A preamp keeps boosts from clipping; whatever
+ * still goes over is soft-limited instead of wrapping. */
+#define SONT_EQ_BANDS 10
+static const float SONT_EQ_FREQ[SONT_EQ_BANDS] = {31.f, 62.f, 125.f, 250.f, 500.f,
+                                                   1000.f, 2000.f, 4000.f, 8000.f, 16000.f};
+typedef struct {
+    float b0, b1, b2, a1, a2;
+} SontBiquad;
+typedef struct {
+    float rate;
+    float gain_db[SONT_EQ_BANDS];
+    float preamp;              /* linear */
+    int active;                /* any band != 0 */
+    SontBiquad bq[SONT_EQ_BANDS];
+    float z[SONT_EQ_BANDS][2][2];   /* [band][channel][state] (transposed direct form II) */
+} SontEq;
+
+static void sont_eq_design(SontBiquad *f, int type, float rate, float freq, float gain_db)
+{
+    double A = pow(10.0, gain_db / 40.0);
+    double w0 = 2.0 * M_PI * (freq < rate * 0.45 ? freq : rate * 0.45) / rate;
+    double cw = cos(w0), sw = sin(w0);
+    double b0, b1, b2, a0, a1, a2;
+    if (type == 0 || type == 2) {          /* shelves, S = 1 */
+        double alpha = sw / 2.0 * sqrt(2.0);
+        double sA = 2.0 * sqrt(A) * alpha;
+        if (type == 0) {
+            b0 = A * ((A + 1) - (A - 1) * cw + sA);
+            b1 = 2 * A * ((A - 1) - (A + 1) * cw);
+            b2 = A * ((A + 1) - (A - 1) * cw - sA);
+            a0 = (A + 1) + (A - 1) * cw + sA;
+            a1 = -2 * ((A - 1) + (A + 1) * cw);
+            a2 = (A + 1) + (A - 1) * cw - sA;
+        } else {
+            b0 = A * ((A + 1) + (A - 1) * cw + sA);
+            b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+            b2 = A * ((A + 1) + (A - 1) * cw - sA);
+            a0 = (A + 1) - (A - 1) * cw + sA;
+            a1 = 2 * ((A - 1) - (A + 1) * cw);
+            a2 = (A + 1) - (A - 1) * cw - sA;
+        }
+    } else {                               /* peaking, one octave (Q 1.41) */
+        double alpha = sw / (2.0 * 1.41);
+        b0 = 1 + alpha * A;
+        b1 = -2 * cw;
+        b2 = 1 - alpha * A;
+        a0 = 1 + alpha / A;
+        a1 = -2 * cw;
+        a2 = 1 - alpha / A;
+    }
+    f->b0 = (float)(b0 / a0);
+    f->b1 = (float)(b1 / a0);
+    f->b2 = (float)(b2 / a0);
+    f->a1 = (float)(a1 / a0);
+    f->a2 = (float)(a2 / a0);
+}
+
+SONT_API void *sont_eq_create(unsigned rate)
+{
+    SontEq *e = (SontEq *)calloc(1, sizeof(SontEq));
+    int i;
+    if (!e) {
+        return NULL;
+    }
+    e->rate = (float)rate;
+    e->preamp = 1.0f;
+    for (i = 0; i < SONT_EQ_BANDS; i++) {
+        sont_eq_design(&e->bq[i], i == 0 ? 0 : (i == SONT_EQ_BANDS - 1 ? 2 : 1), e->rate,
+                       SONT_EQ_FREQ[i], 0.0f);
+    }
+    return e;
+}
+
+SONT_API void sont_eq_destroy(void *h) { free(h); }
+
+/* gains: SONT_EQ_BANDS values in dB (clamped to +-12); preamp_db: added to the automatic
+ * preamp (minus the biggest boost). Filter states are kept: no click on a change. */
+SONT_API void sont_eq_set(void *h, const float *gains, float preamp_db)
+{
+    SontEq *e = (SontEq *)h;
+    float top = 0.0f;
+    int i;
+    e->active = 0;
+    for (i = 0; i < SONT_EQ_BANDS; i++) {
+        float g = gains[i];
+        if (g > 12.0f) g = 12.0f;
+        if (g < -12.0f) g = -12.0f;
+        e->gain_db[i] = g;
+        if (g != 0.0f) e->active = 1;
+        if (g > top) top = g;
+        sont_eq_design(&e->bq[i], i == 0 ? 0 : (i == SONT_EQ_BANDS - 1 ? 2 : 1), e->rate,
+                       SONT_EQ_FREQ[i], g);
+    }
+    e->preamp = (float)pow(10.0, (preamp_db - top) / 20.0);
+    if (preamp_db != 0.0f) e->active = 1;
+}
+
+static inline int16_t sont_eq_out(float x)
+{
+    /* soft knee above 0.9 FS: tanh-like, never wraps */
+    float a = fabsf(x);
+    if (a > 29491.0f) {
+        float over = (a - 29491.0f) / 3276.0f;
+        a = 29491.0f + 3276.0f * over / (1.0f + over);
+        x = x < 0 ? -a : a;
+    }
+    return (int16_t)lrintf(x);
+}
+
+SONT_API void sont_eq_process(void *h, int16_t *pcm, unsigned frames)
+{
+    SontEq *e = (SontEq *)h;
+    unsigned n;
+    int c, i;
+    if (!e || !e->active) {
+        return;
+    }
+    for (n = 0; n < frames; n++) {
+        for (c = 0; c < 2; c++) {
+            float x = (float)pcm[2 * n + c] * e->preamp;
+            for (i = 0; i < SONT_EQ_BANDS; i++) {
+                SontBiquad *f = &e->bq[i];
+                float *z = e->z[i][c];
+                float y;
+                if (e->gain_db[i] == 0.0f) continue;
+                y = f->b0 * x + z[0];
+                z[0] = f->b1 * x - f->a1 * y + z[1];
+                z[1] = f->b2 * x - f->a2 * y;
+                x = y;
+            }
+            pcm[2 * n + c] = sont_eq_out(x);
+        }
     }
 }

@@ -58,6 +58,8 @@ VENDOR_CODECS = {
 CODEC_CHAIN = ["ldac", "aptx_hd", "aptx", "aac", "sbc"]
 CODEC_NAMES = {"ldac": "LDAC", "aptx_hd": "aptX HD", "aptx": "aptX", "aac": "AAC", "sbc": "SBC"}
 AAC_FRAME = 1024                      # samples per AAC access unit (one RTP packet)
+SBC_MIN_ADAPTIVE_BITPOOL = 24         # adaptive quality never goes below this (about 170 kbit/s)
+AAC_MIN_ADAPTIVE_BITRATE = 128000     # nor below this for AAC
 AAC_LATM_OVERHEAD = 16                # StreamMuxConfig + PayloadLengthInfo, rounded up
 SSRC = 0x534F4E54                     # "SONT"
 

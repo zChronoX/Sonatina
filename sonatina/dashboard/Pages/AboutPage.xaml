@@ -57,6 +57,48 @@
                 </StackPanel>
             </Border>
 
+            <!-- 1.3.0: notices (N2, N4) and the first-run guide (M6) -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource CardTitle}" Margin="0,0,0,8" Text="{l:Tr It='Avvisi e configurazione', En='Notices and setup'}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Cuffie collegate a Windows', En='Headphones connected to Windows'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Avvisa quando le cuffie sono collegate al Bluetooth di Windows invece che a Sonatina', En='Tells you when the headphones are connected to Windows’ Bluetooth instead of Sonatina'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="ConflictOption" Grid.Column="1" Tag="bt_conflict_check" Toggled="Option_Toggled" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Nome del cavo audio', En='Audio cable name'}" />
+                            <TextBlock x:Name="CableHint" Style="{StaticResource Hint}" Text="{l:Tr It='Propone di chiamarlo «Sonatina Audio» se Windows gli dà un altro nome', En='Offers to call it “Sonatina Audio” when Windows gives it another name'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="CableOption" Grid.Column="1" Tag="cable_rename_hint" Toggled="Option_Toggled" />
+                    </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <Grid ColumnSpacing="12" MinHeight="48">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Configurazione guidata', En='Guided setup'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Chiavetta, uscita audio, microfono e cuffie, un passo alla volta', En='Adapter, audio output, microphone and headphones, one step at a time'}" />
+                        </StackPanel>
+                        <Button x:Name="WizardButton" Grid.Column="1" Click="Wizard_Click" Content="{l:Tr It='Rivedi la configurazione', En='Review the setup'}" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="8">
                     <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Componenti open source', En='Open source components'}" />

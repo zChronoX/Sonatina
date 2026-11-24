@@ -1,0 +1,5 @@
+# Checks run by CI (M7, 1.3.0), not needed by Sonatina itself
+-r requirements.txt
+pytest==9.1.1
+ruff==0.16.9
+pyright==1.1.414

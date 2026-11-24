@@ -97,19 +97,24 @@ async def main():
 
 
 class FakeLdac:
-    def __init__(self, eqmid):
-        self.eqmid, self.kbps = eqmid, sh.LDAC_KBPS[eqmid]
+    name = "LDAC"
+    levels = (990, 660, 330)
 
-    def set_eqmid(self, eqmid):
-        self.eqmid, self.kbps = eqmid, sh.LDAC_KBPS[eqmid]
+    def __init__(self, eqmid):
+        self.level, self.kbps = eqmid, sh.LDAC_KBPS[eqmid]
+
+    def set_level(self, level):
+        self.level, self.kbps = level, sh.LDAC_KBPS[level]
         return True
 
 
 def adapter_check():
-    """Adaptive LDAC: down at once when audio waits for the radio, up again after a clean
-    stretch, never above the chosen quality; a failed step up makes the next wait longer."""
+    """Adaptive quality: down when audio waits for the radio for 0.5 s (or is lost), the
+    lowest step only with lost audio or a long queue, up again after a clean stretch, never
+    above the chosen quality; failed steps up make the next wait longer (up to 5 min), and
+    are forgotten after 10 quiet minutes (N3, 1.3.0)."""
     enc = FakeLdac(0)                                   # chosen: 990
-    a = sh.LdacAdapter(enc, 0.0)
+    a = sh.QualityAdapter(enc, 0.0)
     t = 0.0
 
     def run(seconds, queued, dropped=False):
@@ -119,34 +124,123 @@ def adapter_check():
             t += 0.25
             a.update(t, queued, dropped)
     run(5, 0.0)
-    assert enc.eqmid == 0                               # clean: stays at the ceiling
-    run(0.25, 0.1)
-    assert enc.eqmid == 1                               # 990 -> 660 at once
-    run(1.0, 0.1)
-    assert enc.eqmid == 1                               # at most one step per 2 s
-    run(1.5, 0.1)
-    assert enc.eqmid == 2                               # -> 330
+    assert enc.level == 0                               # clean: stays at the ceiling
+    run(0.25, 0.1); run(0.25, 0.0); run(0.25, 0.1); run(0.25, 0.0)
+    assert enc.level == 0                               # short spikes: no step (N3)
+    run(0.75, 0.1)
+    assert enc.level == 1                               # 0.5 s behind: 990 -> 660
+    run(5.0, 0.1)
+    assert enc.level == 1                               # 100 ms queue: not enough for 330
+    run(0.75, 0.2)
+    assert enc.level == 2                               # 200 ms queue: -> 330
     run(5, 0.0, dropped=True)
-    assert enc.eqmid == 2                               # bottom
+    assert enc.level == 2                               # bottom
     run(9.5, 0.0)
-    assert enc.eqmid == 2                               # not yet clean for 10 s
+    assert enc.level == 2                               # not yet clean for 10 s
     run(1.0, 0.0)
-    assert enc.eqmid == 1                               # 330 -> 660
-    run(3.0, 0.2)                                       # bad again soon: that try failed
-    assert enc.eqmid == 2 and a.failed_ups == 1
+    assert enc.level == 1                               # 330 -> 660
+    run(3.0, 0.0, dropped=True)                         # bad again soon: that try failed
+    assert enc.level == 2 and a.failed_ups == 1
     run(20, 0.0)
-    assert enc.eqmid == 2                               # now it waits 30 s
+    assert enc.level == 2                               # now it waits 30 s
     run(15, 0.0)
-    assert enc.eqmid == 1
+    assert enc.level == 1
     run(70, 0.0)
-    assert enc.eqmid == 0                               # back to the ceiling...
+    assert enc.level == 0                               # back to the ceiling...
     run(300, 0.0)
-    assert enc.eqmid == 0                               # ...and never above it
-    b = sh.LdacAdapter(FakeLdac(1), 0.0)                # chosen 660: never 990
+    assert enc.level == 0                               # ...and never above it
+    # repeated failed tries: waits grow to 5 minutes, then are forgiven slowly
+    for _ in range(5):
+        run(0.25, 0.0, dropped=True)                    # down
+        while enc.level != 0 and enc.level > a.ceiling:
+            run(1.0, 0.0)
+            if enc.level < 2 and a.last_up == t:
+                run(1.0, 0.0, dropped=True)             # fails at once
+                break
+    assert a.failed_ups == 4, a.failed_ups
+    assert a.UP_AFTER_S[a.failed_ups] == 300.0
+    a.trouble_free_since = t
+    lvl = enc.level
+    run(299, 0.0)
+    assert enc.level == lvl                             # waits the full 5 minutes
+    run(2, 0.0)
+    assert enc.level == lvl - 1
+    run(600, 0.0)
+    assert a.failed_ups == 3                            # 10 quiet minutes: one try forgiven
+    b = sh.QualityAdapter(FakeLdac(1), 0.0)             # chosen 660: never 990
     for k in range(2000):
         b.update(k * 0.25, 0.0, False)
-    assert b.encoder.eqmid == 1 and b.steps == 0
-    print(f"adaptive LDAC: {a.steps} steps, failed ups {a.failed_ups}")
+    assert b.encoder.level == 1 and b.steps == 0
+    b.set_ceiling(2, 600.0)                             # the user picks 330 while streaming
+    assert b.encoder.level == 2 and b.ceiling == 2
+    print(f"adaptive quality: {a.steps} steps, failed ups {a.failed_ups}")
+    sbc_aac_check()
+
+
+def sbc_aac_check():
+    """SBC and AAC change their bitrate mid-stream too; the audio stays a clean tone
+    (750 Hz: exactly 2 cycles per 128-sample push, so the repeated block is continuous)."""
+    import array, math, shutil, struct, subprocess
+    lib = sh.CodecLib()
+    tone = b"".join(struct.pack("<hh", v, v) for v in
+                    (int(8000 * math.sin(2 * math.pi * 750 * i / sh.RATE)) for i in range(128)))
+    sbc = sh.SbcEncoder(lib, 53, 679)
+    assert sbc.levels[0] > sbc.levels[1] > sbc.levels[2] and len(sbc.levels) == 3, sbc.levels
+    frames = []
+    for level in (0, 1, 2, 1, 0):
+        assert sbc.set_level(level) and sbc.kbps == sbc.levels[level]
+        for _ in range(200):
+            for payload, _n in sbc.push(tone):
+                frames.append(payload[1:])
+    sbc.close()
+    stream = b"".join(frames)
+    if shutil.which("ffmpeg"):
+        pcm = subprocess.run(["ffmpeg", "-v", "error", "-f", "sbc", "-i", "-", "-f", "s16le", "-ac", "1", "-"],
+                             input=stream, capture_output=True, check=True).stdout
+        x = array.array("h"); x.frombytes(pcm)
+        crossings, low = 0, False          # with hysteresis: codec noise near zero is not a cycle
+        for v in x:
+            if v < -2000:
+                low = True
+            elif v > 2000 and low:
+                crossings, low = crossings + 1, False
+        freq = crossings * sh.RATE / len(x)
+        peak = max(abs(v) for v in x[len(x) // 10:])
+        print(f"SBC levels {sbc.levels}: decoded {len(x) / sh.RATE:.2f} s, {freq:.0f} Hz")
+        assert 745 < freq < 755 and 7000 < peak < 9500 and len(x) > 0.9 * 1000 * 128, (freq, peak, len(x))
+    aac = sh.AacEncoder(lib, 320000, 2048)
+    assert aac.levels == (320, 240, 160), aac.levels
+    sizes = {}
+    payloads = []
+    for level in (0, 2, 0):
+        assert aac.set_level(level)
+        got = []
+        for _ in range(1500):
+            out = aac.push(tone)
+            payloads += [p for p, _n in out]
+            got += [len(p) for p, _n in out]
+        sizes.setdefault(level, []).append(sum(got[20:]) / max(1, len(got) - 20))
+    aac.close()
+    if shutil.which("ffmpeg"):
+        from bumble.codecs import AacAudioRtpPacket
+        adts = b"".join(AacAudioRtpPacket.from_bytes(pl).to_adts() for pl in payloads)
+        pcm = subprocess.run(["ffmpeg", "-v", "error", "-f", "aac", "-i", "-", "-f", "s16le", "-ac", "1", "-"],
+                             input=adts, capture_output=True, check=True)
+        x = array.array("h"); x.frombytes(pcm.stdout)
+        x = x[4096:]
+        crossings, low = 0, False
+        for v in x:
+            if v < -2000:
+                low = True
+            elif v > 2000 and low:
+                crossings, low = crossings + 1, False
+        freq = crossings * sh.RATE / len(x)
+        print(f"AAC across bitrate changes: decoded {len(x) / sh.RATE:.2f} s, {freq:.1f} Hz, "
+              f"errors {pcm.stderr[:80]!r}")
+        assert 745 < freq < 755 and not pcm.stderr, (freq, pcm.stderr[:200])
+    print(f"AAC levels {aac.levels}: bytes/frame {sizes}")
+    assert sizes[2][0] < sizes[0][0] * 0.75, sizes
+
     # the real encoder changes quality mid-stream (packets get smaller, nothing breaks)
     import math
     import struct
@@ -160,7 +254,7 @@ def adapter_check():
             total += sum(len(p) for p, _n in enc.push(tone))
         return total * sh.RATE / (pushes * 128) * 8 / 1000
     hq = bytes_per_s(1500)
-    assert enc.set_eqmid(2) and enc.kbps == 330
+    assert enc.levels == (990, 660, 330) and enc.set_level(2) and enc.kbps == 330
     bytes_per_s(400)                                    # libldac moves over a few frames
     mq = bytes_per_s(1500)
     enc.close()

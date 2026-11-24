@@ -99,7 +99,7 @@ async def reconnect_log_test():
         raise BtConnectionError(0x04, 0, 'x', 'hci', 'HCI_PAGE_TIMEOUT_ERROR')
 
     fake = types.SimpleNamespace(discovering=False, pairing_target=None, connection=None,
-                                 s=types.SimpleNamespace(address='AA'), headset_name=lambda a: 'CMF',
+                                 s=types.SimpleNamespace(address='AA', bt_conflict_check=False), headset_name=lambda a: 'CMF',
                                  device=types.SimpleNamespace(connect=connect))
     real_sleep, real_mono = sh.asyncio.sleep, sh.time.monotonic
 

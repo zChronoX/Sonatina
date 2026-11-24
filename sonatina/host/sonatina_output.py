@@ -103,6 +103,7 @@ class OutputSwitcher:
         self.outputs: list[Endpoint] = []  # active real (non virtual) outputs, for the menus
         self.default: Endpoint | None = None
         self.switched: Endpoint | None = None   # where we sent Windows when the headphones went
+        self.cable_name: str | None = None      # Windows' name of the cable Sonatina plays from
         self.started = clock()
         self.was_ready = False
         self.link_up = False
@@ -195,6 +196,7 @@ class OutputSwitcher:
         self._remember(self.default)
         auto = bool(self.s.auto_output)
         cable = self._cable(endpoints)
+        self.cable_name = None if cable is None else cable.name
         on_cable = self.default is not None and cable is not None and self._is_cable(self.default)
         on_mic = self.default is not None and is_mic_cable(self.default.name)
         if due == "cable" or (on_mic and (self.ready_now() or not auto)):
@@ -289,7 +291,75 @@ class OutputSwitcher:
             "switched": None if self.switched is None else self.switched.name,
             "outputs": [{"id": e.id, "name": e.name} for e in self.outputs],
             "error": self.last_error,
+            "cable_name": self.cable_name,
+            "cable_renamed": cable_renamed(self.cable_name),
+            "cable_hint": bool(self.s.cable_rename_hint) and not cable_renamed(self.cable_name),
         }
+
+
+# -- N4 (1.3.0): the cable gets its own name ------------------------------------------
+# A VB-CABLE reinstall can bring it back as "Speakers (2- VB-Audio Virtual Cable)"
+# ("Altoparlanti" in Italian), easy to take for the real speakers (2026-11-22). Its
+# description becomes "Sonatina Audio"; Windows keeps the driver part in brackets, which is
+# what Sonatina matches, so nothing else changes. Writing an endpoint property needs
+# administrator rights: the installer does it, or Sonatina.exe --rename-cable elevated.
+CABLE_NAME = "Sonatina Audio"
+PKEY_DEVICE_DESC = ("{a45c254e-df1c-4efd-8020-67d146a850e0}", 2)
+STGM_READWRITE = 2
+
+
+def cable_renamed(name: str | None) -> bool:
+    """True when there is nothing to suggest (renamed already, or no cable found)."""
+    return name is None or name.lower().startswith(CABLE_NAME.lower())
+
+
+def rename_cable(match: str = "VB-Audio Virtual Cable", new_name: str = CABLE_NAME) -> str:
+    """Sets the description of the stereo cable endpoint (admin). Returns the old name."""
+    from comtypes import GUID
+    from comtypes.automation import VT_LPWSTR
+    from pycaw.api.mmdeviceapi.depend.structures import PROPERTYKEY, PROPVARIANT
+    from pycaw.constants import DEVICE_STATE, EDataFlow
+    from pycaw.pycaw import AudioUtilities
+
+    from sonatina_audio import pick_cable_output
+    from sonatina_common import com_init
+
+    com_init()
+    enumerator = AudioUtilities.GetDeviceEnumerator()
+    endpoints = enumerator.EnumAudioEndpoints(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+    devs = [endpoints.Item(i) for i in range(endpoints.GetCount())]
+    names = [AudioUtilities.CreateDevice(d).FriendlyName or "" for d in devs]
+    index = pick_cable_output(names, match)
+    if index is None:
+        raise RuntimeError(f'no playback endpoint matching "{match}" (is VB-CABLE installed?)')
+    if cable_renamed(names[index]):
+        return names[index]
+    store = devs[index].OpenPropertyStore(STGM_READWRITE)
+    key = PROPERTYKEY()
+    key.fmtid = GUID(PKEY_DEVICE_DESC[0])
+    key.pid = PKEY_DEVICE_DESC[1]
+    value = PROPVARIANT()
+    value.vt = VT_LPWSTR
+    value.union.pwszVal = new_name
+    store.SetValue(key, value)
+    store.Commit()
+    log.info('cable "%s" renamed "%s"', names[index], new_name)
+    return names[index]
+
+
+def rename_cable_elevated() -> bool:
+    """Starts Sonatina again as administrator (UAC prompt) just to rename the cable."""
+    import ctypes
+    import os
+    if sys.platform != "win32":
+        return False
+    if getattr(sys, "frozen", False):
+        exe, params = sys.executable, "--rename-cable"
+    else:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sonatina_tray.py")
+        exe, params = sys.executable, f'"{script}" --rename-cable'
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 0)
+    return result > 32       # <= 32: refused (UAC "No") or failed
 
 
 def is_cable(settings, endpoint: Endpoint) -> bool:

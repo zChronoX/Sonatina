@@ -7,10 +7,18 @@
     NavigationCacheMode="Required">
     <ScrollViewer>
         <StackPanel Spacing="16" Padding="24,8,24,32">
-            <StackPanel Spacing="4" Padding="0,8,0,4">
-                <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Qualità audio', En='Audio quality'}" />
-                <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Il codec scelto è ricordato per ogni cuffia. Se non va, Sonatina passa al successivo.', En='The chosen codec is remembered for each pair of headphones. If it does not work, Sonatina moves to the next one.'}" />
-            </StackPanel>
+            <Grid Padding="0,8,0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="{l:Tr It='Qualità audio', En='Audio quality'}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Codec ed equalizzatore sono ricordati per ogni cuffia. Se un codec non va, Sonatina passa al successivo.', En='Codec and equalizer are remembered for each pair of headphones. If a codec does not work, Sonatina moves to the next one.'}" />
+                </StackPanel>
+                <ComboBox x:Name="HeadsetBox" Grid.Column="1" MinWidth="220" VerticalAlignment="Top"
+                          Header="{l:Tr It='Cuffie', En='Headphones'}" SelectionChanged="HeadsetBox_SelectionChanged" />
+            </Grid>
 
             <!-- now -->
             <Border Style="{StaticResource Card}">
@@ -38,14 +46,7 @@
             <!-- codec -->
             <Border Style="{StaticResource Card}">
                 <StackPanel Spacing="12">
-                    <Grid ColumnSpacing="12">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Style="{StaticResource CardTitle}" VerticalAlignment="Center" Text="{l:Tr It='Codec preferito', En='Preferred codec'}" />
-                        <ComboBox x:Name="HeadsetBox" Grid.Column="1" MinWidth="220" SelectionChanged="HeadsetBox_SelectionChanged" />
-                    </Grid>
+                    <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Codec preferito', En='Preferred codec'}" />
                     <StackPanel x:Name="CodecList" Spacing="2" />
                     <Grid x:Name="LdacRow" ColumnSpacing="12">
                         <Grid.ColumnDefinitions>
@@ -64,28 +65,65 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="{l:Tr It='LDAC adattivo', En='Adaptive LDAC'}" />
-                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Se la radio non regge (cuffie lontane, Wi-Fi a 2,4 GHz vicino) scende a 660 o 330 kbit/s e poi risale da solo, mai sopra la qualità scelta', En='When the radio cannot keep up (headphones far away, 2.4 GHz Wi-Fi nearby) it drops to 660 or 330 kbit/s and comes back by itself, never above the chosen quality'}" />
+                            <TextBlock Text="{l:Tr It='Qualità adattiva', En='Adaptive quality'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Se la radio non regge (cuffie lontane, Wi-Fi a 2,4 GHz vicino) scende di un gradino e poi risale da sola, mai sopra la qualità scelta. LDAC 990 → 660 → 330, SBC e AAC con meno kbit/s.', En='When the radio cannot keep up (headphones far away, 2.4 GHz Wi-Fi nearby) it steps down and comes back by itself, never above the chosen quality. LDAC 990 → 660 → 330, SBC and AAC with fewer kbit/s.'}" />
+                            <TextBlock x:Name="AdaptiveNow" Style="{StaticResource Hint}" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
                         </StackPanel>
                         <ToggleSwitch x:Name="Adaptive" Grid.Column="1" Toggled="Adaptive_Toggled" />
                     </Grid>
-                    <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Cambiando codec le cuffie si ricollegano per un attimo.', En='Changing the codec makes the headphones reconnect for a moment.'}" />
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="{l:Tr It='Cambio codec senza scollegare', En='Change codec without disconnecting'}" />
+                            <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='La musica si ferma meno di un secondo e le cuffie restano collegate. Spento: si ricollegano (qualche secondo).', En='Music stops for less than a second and the headphones stay connected. Off: they reconnect (a few seconds).'}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="LiveSwitch" Grid.Column="1" Tag="codec_switch_live" Toggled="Option_Toggled" />
+                    </Grid>
                 </StackPanel>
             </Border>
 
-            <!-- latency -->
+            <!-- low latency (M3) -->
             <Border Style="{StaticResource Card}">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="{l:Tr It='Bassa latenza', En='Low latency'}" />
-                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Buffer più piccoli per giochi e video. Se senti interruzioni, spegnila.', En='Smaller buffers for games and video. If you hear dropouts, turn it off.'}" />
+                <StackPanel Spacing="14">
+                    <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Bassa latenza', En='Low latency'}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{l:Tr It='Buffer più piccoli: il suono arriva prima (giochi, video), ma con più rischio di interruzioni. Cambia al volo, senza ricollegare le cuffie.', En='Smaller buffers: sound arrives sooner (games, video), with more risk of dropouts. Changes on the fly, without reconnecting the headphones.'}" />
+                    <l:Segmented x:Name="LatencyMode" />
+                    <StackPanel x:Name="AppsPanel" Spacing="10">
+                        <TextBlock FontWeight="SemiBold" Text="{l:Tr It='Attiva quando è aperta una di queste app', En='On while one of these apps is open'}" />
+                        <l:WrapPanel x:Name="AppChips" Spacing="8" />
+                        <TextBlock x:Name="NoApps" Style="{StaticResource Hint}" Text="{l:Tr It='Nessuna app scelta: aggiungine una qui sotto.', En='No app chosen: add one below.'}" />
+                        <TextBlock Style="{StaticResource Hint}" Text="{l:Tr It='Aggiungi un’app aperta adesso (quelle che hanno l’audio aperto):', En='Add an app open now (the ones with audio open):'}" />
+                        <l:WrapPanel x:Name="RunningApps" Spacing="8" />
                     </StackPanel>
-                    <ToggleSwitch x:Name="LowLatency" Grid.Column="1" Toggled="LowLatency_Toggled" />
-                </Grid>
+                    <Rectangle Style="{StaticResource Divider}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Ellipse x:Name="LatencyDot" Width="8" Height="8" VerticalAlignment="Center" />
+                        <TextBlock x:Name="LatencyNow" Style="{StaticResource Secondary}" VerticalAlignment="Center" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- equalizer (M4) -->
+            <Border x:Name="EqCard" Style="{StaticResource Card}">
+                <StackPanel Spacing="14">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource CardTitle}" Text="{l:Tr It='Equalizzatore', En='Equalizer'}" />
+                            <TextBlock x:Name="EqFor" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="EqSwitch" Grid.Column="1" Toggled="EqSwitch_Toggled" />
+                    </Grid>
+                    <l:Segmented x:Name="EqPresets" />
+                    <Grid x:Name="EqBands" ColumnSpacing="8" />
+                    <TextBlock x:Name="EqHint" Style="{StaticResource Hint}" />
+                </StackPanel>
             </Border>
         </StackPanel>
     </ScrollViewer>

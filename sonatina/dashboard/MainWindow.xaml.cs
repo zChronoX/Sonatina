@@ -23,7 +23,10 @@ public sealed partial class MainWindow : Window
         ["mic"] = typeof(MicPage),
         ["diagnostics"] = typeof(DiagnosticsPage),
         ["about"] = typeof(AboutPage),
+        ["wizard"] = typeof(WizardPage),   // not in the menu: first run, or Informazioni
     };
+
+    private bool _setupChecked;
 
     /// <summary>Last status received ({"app":..,"host":..}); null while not connected.</summary>
     public JsonObject? Last { get; private set; }
@@ -101,6 +104,14 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>The setup guide (M6) in place of the pages; the menu shows no selection.</summary>
+    public void ShowWizard()
+    {
+        Nav.SelectedItem = null;
+        if (ContentFrame.CurrentSourcePageType != typeof(WizardPage))
+            ContentFrame.Navigate(typeof(WizardPage));
+    }
+
     private void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItemContainer?.Tag is string tag && PageTypes.TryGetValue(tag, out var type)
@@ -119,6 +130,7 @@ public sealed partial class MainWindow : Window
     {
         Last = status;
         OfflineBar.IsOpen = false;
+        CheckFirstRun(status);
         if (ContentFrame.Content is IStatusView view)
         {
             try
@@ -130,6 +142,22 @@ public sealed partial class MainWindow : Window
                 Log.Write("update: " + error);
             }
         }
+    }
+
+    /// <summary>First run (nothing paired yet): the setup guide opens by itself, once. An
+    /// existing installation updated to 1.3.0 just marks it done (Informazioni reopens it).</summary>
+    private void CheckFirstRun(JsonObject status)
+    {
+        if (_setupChecked || Status.Host(status) is null || J.At(status, "host", "setup") is not JsonObject)
+            return;
+        _setupChecked = true;
+        if (J.B(status, "host", "setup", "done"))
+            return;
+        bool paired = J.A(status, "host", "headsets").Any(h => J.B(h, "paired"));
+        if (paired)
+            _ = Ui.Run("set_option", new JsonObject { ["name"] = "setup_done", ["value"] = true });
+        else
+            ShowWizard();
     }
 
     private void OnConnection(bool up)

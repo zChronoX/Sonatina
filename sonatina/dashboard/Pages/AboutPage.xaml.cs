@@ -30,6 +30,10 @@ public sealed partial class AboutPage : Page, IStatusView
                                 $"Version {J.S(s, "app", "version") ?? "?"} · window {DashboardVersion()}");
             Autostart.IsOn = J.B(s, "app", "autostart");
             LogPath.Text = J.S(s, "app", "log") ?? "";
+            bool host = Status.Host(s) is not null;
+            ConflictOption.IsOn = J.B(s, "host", "options", "bt_conflict_check");
+            CableOption.IsOn = J.B(s, "host", "options", "cable_rename_hint");
+            ConflictOption.IsEnabled = CableOption.IsEnabled = host;
         }
         finally
         {
@@ -44,4 +48,13 @@ public sealed partial class AboutPage : Page, IStatusView
     }
 
     private async void OpenLog_Click(object sender, RoutedEventArgs e) => await Ui.Run("open_log");
+
+    private async void Option_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_updating || sender is not ToggleSwitch toggle)
+            return;
+        await Ui.Run("set_option", new JsonObject { ["name"] = (string)toggle.Tag, ["value"] = toggle.IsOn });
+    }
+
+    private void Wizard_Click(object sender, RoutedEventArgs e) => App.Shell?.ShowWizard();
 }
